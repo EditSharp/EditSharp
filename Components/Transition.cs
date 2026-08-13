@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Text;
 
-namespace EditSharp.Editing
+namespace EditSharp.Components
 {
     public class Transition
     {

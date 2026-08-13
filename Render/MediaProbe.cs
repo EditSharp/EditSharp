@@ -1,4 +1,3 @@
-using EditSharp;
 using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -7,7 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 
-namespace EditSharp.Assembly
+namespace EditSharp.Render
 {
     /// <summary>
     /// Everything the assembler needs to know about a media file, read in ONE

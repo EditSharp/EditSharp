@@ -1,9 +1,8 @@
 using System;
 using System.Threading.Tasks;
 using EditSharp.Components;
-using EditSharp.Render;
 
-namespace EditSharp.Assembly
+namespace EditSharp.Render
 {
     /// <summary>
     /// Answers "how long is this source?" — both the raw file length and the

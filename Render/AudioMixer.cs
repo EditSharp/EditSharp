@@ -4,7 +4,7 @@ using System.Linq;
 using EditSharp.Components;
 using EditSharp.Components.Clips;
 
-namespace EditSharp.Assembly
+namespace EditSharp.Render
 {
     /// <summary>
     /// Mixes every clip's audio into the timeline's single audio stream.

@@ -2,11 +2,12 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using EditSharp.Assembly;
 using EditSharp.Components;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Effects;
 
-namespace EditSharp.Assembly
+namespace EditSharp.Render
 {
     /// <summary>
     /// Composites one channel's clips onto the running timeline accumulator.

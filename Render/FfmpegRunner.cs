@@ -1,4 +1,3 @@
-using EditSharp;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -6,9 +5,9 @@ using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using static EditSharp.Render.GraphUtilities;
-using EditSharp.Render;
+using EditSharp.Assembly;
 
-namespace EditSharp.Assembly
+namespace EditSharp.Render
 {
     /// <summary>
     /// Step 4 of the assembly pipeline: run ffmpeg directly via Process (no

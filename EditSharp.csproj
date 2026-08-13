@@ -1,7 +1,7 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>EditSharp</RootNamespace>
@@ -14,5 +14,9 @@
     <Version>0.1.0</Version>
     <Description>C#/ffmpeg timeline video (and, eventually, image) editing pipeline.</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SkiaSharp" Version="4.151.1" />
+  </ItemGroup>
 
 </Project>
