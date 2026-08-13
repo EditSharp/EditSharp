@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>EditSharp</RootNamespace>
+    <AssemblyName>EditSharp</AssemblyName>
+
+    <!-- Packable from day one so "publish to a feed" is a `dotnet pack` away
+         once there's a second consumer, without touching the project file. -->
+    <IsPackable>true</IsPackable>
+    <PackageId>EditSharp</PackageId>
+    <Version>0.1.0</Version>
+    <Description>C#/ffmpeg timeline video (and, eventually, image) editing pipeline.</Description>
+  </PropertyGroup>
+
+</Project>
