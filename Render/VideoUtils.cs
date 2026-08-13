@@ -1,3 +1,4 @@
+using EditSharp;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -78,6 +79,118 @@ namespace EditSharp.Render
                 Path = outputPath,
             };
         }
+
+        /// <summary>
+        /// Re-encodes a source's video stream to a different codec via a single
+        /// ffmpeg process — decode input, encode output, no filter graph, no
+        /// audio. Built for OptimizedMediaBuilder: producing a lossless,
+        /// frame-exact-seekable intermediate ahead of a frame-by-frame render,
+        /// so per-frame compositor processes never have to decode the ORIGINAL
+        /// source (with its own codec, GOP structure, and frame rate)
+        /// themselves.
+        ///
+        /// Unlike AddTrimmedInput's use in MuxAudioVideoAsync, the input seek
+        /// here IS frame-accurate. -ss before -i only lands on the nearest
+        /// keyframe when the stream is stream-copied — there's nothing to trim
+        /// mid-GOP without decoding. This method re-encodes, so ffmpeg decodes
+        /// forward from the nearest keyframe to the exact requested timestamp
+        /// before the encoder ever sees a frame.
+        ///
+        /// Only VideoCodec.FFV1 has a pixel format wired up (rgba64le) — see
+        /// PixelFormatFor. Other codecs fall back to whatever ffmpeg negotiates
+        /// on its own; there's no current caller that needs them.
+        /// </summary>
+        public static async Task<string> ReencodeVideoAsync(Source source, VideoCodec codec)
+        {
+            if (source.Type != SourceType.Video)
+                throw new ArgumentException($"'{source.Path}' is not a Video source.", nameof(source));
+
+            if (!File.Exists(source.Path))
+                throw new FileNotFoundException($"Input not found: {source.Path}", source.Path);
+
+            if (!Constants.VideoCodecNames.TryGetValue(codec, out string? encoderName))
+                throw new NotSupportedException($"ReencodeVideoAsync has no encoder mapping for {codec}.");
+
+            string extension = ContainerExtensionFor(codec);
+            string outputPath = GraphUtilities.GetVideoTempFilePath($"reencode_{Guid.NewGuid():N}.{extension}");
+
+            var args = new List<string> { "-y", "-v", "error" };
+
+            AddTrimmedInput(args, source);
+
+            args.Add("-c:v");
+            args.Add(encoderName);
+
+            string? pixelFormat = PixelFormatFor(codec);
+            if (pixelFormat != null)
+            {
+                args.Add("-pix_fmt");
+                args.Add(pixelFormat);
+            }
+
+            //video only — this exists to build optimized media for the
+            //frame-by-frame compositor step, which never touches audio; the
+            //whole timeline's audio is still mixed separately, once, in
+            //AudioMixer
+            args.Add("-an");
+            args.Add(outputPath);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = EditSharpConfig.FfmpegPath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (string arg in args) psi.ArgumentList.Add(arg);
+
+            using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            var stderr = new StringBuilder();
+            process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
+
+            process.Start();
+            process.BeginErrorReadLine();
+            process.BeginOutputReadLine();
+            await process.WaitForExitAsync();
+
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException(
+                    $"ffmpeg exited with code {process.ExitCode}:\n{stderr}");
+
+            return outputPath;
+        }
+
+        /// <summary>
+        /// The pixel format optimized media is built at for a given codec.
+        /// Only FFV1 has one wired up: rgba64le, confirmed to be accepted
+        /// cleanly by every filter the frame-by-frame render's per-frame
+        /// compositor chain uses (perspective, alphamerge/alphaextract,
+        /// colorchannelmixer, fillborders, xfade, overlay, pad), and chosen
+        /// over 8-bit rgba to remove any accumulated-rounding concern from
+        /// splitting what used to be one filter_complex into many independent
+        /// per-frame processes. Returns null for codecs with no forced pixel
+        /// format, in which case ffmpeg negotiates one on its own.
+        /// </summary>
+        private static string? PixelFormatFor(VideoCodec codec) => codec switch
+        {
+            VideoCodec.FFV1 => "rgba64le",
+            _ => null,
+        };
+
+        /// <summary>
+        /// Container extension for a re-encoded codec's output file. FFV1
+        /// needs a real container — matroska is the standard pairing and
+        /// supports frame-exact seeking on an intra-only codec like FFV1 with
+        /// no GOP-distance cost, which is the entire point of building this
+        /// intermediate in the first place.
+        /// </summary>
+        private static string ContainerExtensionFor(VideoCodec codec) => codec switch
+        {
+            VideoCodec.FFV1 => "mkv",
+            VideoCodec.GIF => "gif",
+            _ => "mp4",
+        };
 
         /// <summary>
         /// Adds a source's -i, with -ss/-t placed BEFORE it when Source.Start or

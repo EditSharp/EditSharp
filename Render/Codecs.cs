@@ -10,6 +10,7 @@ namespace EditSharp.Render
         H265,
         AV1,
         GIF,
+        FFV1,
     }
 
     public enum AudioCodec

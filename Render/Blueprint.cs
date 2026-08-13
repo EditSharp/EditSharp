@@ -29,6 +29,9 @@ namespace EditSharp
         //whether to decode media on the gpu and how
         public HardwareDecoder HardwareDecoder { get; set; } = HardwareDecoder.Cuda;
 
+        //how many sources can have their optimized media built concurrently
+        public int ExtractionConcurrency { get; set; } = 3;
+
         //path to where output should be rendered
         public required string OutputDirectory { get; set; }
     }

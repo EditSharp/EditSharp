@@ -1,8 +1,7 @@
 using System.Collections.Generic;
 using EditSharp.Components;
-using EditSharp.Render;
 
-namespace EditSharp.Assembly
+namespace EditSharp.Render
 {
     /// <summary>
     /// Shared lookup tables used across the assembly pipeline: ffmpeg's xfade
@@ -80,6 +79,7 @@ namespace EditSharp.Assembly
             [VideoCodec.H265] = "libx265",
             [VideoCodec.AV1] = "libaom-av1",
             [VideoCodec.GIF] = "gif",
+            [VideoCodec.FFV1] = "ffv1",
         };
 
         // NVENC uses different encoder names than the software libraries above.
