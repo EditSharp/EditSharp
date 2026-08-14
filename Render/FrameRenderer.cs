@@ -121,27 +121,24 @@ namespace EditSharp.Render
 
         /// <summary>
         /// Renders every output frame, up to FrameRenderConcurrency at once, and
-        /// flushes each one to the accumulator STRICTLY in order.
+        /// writes each one to the accumulator STRICTLY in order.
         ///
-        /// Frames can finish rendering out of order once more than one is in
-        /// flight, but two things both require frame i to be fully settled
-        /// before frame i+1 is acted on: the accumulator is a headerless raw
-        /// stream with no per-frame timestamps, so writes must land in order;
-        /// and a clip's optimized media must not be deleted until every frame
-        /// that could still need it — up to and including its DeleteAfterFrame
-        /// — has actually finished rendering, not merely been scheduled. Both
-        /// requirements reduce to the same thing: only flush (write + fire
-        /// deletions for) frame i once frames 0..i have ALL completed.
-        /// Buffering completed-but-not-yet-flushed frames here and draining
-        /// them in order, rather than acting the moment a frame's own render
-        /// finishes, is what keeps that true regardless of completion order.
-        ///
-        /// At FrameRenderConcurrency=1 the semaphore admits exactly one render
-        /// at a time, so `completed` never holds more than the frame currently
-        /// being flushed — behaviour is identical in shape to a plain
-        /// sequential loop, just with the flush/logging/deletion bookkeeping
-        /// factored out so raising concurrency later doesn't change this
-        /// method's contract.
+        /// Every frame's task is launched immediately; the SemaphoreSlim inside
+        /// RenderOneAsync is what actually bounds how many are mid-render at
+        /// once, not this method. Frames can finish rendering out of order once
+        /// more than one is in flight, but two things both require frame i to
+        /// be fully settled before frame i+1 is acted on: the accumulator is a
+        /// headerless raw stream with no per-frame timestamps, so writes must
+        /// land in order; and a clip's optimized media must not be deleted
+        /// until every frame that could still need it — up to and including its
+        /// DeleteAfterFrame — has actually finished rendering, not merely been
+        /// scheduled. Awaiting frameTasks[frameIndex] in a plain increasing loop
+        /// satisfies both for free, and — just as importantly — surfaces a
+        /// fault on any frame the moment that frame's turn comes up. An earlier
+        /// version of this method buffered completions into a side dictionary
+        /// and only reached its final Task.WhenAll after every frame had been
+        /// LAUNCHED, which meant a frame 0 exception sat unobserved for the
+        /// entire render and looked identical to a hang.
         /// </summary>
         private static async Task RenderAllFramesAsync(
             Timeline timeline, int fps, int width, int height,
@@ -154,24 +151,26 @@ namespace EditSharp.Render
             Stream accumulator, ConcurrentBag<string> tempFiles)
         {
             using var gate = new SemaphoreSlim(Math.Max(1, concurrency));
-
-            var completed = new Dictionary<int, byte[]>();
-            var completionLock = new object();
-            int nextToFlush = 0;
+            var frameTasks = new Task<byte[]>[totalFrames];
             var sw = Stopwatch.StartNew();
 
-            async Task RenderOneAsync(int frameIndex)
+            async Task<byte[]> RenderOneAsync(int frameIndex)
             {
                 await gate.WaitAsync();
                 try
                 {
+                    //logged the moment this frame actually gets a gate slot and
+                    //begins building its graph — if a render appears stuck, this
+                    //line (or its absence) is what tells you whether it's stuck
+                    //BEFORE ffmpeg is even spawned (graph construction) or DURING
+                    //ffmpeg's own run (no further logs after this one)
+                    EditSharpConfig.Logger.LogVerbose(
+                        $"Starting frame {frameIndex + 1}/{totalFrames}...");
+
                     FrameState state = FrameStateResolver.Resolve(
                         timeline, frameIndex, fps, optimizedMedia, nativeSizes, staticImages);
 
-                    byte[] data = await RenderFrameAsync(
-                        state, chainBuilder, width, height, fps, tempFiles);
-
-                    lock (completionLock) completed[frameIndex] = data;
+                    return await RenderFrameAsync(state, chainBuilder, width, height, fps, tempFiles);
                 }
                 finally
                 {
@@ -179,52 +178,38 @@ namespace EditSharp.Render
                 }
             }
 
-            async Task FlushReadyAsync()
-            {
-                while (true)
-                {
-                    byte[]? data;
-                    lock (completionLock)
-                    {
-                        if (!completed.TryGetValue(nextToFlush, out data)) break;
-                        completed.Remove(nextToFlush);
-                    }
-
-                    await accumulator.WriteAsync(data);
-
-                    EditSharpConfig.Logger.LogVerbose(
-                        $"Rendered frame {nextToFlush + 1}/{totalFrames} " +
-                        $"({sw.ElapsedMilliseconds}ms elapsed).");
-
-                    if (deletionSchedule.TryGetValue(nextToFlush, out List<string>? exhausted))
-                    {
-                        foreach (string path in exhausted)
-                        {
-                            try { File.Delete(path); } catch { /* best-effort */ }
-                        }
-                    }
-
-                    nextToFlush++;
-                }
-            }
-
-            var pending = new List<Task>(totalFrames);
+            //every frame's task is launched up front — the gate above, not this
+            //loop, is what bounds how many are actually mid-render at once, so
+            //launching them all costs nothing but Task allocation for the ones
+            //still queued on the gate
+            for (int frameIndex = 0; frameIndex < totalFrames; frameIndex++)
+                frameTasks[frameIndex] = RenderOneAsync(frameIndex);
 
             for (int frameIndex = 0; frameIndex < totalFrames; frameIndex++)
             {
-                pending.Add(RenderOneAsync(frameIndex));
+                //awaited strictly in order. This is what the accumulator's
+                //no-timestamps format requires regardless, but it also means a
+                //fault on any frame surfaces the moment that frame's turn comes
+                //up — NOT buried until every one of totalFrames tasks has been
+                //launched and Task.WhenAll is finally reached, which is what an
+                //earlier version of this method did and which silently hid a
+                //frame 0 failure behind what looked like a hang
+                byte[] data = await frameTasks[frameIndex];
 
-                //the gate above is what actually bounds how many frames are
-                //mid-render at once; this drains whatever's already finished
-                //after every launch rather than waiting for the final
-                //WhenAll, so completed frames get written and their optimized
-                //media freed as the render progresses instead of all at once
-                //at the very end
-                await FlushReadyAsync();
+                await accumulator.WriteAsync(data);
+
+                EditSharpConfig.Logger.LogVerbose(
+                    $"Rendered frame {frameIndex + 1}/{totalFrames} " +
+                    $"({sw.ElapsedMilliseconds}ms elapsed).");
+
+                if (deletionSchedule.TryGetValue(frameIndex, out List<string>? exhausted))
+                {
+                    foreach (string path in exhausted)
+                    {
+                        try { File.Delete(path); } catch { /* best-effort */ }
+                    }
+                }
             }
-
-            await Task.WhenAll(pending);
-            await FlushReadyAsync();
         }
 
         /// <summary>
@@ -337,6 +322,8 @@ namespace EditSharp.Render
             int width, int height, int fps,
             ConcurrentBag<string> tempFiles)
         {
+            var stageSw = Stopwatch.StartNew();
+
             var graph = new InputGraph();
             string finalLabel = chainBuilder.Build(state, graph, width, height, fps, tempFiles);
 
@@ -347,6 +334,9 @@ namespace EditSharp.Render
                         $"Input file not found rendering frame {state.FrameIndex}: {input.Path}",
                         input.Path);
             }
+
+            long graphBuildMs = stageSw.ElapsedMilliseconds;
+            stageSw.Restart();
 
             var args = new List<string> { "-y", "-v", "error" };
 
@@ -371,6 +361,21 @@ namespace EditSharp.Render
             args.Add(PixelFormats.Rgba);
             args.Add("pipe:1");
 
+            //frame 0 only — with graph-build/spawn now both cleared as the
+            //cause, the remaining question is WHICH filter inside a 100+ line
+            //graph is expensive, and that's a question ffmpeg itself can
+            //answer far more reliably than guessing from the C# side. Paste
+            //this into a terminal with -benchmark_all -v info appended (before
+            //pipe:1) for a real per-filter timing breakdown.
+            if (state.FrameIndex == 0)
+            {
+                string commandLine = string.Join(" ", args.Select(QuoteArgForShell));
+                EditSharpConfig.Logger.LogVerbose(
+                    $"Frame 0 full command (append -benchmark_all -v info before " +
+                    $"pipe:1 and run manually for a per-filter timing breakdown):\n" +
+                    $"{EditSharpConfig.FfmpegPath} {commandLine}");
+            }
+
             var psi = new ProcessStartInfo
             {
                 FileName = EditSharpConfig.FfmpegPath,
@@ -385,23 +390,50 @@ namespace EditSharp.Render
             var stderr = new StringBuilder();
             process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
 
+            //timed separately from graph build above and from CopyToAsync below
+            //so a slow frame can be attributed to one of three distinct causes:
+            //.NET building the args/graph, the OS actually getting the process
+            //running (process.Start() returning), or ffmpeg's own filter
+            //execution (everything from Start() to the stdout copy finishing)
+            var spawnSw = Stopwatch.StartNew();
             process.Start();
+            long spawnMs = spawnSw.ElapsedMilliseconds;
+
             process.BeginErrorReadLine();
 
             //drained concurrently with stderr rather than read after exit —
             //the same deadlock risk MediaProbe's own comments describe: a full
             //pipe buffer blocks the child if nothing is consuming the other one
+            var runSw = Stopwatch.StartNew();
             using var stdout = new MemoryStream();
             await process.StandardOutput.BaseStream.CopyToAsync(stdout);
             await process.WaitForExitAsync();
+            long runMs = runSw.ElapsedMilliseconds;
 
             if (process.ExitCode != 0)
                 throw new InvalidOperationException(
                     $"ffmpeg exited with code {process.ExitCode} rendering frame " +
                     $"{state.FrameIndex}:\n{stderr}");
 
+            EditSharpConfig.Logger.LogVerbose(
+                $"Frame {state.FrameIndex + 1}: graph build {graphBuildMs}ms, " +
+                $"process spawn {spawnMs}ms, ffmpeg run {runMs}ms " +
+                $"({graph.Inputs.Count} input(s), {graph.FilterLines.Count} filter line(s)).");
+
             return stdout.ToArray();
         }
+
+        /// <summary>
+        /// Quotes an argument for pasting into a shell — wraps in double quotes
+        /// if it contains a space or a quote, escaping any embedded quotes. Good
+        /// enough for both cmd.exe and a POSIX shell for the kinds of strings
+        /// this pipeline produces (file paths, a filter_complex string); not a
+        /// general-purpose shell-escaping routine.
+        /// </summary>
+        private static string QuoteArgForShell(string arg) =>
+            arg.Length == 0 || arg.Contains(' ') || arg.Contains('"')
+                ? $"\"{arg.Replace("\"", "\\\"")}\""
+                : arg;
 
         /// <summary>
         /// Muxes the accumulated lossless video against the timeline's audio

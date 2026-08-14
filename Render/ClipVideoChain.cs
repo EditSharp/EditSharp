@@ -68,7 +68,7 @@ namespace EditSharp.Render
         /// Only the mask is supersampled. The colour plane is masked by it, so its
         /// own edges never show.
         /// </summary>
-        public const int MaskSupersample = 2;
+        public const int MaskSupersample = 1;
 
 
         /// <summary>
