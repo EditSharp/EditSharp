@@ -67,6 +67,16 @@ namespace EditSharp.Render
         ///
         /// Only the mask is supersampled. The colour plane is masked by it, so its
         /// own edges never show.
+        ///
+        /// REINSTATED after being removed as a suspected bottleneck: a real A/B
+        /// test on the actual render (6-clip test blueprint, drop shadow removed)
+        /// showed removing it saved only ~18ms per clip (4426ms -> 4317ms for 6
+        /// clips) — nowhere near enough to explain the multi-second per-frame
+        /// cost. The real cost turned out to be that EVERY operation in a clip's
+        /// chain runs at full canvas resolution regardless of the clip's actual
+        /// on-screen size (see ComputeWorkRect below) — supersampling one of a
+        /// dozen-plus full-canvas passes was never going to move the needle much
+        /// on its own.
         /// </summary>
         public const int MaskSupersample = 2;
 
@@ -80,6 +90,21 @@ namespace EditSharp.Render
         /// caller left that renders a clip's whole keyframe animation as one
         /// continuous stream, so there is nothing left for this to be optional
         /// against.
+        ///
+        /// Frame/PreTransform effects/Modulate/the perspective warp all run
+        /// against TransformExpressions.ComputeWorkRect — the clip's actual
+        /// footprint on canvas this frame, not the full canvas regardless of
+        /// how small the clip appears. Every one of those stages runs at full
+        /// canvas resolution for every clip on every frame otherwise, which
+        /// measured out as the dominant per-frame render cost on a real render
+        /// (roughly 500ms/clip in filter execution, ~90% of total frame time
+        /// on a 6-clip test). The result is padded back out to canvas size
+        /// BEFORE PostTransform effects run, not after — DropShadowEffect's own
+        /// remarks are explicit that it needs canvas-sized room to blur and
+        /// offset into, and this keeps that guarantee exactly as it was, at
+        /// the cost of not shrinking PostTransform effects' own cost the same
+        /// way. Explicitly scoped this way, matching what was asked: this pass
+        /// covers Frame/PreTransform/Modulate/Transform, not PostTransform.
         /// </summary>
         public static string Build(
             Clip clip,
@@ -92,8 +117,8 @@ namespace EditSharp.Render
             bool modulateAlreadyApplied = false,
             bool preTransformEffectsBaked = false)
         {
-            TransformExpressions.WorkRect rect =
-                TransformExpressions.WorkRect.FullCanvas(canvasWidth, canvasHeight);
+            TransformExpressions.WorkRect rect = TransformExpressions.ComputeWorkRect(
+                clip, literalTransform, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
 
             var (contentWidth, contentHeight) = TransformExpressions.ComputeContentSize(
                 clip, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
@@ -128,8 +153,27 @@ namespace EditSharp.Render
             string transformed = ApplyTransform(
                 modulated, nativeWidth, nativeHeight, context, literalTransform);
 
+            //everything above ran at the tight work rect's size. Pad back out to
+            //full canvas — a pure border fill, no resampling — and build a
+            //canvas-sized context for PostTransform effects, which still expect
+            //exactly the canvas-sized frame they always got (see the class
+            //remarks above on why this pass doesn't shrink PostTransform's own
+            //cost the same way)
+            if (rect.IsFullCanvas(canvasWidth, canvasHeight))
+                return ClipEffects.ApplyStage(clip.Effects, EffectStage.PostTransform, transformed, context);
+
+            string paddedToCanvas = graph.NextLabel("clpad");
+            graph.FilterLines.Add(
+                $"[{transformed}]pad={canvasWidth}:{canvasHeight}:{rect.X}:{rect.Y}:color=black@0[{paddedToCanvas}]");
+
+            var canvasRect = TransformExpressions.WorkRect.FullCanvas(canvasWidth, canvasHeight);
+            var canvasContext = new ClipChainContext(
+                canvasWidth, canvasHeight, canvasRect, fps, durationSeconds,
+                new TransformExpressions.ContentPlacement(canvasWidth, canvasHeight, 0, 0),
+                graph, tempFiles);
+
             return ClipEffects.ApplyStage(
-                clip.Effects, EffectStage.PostTransform, transformed, context);
+                clip.Effects, EffectStage.PostTransform, paddedToCanvas, canvasContext);
         }
 
         /// <summary>

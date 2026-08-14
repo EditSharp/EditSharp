@@ -184,8 +184,36 @@ namespace EditSharp.Render
 
                     bool benchmark = frameIndex == 0 || frameIndex == benchmarkCheckpoint;
 
-                    return await RenderFrameAsync(
+                    byte[] result = await RenderFrameAsync(
                         state, chainBuilder, width, height, fps, tempFiles, benchmark);
+
+                    if (frameIndex == benchmarkCheckpoint)
+                    {
+                        //diagnostic only — re-renders frame 0's EXACT content
+                        //again, this late in the render, and discards the
+                        //output (never written to the accumulator, never
+                        //counted as a real frame). The comparison this buys:
+                        //if THIS takes roughly frame 0's original time, the
+                        //checkpoint's slowdown is driven by that frame's own
+                        //content (e.g. a more expensive resolved transform);
+                        //if it's roughly as slow as the REAL checkpoint frame
+                        //instead, the slowdown is driven by something that
+                        //accumulates over the render's lifetime — process
+                        //count, disk/AV state, memory fragmentation — since
+                        //the content here is IDENTICAL to frame 0's and only
+                        //WHEN it runs differs
+                        EditSharpConfig.Logger.Log(
+                            $"Diagnostic: replaying frame 0's content at position " +
+                            $"{frameIndex} for comparison...");
+
+                        FrameState replay = FrameStateResolver.Resolve(
+                            timeline, 0, fps, optimizedMedia, nativeSizes, staticImages);
+
+                        _ = await RenderFrameAsync(
+                            replay, chainBuilder, width, height, fps, tempFiles, benchmark: true);
+                    }
+
+                    return result;
                 }
                 finally
                 {
@@ -211,6 +239,37 @@ namespace EditSharp.Render
                 //frame 0 failure behind what looked like a hang
                 byte[] data = await frameTasks[frameIndex];
 
+                //THE actual cause of the progressive per-frame slowdown: a
+                //completed Task<byte[]> keeps its Result reachable for as
+                //long as the Task itself is reachable, and frameTasks stayed
+                //reachable — as a live array — for the ENTIRE render, all the
+                //way until this method returns. Every frame's raw output
+                //(1920x1080 gbrap16le = ~16.6MB) was therefore being pinned
+                //in memory forever after it had already been written out and
+                //was no longer needed — by frame 100, ~1.6GB of dead buffers
+                //kept alive by nothing but this array slot. That growing
+                //retained heap (mostly Large Object Heap, since each buffer
+                //is well past the 85KB LOH threshold) means growing GC
+                //pressure over the render's lifetime, and a GC pause on the
+                //thread draining ffmpeg's stdout pipe stalls that read —
+                //which stalls ffmpeg's own write() to a small, unconsumed
+                //pipe buffer, inflating ITS measured elapsed time even
+                //though its own decode/encode/flush bench numbers stay flat
+                //(none of them account for time spent blocked on a pipe
+                //write). Confirmed against the actual evidence: growth was
+                //shown to be content-independent (a replayed frame 0 late in
+                //the render was just as slow as the real frame at that
+                //position), which rules out anything content/transform-
+                //related and points at exactly this kind of accumulating
+                //resource state instead.
+                //
+                //Clearing the slot the moment its result is consumed is what
+                //makes that buffer collectible immediately rather than at
+                //the end of the whole render — memory use should now stay
+                //roughly flat across a render's length instead of growing
+                //with frame count.
+                frameTasks[frameIndex] = null!;
+
                 await accumulator.WriteAsync(data);
 
                 EditSharpConfig.Logger.LogVerbose(
@@ -222,6 +281,42 @@ namespace EditSharp.Render
                     foreach (string path in exhausted)
                     {
                         try { File.Delete(path); } catch { /* best-effort */ }
+                    }
+                }
+
+                //diagnostic: every 20 frames, sample the .NET process's own
+                //resource counters. This is aimed squarely at ruling in or
+                //out a specific, well-documented class of bug — repeated
+                //Process.Start()/Dispose() cycles can leak OS handles or
+                //cause managed-heap growth independent of anything the
+                //CHILD process does — which is exactly what a render that
+                //degrades identically on pure-procedural content (zero
+                //decode, zero file I/O, zero transform math) with nothing
+                //else varying would look like. If HandleCount or ThreadCount
+                //climbs in step with the slowdown, that's the leak. If GC
+                //gen2/LOH collection counts climb disproportionately (not
+                //just gen0, which is normal and constant), that's managed
+                //memory pressure building up somewhere still unaccounted
+                //for. Sampled here rather than in a background timer so the
+                //numbers line up exactly against the frame index they were
+                //taken at.
+                if (frameIndex % 20 == 0)
+                {
+                    try
+                    {
+                        using Process self = Process.GetCurrentProcess();
+                        self.Refresh();
+
+                        EditSharpConfig.Logger.Log(
+                            $"Resource sample @ frame {frameIndex + 1}: " +
+                            $"handles={self.HandleCount}, threads={self.Threads.Count}, " +
+                            $"managed heap={GC.GetTotalMemory(false) / (1024 * 1024)}MB, " +
+                            $"workingSet={self.WorkingSet64 / (1024 * 1024)}MB, " +
+                            $"GC(gen0/1/2)={GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)}");
+                    }
+                    catch
+                    {
+                        //diagnostic only — never worth failing a render over
                     }
                 }
             }
@@ -470,6 +565,22 @@ namespace EditSharp.Render
             var audioGraph = new InputGraph();
             var contents = new Dictionary<Clip, ClipContent>();
 
+            //The accumulator occupies -i index 0 below, so it has to occupy
+            //index 0 in THIS graph too before any clip is built. InputGraph
+            //hands out indices in call order and ClipContentBuilder bakes them
+            //straight into its filter labels ([N:v]/[N:a]), so without this
+            //placeholder the first clip's source would take index 0 and every
+            //label it emits would resolve against the accumulator instead —
+            //which is a headerless rawvideo stream with a video track and no
+            //audio whatsoever, producing exactly "Stream specifier ':a' ...
+            //matches no streams" at bind time.
+            //
+            //verifyExists:false because the accumulator is re-registered in
+            //the -i list explicitly (with its own rawvideo/-s/-r args) rather
+            //than emitted from this collection; this entry exists purely to
+            //consume index 0 so the numbering lines up.
+            _ = audioGraph.AddInput(accumulatorPath, verifyExists: false);
+
             foreach (Channel channel in blueprint.Timeline.Channels)
             {
                 foreach (Clip clip in channel.Clips.Values)
@@ -477,7 +588,7 @@ namespace EditSharp.Render
                     if (contents.ContainsKey(clip)) continue;
 
                     contents[clip] = await ClipContentBuilder.BuildAsync(
-                        clip, audioGraph, width, height, fps, tempFiles);
+                        clip, audioGraph, width, height, fps, tempFiles, audioOnly: true);
                 }
             }
 
@@ -506,8 +617,11 @@ namespace EditSharp.Render
                 "-i", accumulatorPath,
             });
 
-            //the audio graph's own inputs land at indices 1..N
-            foreach (var input in audioGraph.Inputs)
+            //the audio graph's own inputs land at indices 1..N — index 0 is
+            //the placeholder reserved above for the accumulator, which was
+            //already emitted explicitly with its rawvideo args, so it's
+            //skipped here rather than added a second time
+            foreach (var input in audioGraph.Inputs.Skip(1))
             {
                 if (input.ExtraArgs != null) args.AddRange(input.ExtraArgs);
                 args.Add("-i");

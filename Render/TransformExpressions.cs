@@ -239,6 +239,114 @@ namespace EditSharp.Render
         }
 
         /// <summary>
+        /// The clip's actual footprint on canvas THIS FRAME — the smallest rect
+        /// worth rendering into, instead of the full canvas regardless of how
+        /// large the clip actually appears on screen.
+        ///
+        /// Built from the SAME quad math ApplyTransform's perspective warp uses
+        /// (ProjectCorner via ComputeQuad): computed once in FULL-CANVAS space to
+        /// find where the four corners actually land this frame, then padded by
+        /// TransparentBorderPixels and clamped to canvas bounds. The margin
+        /// exists for the same reason TransparentBorderPixels does everywhere
+        /// else — `perspective` clamps to edge pixels when it samples outside
+        /// the source, and bilinear interpolation at a warped edge reaches a
+        /// pixel or so beyond the corner itself, so a rect sized to the EXACT
+        /// corners with no margin would clip that interpolated edge.
+        ///
+        /// This is a genuinely PER-FRAME computation, unlike the deleted whole-
+        /// window pipeline's version of this idea, which had to cover a clip's
+        /// ENTIRE keyframe range in one static rect since it rendered as one
+        /// continuous stream. literalTransform here is already resolved to this
+        /// exact frame's time (see Clip.TransformAt / FrameStateResolver), so
+        /// the rect can be as tight as this one frame actually needs — animated
+        /// content should do noticeably better than the deleted version's
+        /// measured 33%, which was bounding an entire animation's motion path
+        /// rather than one instant of it.
+        ///
+        /// ComputeContentSize (and therefore content's actual pixel size) stays
+        /// based on the clip's MaxScale across its whole keyframe range, NOT
+        /// this frame's literal scale — that decision is about how much detail
+        /// the content buffer needs (sized for the biggest zoom the clip ever
+        /// reaches), which is unrelated to where THIS frame's rect sits on
+        /// canvas and would be wrong to tie to a single frame's transform.
+        /// </summary>
+        public static WorkRect ComputeWorkRect(
+            Clip clip, ClipTransform literalTransform,
+            int nativeWidth, int nativeHeight,
+            int canvasWidth, int canvasHeight)
+        {
+            var (contentWidth, contentHeight) = ComputeContentSize(
+                clip, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
+
+            ContentPlacement fullCanvasPlacement =
+                PlaceInFrame(contentWidth, contentHeight, canvasWidth, canvasHeight);
+
+            //frameWidth/frameHeight/offset = full canvas here deliberately —
+            //this is the same call ClipVideoChain.Build used to make when
+            //WorkRect was hardcoded to FullCanvas, reused purely to find where
+            //the corners land before the real (tighter) work rect exists
+            Quad quad = ComputeQuad(
+                literalTransform, nativeWidth, nativeHeight,
+                canvasWidth, canvasHeight,
+                canvasWidth, canvasHeight, 0, 0,
+                fullCanvasPlacement);
+
+            double minX = Math.Min(Math.Min(quad.X0, quad.X1), Math.Min(quad.X2, quad.X3));
+            double maxX = Math.Max(Math.Max(quad.X0, quad.X1), Math.Max(quad.X2, quad.X3));
+            double minY = Math.Min(Math.Min(quad.Y0, quad.Y1), Math.Min(quad.Y2, quad.Y3));
+            double maxY = Math.Max(Math.Max(quad.Y0, quad.Y1), Math.Max(quad.Y2, quad.Y3));
+
+            int left = Math.Clamp(
+                (int)Math.Floor(minX) - TransparentBorderPixels, 0, canvasWidth);
+            int top = Math.Clamp(
+                (int)Math.Floor(minY) - TransparentBorderPixels, 0, canvasHeight);
+            int right = Math.Clamp(
+                (int)Math.Ceiling(maxX) + TransparentBorderPixels, 0, canvasWidth);
+            int bottom = Math.Clamp(
+                (int)Math.Ceiling(maxY) + TransparentBorderPixels, 0, canvasHeight);
+
+            int width = EvenAtLeast2(right - left);
+            int height = EvenAtLeast2(bottom - top);
+
+            //never smaller than the content's own fixed render size. Frame()
+            //scales content to exactly contentWidth x contentHeight (see
+            //ComputeContentSize above) and centres it in the work rect via
+            //PlaceInFrame — a work rect tighter than that would ask
+            //PlaceInFrame for a NEGATIVE centring offset. This is exactly the
+            //case ComputeContentSize's own remarks describe: content is sized
+            //for the clip's BIGGEST zoom across its whole keyframe range, but
+            //a tight per-frame bbox is sized for THIS frame's actual scale —
+            //on an early, zoomed-OUT frame of a clip that zooms in later,
+            //the fixed content size can legitimately be larger than what
+            //this one frame's bbox alone would need. Expanding around centre
+            //keeps the original (smaller) bbox fully contained.
+            if (width < contentWidth)
+            {
+                left -= (contentWidth - width) / 2;
+                width = contentWidth;
+            }
+
+            if (height < contentHeight)
+            {
+                top -= (contentHeight - height) / 2;
+                height = contentHeight;
+            }
+
+            //re-clamp position now that expansion may have pushed the rect
+            //outside canvas bounds. ComputeContentSize guarantees
+            //contentWidth/contentHeight are each strictly less than the
+            //canvas's own dimension (it caps to canvasWidth/Height minus
+            //2*TransparentBorderPixels), so this clamp can only tighten
+            //`left`/`top`, never shrink width/height back below content size
+            left = Math.Clamp(left, 0, Math.Max(0, canvasWidth - width));
+            top = Math.Clamp(top, 0, Math.Max(0, canvasHeight - height));
+            width = Math.Min(width, canvasWidth - left);
+            height = Math.Min(height, canvasHeight - top);
+
+            return new WorkRect(left, top, width, height);
+        }
+
+        /// <summary>
         /// The corners `perspective` is given are the FRAME's corners, and the
         /// frame is larger than the content by the transparent border. The border
         /// is part of the same flat plane as the content, so scaling the model-

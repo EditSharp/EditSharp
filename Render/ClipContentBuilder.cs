@@ -30,15 +30,35 @@ namespace EditSharp.Render
     /// </summary>
     internal static class ClipContentBuilder
     {
+        /// <summary>
+        /// audioOnly skips building a video filter chain entirely — not just
+        /// leaving VideoLabel null on the returned ClipContent, but never
+        /// emitting the filter lines that would have produced it. This is
+        /// not an optimization applied on top of otherwise-normal behaviour:
+        /// an unconsumed filter output is a HARD bind-time error in ffmpeg
+        /// ("Filter 'fps:default' has output 0 unconnected"), confirmed
+        /// directly. FinalizeOutputAsync is this method's only caller since
+        /// the whole-window pipeline was removed, and it only ever wants
+        /// audio, so audioOnly:true is what it passes — every clip that
+        /// contributes NOTHING to audio (TextClip, GeneratorClip, NoiseClip,
+        /// an Image source) skips its filter chain outright rather than
+        /// building one nothing will ever map.
+        /// </summary>
         public static async Task<ClipContent> BuildAsync(
             Clip clip, InputGraph graph,
             int canvasWidth, int canvasHeight, int fps,
-            ConcurrentBag<string> tempFiles)
+            ConcurrentBag<string> tempFiles, bool audioOnly = false)
         {
             return clip switch
             {
                 SourceClip source => await BuildSourceClipAsync(
-                    source, graph, canvasWidth, canvasHeight, fps),
+                    source, graph, canvasWidth, canvasHeight, fps, audioOnly),
+
+                //none of these three ever produce audio — in audioOnly mode
+                //they contribute nothing at all, so nothing is built for them
+                TextClip when audioOnly => Empty(canvasWidth, canvasHeight),
+                GeneratorClip when audioOnly => Empty(canvasWidth, canvasHeight),
+                NoiseClip when audioOnly => Empty(canvasWidth, canvasHeight),
 
                 TextClip text => BuildTextClip(
                     text, graph, canvasWidth, canvasHeight, fps, tempFiles),
@@ -54,11 +74,22 @@ namespace EditSharp.Render
             };
         }
 
+        /// <summary>A clip contributing nothing at all — no video, no audio, no filter lines.</summary>
+        private static ClipContent Empty(int canvasWidth, int canvasHeight) =>
+            new(null, canvasWidth, canvasHeight, null, false);
+
         private static async Task<ClipContent> BuildSourceClipAsync(
-            SourceClip clip, InputGraph graph, int canvasWidth, int canvasHeight, int fps)
+            SourceClip clip, InputGraph graph, int canvasWidth, int canvasHeight, int fps,
+            bool audioOnly)
         {
             Source source = clip.Source;
             double clipSeconds = clip.Duration.TotalSeconds;
+
+            //an image has no audio stream, full stop — in audioOnly mode it
+            //contributes nothing, so skip it before even probing rather than
+            //building a trim/loop/fps chain nothing will ever map
+            if (audioOnly && source.Type == SourceType.Image)
+                return Empty(canvasWidth, canvasHeight);
 
             //ONE ffprobe for the whole clip. Dimensions, duration and whether there
             //is an audio stream used to be three separate calls, which meant three
@@ -115,7 +146,13 @@ namespace EditSharp.Render
             int nativeWidth = canvasWidth;
             int nativeHeight = canvasHeight;
 
-            if (source.Type == SourceType.Video)
+            //the input registration above still has to happen even when
+            //audioOnly and this is a Video-type source: the audio track (if
+            //any) lives in this SAME file, referenced via this SAME index as
+            //[index:a] below. What's skipped is only the VIDEO filter chain
+            //itself (BuildVideoStream) — that's the part nothing would ever
+            //consume in an audio-only pass
+            if (source.Type == SourceType.Video && !audioOnly)
             {
                 if (!info.HasVideo)
                     throw new InvalidOperationException(
@@ -127,6 +164,11 @@ namespace EditSharp.Render
                 videoLabel = BuildVideoStream(
                     graph, index, sourceStart, available, clipSeconds, fps,
                     needsLoop, canStreamLoop, source.Path);
+            }
+            else if (source.Type == SourceType.Video)
+            {
+                nativeWidth = info.Width;
+                nativeHeight = info.Height;
             }
 
             string? audioLabel = null;
