@@ -68,7 +68,7 @@ namespace EditSharp.Render
         /// Only the mask is supersampled. The colour plane is masked by it, so its
         /// own edges never show.
         /// </summary>
-        public const int MaskSupersample = 1;
+        public const int MaskSupersample = 2;
 
 
         /// <summary>
@@ -89,7 +89,8 @@ namespace EditSharp.Render
             int fps, double durationSeconds,
             InputGraph graph, ConcurrentBag<string> tempFiles,
             ClipTransform literalTransform,
-            bool modulateAlreadyApplied = false)
+            bool modulateAlreadyApplied = false,
+            bool preTransformEffectsBaked = false)
         {
             TransformExpressions.WorkRect rect =
                 TransformExpressions.WorkRect.FullCanvas(canvasWidth, canvasHeight);
@@ -109,8 +110,14 @@ namespace EditSharp.Render
 
             string framed = Frame(contentLabel, context);
 
-            string preEffects = ClipEffects.ApplyStage(
-                clip.Effects, EffectStage.PreTransform, framed, context);
+            //baked means OptimizedMediaBuilder already ran these same PreTransform
+            //effects once, over the whole clip, when building its optimized media
+            //(see VideoUtils.BuildPreTransformChain) — applying them again here
+            //would double them up (a blur blurred twice, rounded corners rounded
+            //again against already-rounded alpha)
+            string preEffects = preTransformEffectsBaked
+                ? framed
+                : ClipEffects.ApplyStage(clip.Effects, EffectStage.PreTransform, framed, context);
 
             //a generator clip's colour IS its Modulate, baked in when the source
             //was generated — applying it again here would square it
@@ -140,7 +147,7 @@ namespace EditSharp.Render
             string framed = context.Graph.NextLabel("clframe");
             context.Graph.FilterLines.Add(
                 $"[{contentLabel}]scale={p.Width}:{p.Height},setsar=1,fps={context.Fps}," +
-                $"format={PixelFormats.Rgba}," +
+                $"format={PixelFormats.Primary}," +
                 $"pad={context.FrameWidth}:{context.FrameHeight}:{p.X}:{p.Y}:color=black@0[{framed}]");
 
             return framed;
@@ -223,7 +230,7 @@ namespace EditSharp.Render
 
             string warpedAlpha = context.Graph.NextLabel("cltfmask");
             context.Graph.FilterLines.Add(
-                $"[{alphaCopy}]format={PixelFormats.Rgba},alphaextract," +
+                $"[{alphaCopy}]format={PixelFormats.Primary},alphaextract," +
                 $"{upscale}{perspectiveLarge}{downscale}[{warpedAlpha}]");
 
             //The smear has to reach the CONTENT's edge, not the frame's. Now that
@@ -263,18 +270,36 @@ namespace EditSharp.Render
     /// is far below anything visible, and the final encode is the only place
     /// precision is deliberately given up.
     ///
-    /// Each of the four is the 16-bit counterpart of what this pipeline used
-    /// before: rgba->rgba64le, gbrp->gbrp16le, gbrap->gbrap16le,
-    /// gray->gray16le. All four were confirmed by direct test to be accepted by
-    /// every filter in the chain (perspective, alphaextract, alphamerge,
-    /// fillborders, gblur, blend, lut, pad, overlay, xfade), and `lut` in
-    /// particular was checked to scale proportionally rather than assuming an
-    /// 8-bit range — the drop shadow's opacity and its zero-fill both depend on
-    /// that.
+    /// Primary is gbrap16le, NOT rgba64le. It used to be rgba64le, on the
+    /// assumption that requesting "-pix_fmt rgba64le" on the FFV1 encoder used
+    /// for optimized media would produce genuinely packed RGBA. It doesn't:
+    /// FFV1 has no packed-RGBA mode at all, so ffmpeg silently substitutes its
+    /// own native planar equivalent — confirmed directly from a real render's
+    /// stream headers, which reported the encoded file as gbrap16le regardless
+    /// of what was requested. Every per-frame read of that "rgba64le" file was
+    /// therefore paying a real, unaccelerated gbrap16le→rgba64le conversion
+    /// (confirmed: ffmpeg logs "No accelerated colorspace conversion found")
+    /// on every single frame, for a conversion that existed purely because the
+    /// constant's assumed format didn't match what was actually on disk.
+    /// Renaming to Primary and setting it to gbrap16le — the format FFV1
+    /// actually stores — makes the encode step honest (no silent substitution)
+    /// and removes that conversion everywhere downstream reads it. Every
+    /// filter this pipeline uses on the "primary" format (perspective,
+    /// alphaextract, alphamerge, colorchannelmixer, fillborders, blend, pad,
+    /// overlay, xfade) was already confirmed to accept gbrap16le just as
+    /// readily as rgba64le, since Gbrap below is the identical format already
+    /// used for the colour-blur path — this is a value change, not a filter
+    /// compatibility question.
+    ///
+    /// Gbrp/Gbrap/Gray are unchanged: gbrp16le, gbrap16le, gray16le. All were
+    /// confirmed by direct test to be accepted by every filter in the chain,
+    /// and `lut` in particular was checked to scale proportionally rather than
+    /// assuming an 8-bit range — the drop shadow's opacity and its zero-fill
+    /// both depend on that.
     /// </summary>
     internal static class PixelFormats
     {
-        public const string Rgba = "rgba64le";
+        public const string Primary = "gbrap16le";
         public const string Gbrp = "gbrp16le";
         public const string Gbrap = "gbrap16le";
         public const string Gray = "gray16le";
@@ -289,7 +314,8 @@ namespace EditSharp.Render
         TransformExpressions.WorkRect workRect,
         int fps, double durationSeconds,
         TransformExpressions.ContentPlacement placement,
-        InputGraph graph, ConcurrentBag<string> tempFiles)
+        InputGraph graph, ConcurrentBag<string> tempFiles,
+        bool repeatStaticInputs = false)
     {
         //TWO sizes, and the distinction is the whole point of the bounding-box
         //work. CANVAS is the finished output, and is what every NORMALIZED value
@@ -314,5 +340,14 @@ namespace EditSharp.Render
         public TransformExpressions.ContentPlacement Placement { get; } = placement;
         public InputGraph Graph { get; } = graph;
         public ConcurrentBag<string> TempFiles { get; } = tempFiles;
+
+        //true only when this context is building a WHOLE-CLIP filter chain for
+        //optimized-media baking (see VideoUtils.BuildPreTransformChain) rather
+        //than a single per-frame still. A static single-frame input like the
+        //rounded-corners mask needs -loop 1 to persist across every frame of a
+        //continuous re-encode; the ordinary per-frame path renders exactly one
+        //frame per ffmpeg process, so the same mask file is naturally read once
+        //and never needs to loop
+        public bool RepeatStaticInputs { get; } = repeatStaticInputs;
     }
 }

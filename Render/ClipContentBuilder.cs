@@ -235,7 +235,7 @@ namespace EditSharp.Render
             string label = graph.NextLabel("cctext");
             graph.FilterLines.Add(
                 $"[{index}:v]trim=duration={GraphUtilities.Num(clip.Duration.TotalSeconds)}," +
-                $"setpts=PTS-STARTPTS,fps={fps},format={PixelFormats.Rgba}[{label}]");
+                $"setpts=PTS-STARTPTS,fps={fps},format={PixelFormats.Primary}[{label}]");
 
             return new ClipContent(label, width, height, null, false);
         }
@@ -264,7 +264,7 @@ namespace EditSharp.Render
             string body = graph.NextLabel("ccgenbody");
             graph.FilterLines.Add(
                 $"color={Hex(clip.ColorMain)}:size={size}:rate={fps}:" +
-                $"duration={GraphUtilities.Num(total)},format={PixelFormats.Rgba},settb=AVTB[{body}]");
+                $"duration={GraphUtilities.Num(total)},format={PixelFormats.Primary},settb=AVTB[{body}]");
 
             string current = body;
 
@@ -277,7 +277,7 @@ namespace EditSharp.Render
                 string lead = graph.NextLabel("ccgenin");
                 graph.FilterLines.Add(
                     $"color={Hex(clip.ColorIn!.Value.Item1)}:size={size}:rate={fps}:" +
-                    $"duration={GraphUtilities.Num(fadeIn)},format={PixelFormats.Rgba},settb=AVTB[{lead}]");
+                    $"duration={GraphUtilities.Num(fadeIn)},format={PixelFormats.Primary},settb=AVTB[{lead}]");
 
                 //xfade consumes `duration` of overlap, so pairing a fadeIn-long lead
                 //with the full-length body leaves the total unchanged
@@ -298,7 +298,7 @@ namespace EditSharp.Render
                 string tail = graph.NextLabel("ccgenout");
                 graph.FilterLines.Add(
                     $"color={Hex(clip.ColorOut!.Value.Item1)}:size={size}:rate={fps}:" +
-                    $"duration={GraphUtilities.Num(fadeOut)},format={PixelFormats.Rgba},settb=AVTB[{tail}]");
+                    $"duration={GraphUtilities.Num(fadeOut)},format={PixelFormats.Primary},settb=AVTB[{tail}]");
 
                 string faded = graph.NextLabel("ccgenfout");
                 graph.FilterLines.Add(
@@ -384,7 +384,7 @@ namespace EditSharp.Render
                 $"yscale={GraphUtilities.Num(yscale)}:" +
                 $"tscale={GraphUtilities.Num(tscale)}," +
                 $"trim=duration={GraphUtilities.Num(total)},setpts=PTS-STARTPTS," +
-                $"format={PixelFormats.Rgba},settb=AVTB[{label}]");
+                $"format={PixelFormats.Primary},settb=AVTB[{label}]");
 
             return new ClipContent(label, canvasWidth, canvasHeight, null, false);
         }

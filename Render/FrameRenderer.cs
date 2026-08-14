@@ -67,7 +67,8 @@ namespace EditSharp.Render
             int fps = blueprint.Framerate;
 
             Dictionary<Clip, OptimizedMediaBuilder.OptimizedMedia> optimizedMedia =
-                await OptimizedMediaBuilder.BuildAsync(timeline, fps, blueprint.ExtractionConcurrency);
+                await OptimizedMediaBuilder.BuildAsync(
+                    timeline, fps, width, height, tempFiles, blueprint.ExtractionConcurrency);
 
             foreach (OptimizedMediaBuilder.OptimizedMedia media in optimizedMedia.Values)
                 tempFiles.Add(media.Path);
@@ -154,6 +155,17 @@ namespace EditSharp.Render
             var frameTasks = new Task<byte[]>[totalFrames];
             var sw = Stopwatch.StartNew();
 
+            //frame 0 alone can't tell us whether per-frame seek cost GROWS
+            //with how far into the source the target timestamp is — its own
+            //seek offset is always near zero. A second checkpoint partway
+            //through gives ffmpeg's own decode_video bench numbers something
+            //to compare against: if seeking without a usable Cues index falls
+            //back to an O(n) forward scan, the SAME clips' decode_video "real"
+            //time at this checkpoint should be visibly larger than at frame 0.
+            //100 if the render is that long, otherwise roughly the midpoint —
+            //either way, meaningfully further into the source than frame 0.
+            int benchmarkCheckpoint = Math.Min(100, totalFrames / 2);
+
             async Task<byte[]> RenderOneAsync(int frameIndex)
             {
                 await gate.WaitAsync();
@@ -170,7 +182,10 @@ namespace EditSharp.Render
                     FrameState state = FrameStateResolver.Resolve(
                         timeline, frameIndex, fps, optimizedMedia, nativeSizes, staticImages);
 
-                    return await RenderFrameAsync(state, chainBuilder, width, height, fps, tempFiles);
+                    bool benchmark = frameIndex == 0 || frameIndex == benchmarkCheckpoint;
+
+                    return await RenderFrameAsync(
+                        state, chainBuilder, width, height, fps, tempFiles, benchmark);
                 }
                 finally
                 {
@@ -320,7 +335,7 @@ namespace EditSharp.Render
         private static async Task<byte[]> RenderFrameAsync(
             FrameState state, IFrameFilterChainBuilder chainBuilder,
             int width, int height, int fps,
-            ConcurrentBag<string> tempFiles)
+            ConcurrentBag<string> tempFiles, bool benchmark)
         {
             var stageSw = Stopwatch.StartNew();
 
@@ -338,7 +353,21 @@ namespace EditSharp.Render
             long graphBuildMs = stageSw.ElapsedMilliseconds;
             stageSw.Restart();
 
-            var args = new List<string> { "-y", "-v", "error" };
+            //runs with ffmpeg's own -benchmark_all so it prints a decode/
+            //encode/flush timing breakdown to stderr, instead of the manual-
+            //command approach (which needs the filter_complex string
+            //re-quoted for a shell and evidently doesn't survive that
+            //intact). -v info rather than error is required for
+            //-benchmark_all's output to actually appear. The caller decides
+            //which frame indices this fires on (see RenderAllFramesAsync) —
+            //frame 0 plus a later checkpoint, so decode_video's "real" time
+            //for the SAME clips can be compared at a near-zero seek offset
+            //against a much larger one, to test whether seek cost grows with
+            //how far into the source the target timestamp is.
+
+            var args = benchmark
+                ? new List<string> { "-y", "-v", "info", "-benchmark_all" }
+                : new List<string> { "-y", "-v", "error" };
 
             foreach (var input in graph.Inputs)
             {
@@ -358,23 +387,8 @@ namespace EditSharp.Render
             args.Add("-f");
             args.Add("rawvideo");
             args.Add("-pix_fmt");
-            args.Add(PixelFormats.Rgba);
+            args.Add(PixelFormats.Primary);
             args.Add("pipe:1");
-
-            //frame 0 only — with graph-build/spawn now both cleared as the
-            //cause, the remaining question is WHICH filter inside a 100+ line
-            //graph is expensive, and that's a question ffmpeg itself can
-            //answer far more reliably than guessing from the C# side. Paste
-            //this into a terminal with -benchmark_all -v info appended (before
-            //pipe:1) for a real per-filter timing breakdown.
-            if (state.FrameIndex == 0)
-            {
-                string commandLine = string.Join(" ", args.Select(QuoteArgForShell));
-                EditSharpConfig.Logger.LogVerbose(
-                    $"Frame 0 full command (append -benchmark_all -v info before " +
-                    $"pipe:1 and run manually for a per-filter timing breakdown):\n" +
-                    $"{EditSharpConfig.FfmpegPath} {commandLine}");
-            }
 
             var psi = new ProcessStartInfo
             {
@@ -415,6 +429,17 @@ namespace EditSharp.Render
                     $"ffmpeg exited with code {process.ExitCode} rendering frame " +
                     $"{state.FrameIndex}:\n{stderr}");
 
+            //on the plain -v error frames stderr is normally empty and silently
+            //discarded — but this run asked ffmpeg for -benchmark_all, and that
+            //output only exists in stderr, so it has to be surfaced here or the
+            //whole point of running with it is lost
+            if (benchmark)
+            {
+                EditSharpConfig.Logger.Log(
+                    $"Frame {state.FrameIndex} ffmpeg -benchmark_all output " +
+                    $"(decode/encode/flush timing):\n{stderr}");
+            }
+
             EditSharpConfig.Logger.LogVerbose(
                 $"Frame {state.FrameIndex + 1}: graph build {graphBuildMs}ms, " +
                 $"process spawn {spawnMs}ms, ffmpeg run {runMs}ms " +
@@ -422,18 +447,6 @@ namespace EditSharp.Render
 
             return stdout.ToArray();
         }
-
-        /// <summary>
-        /// Quotes an argument for pasting into a shell — wraps in double quotes
-        /// if it contains a space or a quote, escaping any embedded quotes. Good
-        /// enough for both cmd.exe and a POSIX shell for the kinds of strings
-        /// this pipeline produces (file paths, a filter_complex string); not a
-        /// general-purpose shell-escaping routine.
-        /// </summary>
-        private static string QuoteArgForShell(string arg) =>
-            arg.Length == 0 || arg.Contains(' ') || arg.Contains('"')
-                ? $"\"{arg.Replace("\"", "\\\"")}\""
-                : arg;
 
         /// <summary>
         /// Muxes the accumulated lossless video against the timeline's audio
@@ -487,7 +500,7 @@ namespace EditSharp.Render
             args.AddRange(new[]
             {
                 "-f", "rawvideo",
-                "-pix_fmt", PixelFormats.Rgba,
+                "-pix_fmt", PixelFormats.Primary,
                 "-s", $"{width}x{height}",
                 "-r", fps.ToString(CultureInfo.InvariantCulture),
                 "-i", accumulatorPath,

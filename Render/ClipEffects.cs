@@ -87,9 +87,9 @@ namespace EditSharp.Render
 
             string maskPath = GetOrCreateMask(maskWidth, maskHeight, effect.Radius, context.TempFiles);
 
-            //raw gray16le, not a PNG behind -loop 1 — the file already contains
-            //exactly the pixel format the rest of the chain works in, so there's
-            //no decode or format conversion to do on the way in
+            //raw gray16le, not a PNG — the file already contains exactly the
+            //pixel format the rest of the chain works in, so there's no
+            //decode or format conversion to do on the way in
             int index = context.Graph.AddInput(maskPath, true,
             [
                 "-f", "rawvideo",
@@ -98,20 +98,50 @@ namespace EditSharp.Render
                 "-r", context.Fps.ToString(CultureInfo.InvariantCulture),
             ]);
 
+            //when baking a WHOLE clip's worth of frames in one continuous
+            //re-encode (RepeatStaticInputs), the single raw mask frame needs
+            //to persist across every output frame, not just the first. That
+            //has to happen as a FILTER (the `loop` filter, looping 1 frame
+            //starting at frame 0, indefinitely) rather than an input option —
+            //`-loop` is specific to the image2 demuxer and rawvideo doesn't
+            //support it at all ("Option loop not found", confirmed directly).
+            //The ordinary per-frame path renders exactly one output frame per
+            //ffmpeg process, so the single raw frame is read once there and
+            //never needs looping either way
+            string maskSource = $"{index}:v";
+            if (context.RepeatStaticInputs)
+            {
+                string looped = context.Graph.NextLabel("efroundmaskloop");
+                context.Graph.FilterLines.Add($"[{maskSource}]loop=loop=-1:size=1:start=0[{looped}]");
+                maskSource = looped;
+            }
+
             string maskLabel = context.Graph.NextLabel("efroundmask");
             context.Graph.FilterLines.Add(
-                $"[{index}:v]pad={context.FrameWidth}:{context.FrameHeight}:{maskX}:{maskY}:color=black[{maskLabel}]");
+                $"[{maskSource}]pad={context.FrameWidth}:{context.FrameHeight}:{maskX}:{maskY}:color=black[{maskLabel}]");
 
             string colourCopy = context.Graph.NextLabel("efroundcol");
             string alphaCopy = context.Graph.NextLabel("efroundalpha");
             context.Graph.FilterLines.Add($"[{label}]split=2[{colourCopy}][{alphaCopy}]");
 
             string existingAlpha = context.Graph.NextLabel("efroundsrcalpha");
-            context.Graph.FilterLines.Add($"[{alphaCopy}]format={PixelFormats.Rgba},alphaextract[{existingAlpha}]");
+            context.Graph.FilterLines.Add($"[{alphaCopy}]format={PixelFormats.Primary},alphaextract[{existingAlpha}]");
 
             string combined = context.Graph.NextLabel("efroundcomb");
             context.Graph.FilterLines.Add(
-                $"[{existingAlpha}][{maskLabel}]blend=all_mode=multiply[{combined}]");
+                //shortest=1 is required, not cosmetic, now that the mask can
+                //be an infinitely-looped stream (RepeatStaticInputs — see
+                //above): blend's own default is shortest=0, meaning it runs
+                //until the LONGER of its two inputs ends rather than the
+                //shorter one. With an infinite mask as the second input,
+                //"longer" never arrives, and the whole graph — everything
+                //downstream of this blend, all the way to the encoder — never
+                //terminates either, growing the output file without bound.
+                //Confirmed directly: this is exactly what a real baked render
+                //did (grew to 55GB before being killed) before shortest was
+                //added. Harmless in the ordinary single-frame per-frame path,
+                //where both inputs are already exactly one frame regardless.
+                $"[{existingAlpha}][{maskLabel}]blend=all_mode=multiply:shortest=1[{combined}]");
 
             string next = context.Graph.NextLabel("efround");
             context.Graph.FilterLines.Add($"[{colourCopy}][{combined}]alphamerge[{next}]");
@@ -138,7 +168,7 @@ namespace EditSharp.Render
 
             string silhouette = context.Graph.NextLabel("efshadowmask");
             context.Graph.FilterLines.Add(
-                $"[{silhouetteCopy}]format={PixelFormats.Rgba},alphaextract," +
+                $"[{silhouetteCopy}]format={PixelFormats.Primary},alphaextract," +
                 $"lut=y='val*{GraphUtilities.Num(Math.Clamp(effect.Opacity, 0f, 1f))}'[{silhouette}]");
 
             string colourHex =
@@ -193,7 +223,7 @@ namespace EditSharp.Render
             context.Graph.FilterLines.Add(
                 $"color=0x{colourHex}:size={paddedWidth}x{paddedHeight}:" +
                 $"rate={context.Fps}:duration={GraphUtilities.Num(context.DurationSeconds)}," +
-                $"format={PixelFormats.Rgba}[{shadowColour}]");
+                $"format={PixelFormats.Primary}[{shadowColour}]");
 
             string shadowShape = context.Graph.NextLabel("efshadowshape");
             context.Graph.FilterLines.Add(
@@ -263,7 +293,7 @@ namespace EditSharp.Render
 
             string blurredAlpha = context.Graph.NextLabel("efblurmask");
             context.Graph.FilterLines.Add(
-                $"[{alphaCopy}]format={PixelFormats.Rgba},alphaextract," +
+                $"[{alphaCopy}]format={PixelFormats.Primary},alphaextract," +
                 $"gblur=sigma={GraphUtilities.Num(sigma)}[{blurredAlpha}]");
 
             string blurredColour = context.Graph.NextLabel("efblurrgb");

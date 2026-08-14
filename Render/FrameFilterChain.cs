@@ -42,6 +42,17 @@ namespace EditSharp.Render
         public int NativeHeight { get; init; }
 
         /// <summary>
+        /// True when this clip's PreTransform effects were already baked into
+        /// its optimized media (see OptimizedMedia.EffectsBaked /
+        /// VideoUtils.ReencodeVideoAsync's preTransformEffects parameter),
+        /// meaning ClipVideoChain.Build must NOT apply them again here —
+        /// doing so would double them up. Always false for anything that
+        /// isn't a video SourceClip with optimized media, since only that
+        /// path bakes effects.
+        /// </summary>
+        public bool PreTransformEffectsBaked { get; init; }
+
+        /// <summary>
         /// Clip-relative seconds at this output frame. Generator and noise
         /// clips are functions of their own elapsed time, so they need this
         /// even though they never decode anything.
@@ -229,7 +240,8 @@ namespace EditSharp.Render
                 fps, FrameDurationSeconds(fps),
                 graph, tempFiles,
                 frameClip.Transform,
-                modulateApplied);
+                modulateApplied,
+                frameClip.PreTransformEffectsBaked);
         }
 
         /// <summary>
@@ -268,7 +280,7 @@ namespace EditSharp.Render
                     string label = graph.NextLabel("frsrc");
                     graph.FilterLines.Add(
                         $"[{index}:v]trim=end_frame=1,setpts=PTS-STARTPTS," +
-                        $"format={PixelFormats.Rgba},settb=AVTB[{label}]");
+                        $"format={PixelFormats.Primary},settb=AVTB[{label}]");
 
                     return label;
                 }
@@ -285,7 +297,7 @@ namespace EditSharp.Render
                     string label = graph.NextLabel("frstatic");
                     graph.FilterLines.Add(
                         $"[{index}:v]trim=end_frame=1,setpts=PTS-STARTPTS," +
-                        $"format={PixelFormats.Rgba},settb=AVTB[{label}]");
+                        $"format={PixelFormats.Primary},settb=AVTB[{label}]");
 
                     return label;
                 }
@@ -309,7 +321,7 @@ namespace EditSharp.Render
                         $"color={colour.Hex}:size={canvasWidth}x{canvasHeight}:rate={fps}:" +
                         $"duration={GraphUtilities.Num(FrameDurationSeconds(fps))}," +
                         $"trim=end_frame=1,setpts=PTS-STARTPTS," +
-                        $"format={PixelFormats.Rgba},settb=AVTB[{label}]");
+                        $"format={PixelFormats.Primary},settb=AVTB[{label}]");
 
                     return label;
                 }
@@ -340,7 +352,7 @@ namespace EditSharp.Render
                         $"trim=start_frame={(int)Math.Round(frameClip.ClipSeconds * fps)}:" +
                         $"end_frame={(int)Math.Round(frameClip.ClipSeconds * fps) + 1}," +
                         $"setpts=PTS-STARTPTS," +
-                        $"format={PixelFormats.Rgba},settb=AVTB[{label}]");
+                        $"format={PixelFormats.Primary},settb=AVTB[{label}]");
 
                     return label;
                 }
@@ -420,7 +432,7 @@ namespace EditSharp.Render
 
             string mask = graph.NextLabel("frblendalpha");
             graph.FilterLines.Add(
-                $"[{maskSource}]format={PixelFormats.Rgba},alphaextract[{mask}]");
+                $"[{maskSource}]format={PixelFormats.Primary},alphaextract[{mask}]");
 
             string backdropCopy = graph.NextLabel("frblendbase");
             string backdropKeep = graph.NextLabel("frblendkeep");
@@ -456,7 +468,7 @@ namespace EditSharp.Render
             graph.FilterLines.Add(
                 $"color=black:size={canvasWidth}x{canvasHeight}:rate={fps}:" +
                 $"duration={GraphUtilities.Num(FrameDurationSeconds(fps))}," +
-                $"format={PixelFormats.Rgba},settb=AVTB[{backdrop}]");
+                $"format={PixelFormats.Primary},settb=AVTB[{backdrop}]");
 
             string flattened = graph.NextLabel("frout");
             graph.FilterLines.Add(
