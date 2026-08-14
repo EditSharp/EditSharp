@@ -1,8 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components.Effects;
+using EditSharp.Components;
 using EditSharp.Components.Clips;
 
 namespace EditSharp.Render
@@ -73,6 +74,12 @@ namespace EditSharp.Render
         /// <summary>
         /// Builds the whole chain. contentLabel must be a trimmed video stream at
         /// the source's native resolution; the returned label is canvas-sized RGBA.
+        ///
+        /// literalTransform is the clip's state already resolved to this exact
+        /// render's point in time (see Clip.TransformAt) — there is no other
+        /// caller left that renders a clip's whole keyframe animation as one
+        /// continuous stream, so there is nothing left for this to be optional
+        /// against.
         /// </summary>
         public static string Build(
             Clip clip,
@@ -81,22 +88,17 @@ namespace EditSharp.Render
             int canvasWidth, int canvasHeight,
             int fps, double durationSeconds,
             InputGraph graph, ConcurrentBag<string> tempFiles,
-            bool modulateAlreadyApplied = false,
-            TransformExpressions.WorkRect? workRect = null)
+            ClipTransform literalTransform,
+            bool modulateAlreadyApplied = false)
         {
-            //no work rect supplied means the old behaviour: render this clip in a
-            //full-canvas frame at the origin. Every fallback path relies on that
-            //being byte-for-byte what the pipeline did before bounding boxes
-            //existed, so it is expressed as the general case with frame == canvas
-            //rather than as a separate branch.
             TransformExpressions.WorkRect rect =
-                workRect ?? TransformExpressions.WorkRect.FullCanvas(canvasWidth, canvasHeight);
+                TransformExpressions.WorkRect.FullCanvas(canvasWidth, canvasHeight);
 
             var (contentWidth, contentHeight) = TransformExpressions.ComputeContentSize(
                 clip, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
 
-            //the content is CENTRED in the work frame, which is what makes the
-            //frame's model-space outset symmetric — see PlaceInFrame
+            //the content is CENTRED in the frame, which is what makes the frame's
+            //model-space outset symmetric — see PlaceInFrame
             TransformExpressions.ContentPlacement placement =
                 TransformExpressions.PlaceInFrame(
                     contentWidth, contentHeight, rect.Width, rect.Height);
@@ -117,7 +119,7 @@ namespace EditSharp.Render
                 : ApplyModulate(clip, preEffects, context);
 
             string transformed = ApplyTransform(
-                clip, modulated, nativeWidth, nativeHeight, context);
+                modulated, nativeWidth, nativeHeight, context, literalTransform);
 
             return ClipEffects.ApplyStage(
                 clip.Effects, EffectStage.PostTransform, transformed, context);
@@ -137,7 +139,8 @@ namespace EditSharp.Render
             //resampling kernel, instead of in `perspective`'s two-tap bilinear
             string framed = context.Graph.NextLabel("clframe");
             context.Graph.FilterLines.Add(
-                $"[{contentLabel}]scale={p.Width}:{p.Height},setsar=1,fps={context.Fps},format=rgba," +
+                $"[{contentLabel}]scale={p.Width}:{p.Height},setsar=1,fps={context.Fps}," +
+                $"format={PixelFormats.Rgba}," +
                 $"pad={context.FrameWidth}:{context.FrameHeight}:{p.X}:{p.Y}:color=black@0[{framed}]");
 
             return framed;
@@ -178,23 +181,27 @@ namespace EditSharp.Render
         /// any transparency the content brought with it.
         /// </summary>
         private static string ApplyTransform(
-            Clip clip, string label, int nativeWidth, int nativeHeight, ClipChainContext context)
+            string label, int nativeWidth, int nativeHeight, ClipChainContext context,
+            ClipTransform literalTransform)
         {
-            string perspective = TransformExpressions.BuildPerspectiveArgs(
-                clip, nativeWidth, nativeHeight,
+            //the clip's state is already resolved to this exact frame's time
+            //(see Clip.TransformAt / FrameStateResolver), so the corners are
+            //eight literal numbers with no keyframe expression at all
+            string perspective = TransformExpressions.BuildLiteralPerspectiveArgs(
+                literalTransform, nativeWidth, nativeHeight,
                 context.CanvasWidth, context.CanvasHeight,
                 context.FrameWidth, context.FrameHeight,
-                context.OffsetX, context.OffsetY, context.Fps);
+                context.OffsetX, context.OffsetY, context.Placement);
 
             //the mask is warped at MaskSupersample scale, so it needs the same quad
             //expressed in those larger coordinates
             string perspectiveLarge = MaskSupersample == 1
                 ? perspective
-                : TransformExpressions.BuildPerspectiveArgs(
-                    clip, nativeWidth, nativeHeight,
+                : TransformExpressions.BuildLiteralPerspectiveArgs(
+                    literalTransform, nativeWidth, nativeHeight,
                     context.CanvasWidth, context.CanvasHeight,
                     context.FrameWidth, context.FrameHeight,
-                    context.OffsetX, context.OffsetY, context.Fps, MaskSupersample);
+                    context.OffsetX, context.OffsetY, context.Placement, MaskSupersample);
 
             //filter_complex labels are single-consumer, so the stream has to be
             //split before feeding both the colour and the alpha path
@@ -216,7 +223,8 @@ namespace EditSharp.Render
 
             string warpedAlpha = context.Graph.NextLabel("cltfmask");
             context.Graph.FilterLines.Add(
-                $"[{alphaCopy}]format=rgba,alphaextract,{upscale}{perspectiveLarge}{downscale}[{warpedAlpha}]");
+                $"[{alphaCopy}]format={PixelFormats.Rgba},alphaextract," +
+                $"{upscale}{perspectiveLarge}{downscale}[{warpedAlpha}]");
 
             //The smear has to reach the CONTENT's edge, not the frame's. Now that
             //the content is sized to its on-screen size it can sit well inside the
@@ -233,15 +241,43 @@ namespace EditSharp.Render
 
             string warpedColour = context.Graph.NextLabel("cltfrgb");
             context.Graph.FilterLines.Add(
-                $"[{colourCopy}]format=gbrp," +
+                $"[{colourCopy}]format={PixelFormats.Gbrp}," +
                 $"fillborders=left={left}:right={right}:top={top}:bottom={bottom}:mode=smear," +
-                $"{perspective},format=gbrap[{warpedColour}]");
+                $"{perspective},format={PixelFormats.Gbrap}[{warpedColour}]");
 
             string merged = context.Graph.NextLabel("cltf");
             context.Graph.FilterLines.Add($"[{warpedColour}][{warpedAlpha}]alphamerge[{merged}]");
 
             return merged;
         }
+    }
+
+    /// <summary>
+    /// The pixel formats the whole pipeline works in.
+    ///
+    /// EVERYTHING is 16-bit. This is not a per-path or per-render-mode choice:
+    /// the pipeline moved off 8-bit wholesale, so there is exactly one format
+    /// set and no switch to get wrong. Splitting a render into many independent
+    /// per-frame ffmpeg processes means more discrete quantization touchpoints
+    /// than the old single-filter_complex design had — at 16 bits that rounding
+    /// is far below anything visible, and the final encode is the only place
+    /// precision is deliberately given up.
+    ///
+    /// Each of the four is the 16-bit counterpart of what this pipeline used
+    /// before: rgba->rgba64le, gbrp->gbrp16le, gbrap->gbrap16le,
+    /// gray->gray16le. All four were confirmed by direct test to be accepted by
+    /// every filter in the chain (perspective, alphaextract, alphamerge,
+    /// fillborders, gblur, blend, lut, pad, overlay, xfade), and `lut` in
+    /// particular was checked to scale proportionally rather than assuming an
+    /// 8-bit range — the drop shadow's opacity and its zero-fill both depend on
+    /// that.
+    /// </summary>
+    internal static class PixelFormats
+    {
+        public const string Rgba = "rgba64le";
+        public const string Gbrp = "gbrp16le";
+        public const string Gbrap = "gbrap16le";
+        public const string Gray = "gray16le";
     }
 
     /// <summary>

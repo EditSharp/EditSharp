@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using EditSharp;
 using EditSharp.Components;
 using EditSharp.Components.Clips;
 
@@ -29,12 +31,23 @@ namespace EditSharp.Render
     internal static class OptimizedMediaBuilder
     {
         /// <summary>
-        /// One clip's optimized media: its temp file path, and the output
-        /// frame index after which it is safe to delete. DeleteAfterFrame is
-        /// INCLUSIVE — the file may still be needed BY that frame, so only
-        /// delete once rendering has moved past it.
+        /// One clip's optimized media: its temp file path, the output frame
+        /// index after which it is safe to delete, and the file's own actual
+        /// dimensions/duration — probed once here so nothing downstream needs a
+        /// second ffprobe call just to answer "how big is this" or "how much
+        /// real content is in it".
+        ///
+        /// AvailableSeconds is what FrameStateResolver clamps a seek to: a clip
+        /// whose Duration outlasts its source freezes on the last real frame
+        /// (this pipeline's current extension behaviour) rather than looping or
+        /// running past the end of the file.
+        ///
+        /// DeleteAfterFrame is INCLUSIVE — the file may still be needed BY that
+        /// frame, so only delete once rendering has moved past it.
         /// </summary>
-        public readonly record struct OptimizedMedia(string Path, int DeleteAfterFrame);
+        public readonly record struct OptimizedMedia(
+            string Path, int DeleteAfterFrame,
+            int NativeWidth, int NativeHeight, double AvailableSeconds);
 
         /// <summary>
         /// Builds optimized media for every SourceClip backed by a Video
@@ -72,7 +85,14 @@ namespace EditSharp.Render
                 }
             }
 
+            EditSharpConfig.Logger.Log(
+                $"Building optimized media for {tasks.Count} clip(s) (concurrency {maxConcurrency})...");
+            var sw = Stopwatch.StartNew();
+
             await Task.WhenAll(tasks);
+
+            EditSharpConfig.Logger.Log(
+                $"Optimized media built for {tasks.Count} clip(s) in {sw.ElapsedMilliseconds}ms.");
 
             return new Dictionary<Clip, OptimizedMedia>(results);
         }
@@ -84,7 +104,15 @@ namespace EditSharp.Render
             await gate.WaitAsync();
             try
             {
+                var sw = Stopwatch.StartNew();
                 string path = await VideoUtils.ReencodeVideoAsync(sourceClip.Source, VideoCodec.FFV1);
+
+                //probing the OPTIMIZED file rather than re-deriving from
+                //Source/SourceTiming a second time — the file on disk is the
+                //single source of truth for what actually got built, whatever
+                //trimming/clamping produced it
+                MediaInfo info = await MediaProbe.ProbeAsync(path);
+                double available = info.Duration?.TotalSeconds ?? clip.Duration.TotalSeconds;
 
                 //Clips are half-open [Start, End) elsewhere in this codebase
                 //(see Channel.InsertClip's "intersection is exactly zero" for
@@ -98,7 +126,12 @@ namespace EditSharp.Render
                 //is correct at the boundary where Floor(x) is not
                 int deleteAfterFrame = (int)Math.Ceiling(clip.End.TotalSeconds * fps) - 1;
 
-                results[clip] = new OptimizedMedia(path, deleteAfterFrame);
+                results[clip] = new OptimizedMedia(
+                    path, deleteAfterFrame, info.Width, info.Height, available);
+
+                EditSharpConfig.Logger.LogVerbose(
+                    $"Optimized media for '{sourceClip.Source.Path}' built in {sw.ElapsedMilliseconds}ms " +
+                    $"({info.Width}x{info.Height}, {available:F2}s available) -> {path}");
             }
             finally
             {

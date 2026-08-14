@@ -1,3 +1,4 @@
+﻿using EditSharp;
 using System;
 using System.Globalization;
 using System.IO;
@@ -52,7 +53,7 @@ namespace EditSharp.Render
             string blankLabel = graph.NextLabel(labelPrefix);
             graph.FilterLines.Add(
                 $"color=black:size={width}x{height}:rate={fps}:duration={Num(duration)}," +
-                $"format=rgba,colorchannelmixer=aa=0[{blankLabel}]");
+                $"format={PixelFormats.Rgba},colorchannelmixer=aa=0[{blankLabel}]");
 
             return blankLabel;
         }

@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using SkiaSharp;
+using EditSharp;
 using EditSharp.Components.Effects;
 
 namespace EditSharp.Render
@@ -23,6 +25,12 @@ namespace EditSharp.Render
     /// </summary>
     internal static class ClipEffects
     {
+        //keyed on the mask's only real degrees of freedom: its buffer size and
+        //radius. Every clip with a RoundedCornersEffect at a given size/radius
+        //shares one file instead of each frame rasterizing its own — see
+        //GetOrCreateMask
+        private static readonly ConcurrentDictionary<(int Width, int Height, float Radius), string> MaskCache = new();
+
         /// <summary>
         /// Runs every enabled effect assigned to the given stage, in list order.
         /// </summary>
@@ -77,22 +85,29 @@ namespace EditSharp.Render
             int maskX = stage == EffectStage.PreTransform ? placement.X : 0;
             int maskY = stage == EffectStage.PreTransform ? placement.Y : 0;
 
-            string maskPath = RasterizeRoundedRectMask(maskWidth, maskHeight, effect.Radius);
-            context.TempFiles.Add(maskPath);
+            string maskPath = GetOrCreateMask(maskWidth, maskHeight, effect.Radius, context.TempFiles);
 
-            int index = context.Graph.AddInput(maskPath, true, ["-loop", "1"]);
+            //raw gray16le, not a PNG behind -loop 1 — the file already contains
+            //exactly the pixel format the rest of the chain works in, so there's
+            //no decode or format conversion to do on the way in
+            int index = context.Graph.AddInput(maskPath, true,
+            [
+                "-f", "rawvideo",
+                "-pix_fmt", PixelFormats.Gray,
+                "-s", $"{maskWidth}x{maskHeight}",
+                "-r", context.Fps.ToString(CultureInfo.InvariantCulture),
+            ]);
 
             string maskLabel = context.Graph.NextLabel("efroundmask");
             context.Graph.FilterLines.Add(
-                $"[{index}:v]format=gray,fps={context.Fps}," +
-                $"pad={context.FrameWidth}:{context.FrameHeight}:{maskX}:{maskY}:color=black[{maskLabel}]");
+                $"[{index}:v]pad={context.FrameWidth}:{context.FrameHeight}:{maskX}:{maskY}:color=black[{maskLabel}]");
 
             string colourCopy = context.Graph.NextLabel("efroundcol");
             string alphaCopy = context.Graph.NextLabel("efroundalpha");
             context.Graph.FilterLines.Add($"[{label}]split=2[{colourCopy}][{alphaCopy}]");
 
             string existingAlpha = context.Graph.NextLabel("efroundsrcalpha");
-            context.Graph.FilterLines.Add($"[{alphaCopy}]format=rgba,alphaextract[{existingAlpha}]");
+            context.Graph.FilterLines.Add($"[{alphaCopy}]format={PixelFormats.Rgba},alphaextract[{existingAlpha}]");
 
             string combined = context.Graph.NextLabel("efroundcomb");
             context.Graph.FilterLines.Add(
@@ -123,7 +138,7 @@ namespace EditSharp.Render
 
             string silhouette = context.Graph.NextLabel("efshadowmask");
             context.Graph.FilterLines.Add(
-                $"[{silhouetteCopy}]format=rgba,alphaextract," +
+                $"[{silhouetteCopy}]format={PixelFormats.Rgba},alphaextract," +
                 $"lut=y='val*{GraphUtilities.Num(Math.Clamp(effect.Opacity, 0f, 1f))}'[{silhouette}]");
 
             string colourHex =
@@ -168,7 +183,7 @@ namespace EditSharp.Render
             context.Graph.FilterLines.Add(
                 $"color=black:size={paddedWidth}x{paddedHeight}:rate={context.Fps}:" +
                 $"duration={GraphUtilities.Num(context.DurationSeconds)}," +
-                $"format=gray,lut=y=0[{padBase}]");
+                $"format={PixelFormats.Gray},lut=y=0[{padBase}]");
 
             string silhouettePadded = context.Graph.NextLabel("efshadowmaskpad");
             context.Graph.FilterLines.Add(
@@ -178,7 +193,7 @@ namespace EditSharp.Render
             context.Graph.FilterLines.Add(
                 $"color=0x{colourHex}:size={paddedWidth}x{paddedHeight}:" +
                 $"rate={context.Fps}:duration={GraphUtilities.Num(context.DurationSeconds)}," +
-                $"format=rgba[{shadowColour}]");
+                $"format={PixelFormats.Rgba}[{shadowColour}]");
 
             string shadowShape = context.Graph.NextLabel("efshadowshape");
             context.Graph.FilterLines.Add(
@@ -248,13 +263,14 @@ namespace EditSharp.Render
 
             string blurredAlpha = context.Graph.NextLabel("efblurmask");
             context.Graph.FilterLines.Add(
-                $"[{alphaCopy}]format=rgba,alphaextract,gblur=sigma={GraphUtilities.Num(sigma)}[{blurredAlpha}]");
+                $"[{alphaCopy}]format={PixelFormats.Rgba},alphaextract," +
+                $"gblur=sigma={GraphUtilities.Num(sigma)}[{blurredAlpha}]");
 
             string blurredColour = context.Graph.NextLabel("efblurrgb");
             context.Graph.FilterLines.Add(
-                $"[{colourCopy}]format=gbrp," +
+                $"[{colourCopy}]format={PixelFormats.Gbrp}," +
                 $"fillborders=left={left}:right={right}:top={top}:bottom={bottom}:mode=smear," +
-                $"gblur=sigma={GraphUtilities.Num(sigma)},format=gbrap[{blurredColour}]");
+                $"gblur=sigma={GraphUtilities.Num(sigma)},format={PixelFormats.Gbrap}[{blurredColour}]");
 
             string next = context.Graph.NextLabel("efblur");
             context.Graph.FilterLines.Add($"[{blurredColour}][{blurredAlpha}]alphamerge[{next}]");
@@ -263,12 +279,52 @@ namespace EditSharp.Render
         }
 
         /// <summary>
-        /// Rasterizes a white rounded rectangle on black, for use as an alpha mask.
-        /// Skia antialiases the corner arcs, which is the whole reason this isn't
-        /// built from ffmpeg primitives.
+        /// Returns the mask for (width, height, radius), rasterizing it the
+        /// first time that combination is seen and reusing the file on every
+        /// subsequent call. The mask is a pure function of these three values,
+        /// and none of them vary frame to frame for a given clip — without this
+        /// cache the identical mask was being rebuilt (Skia draw + disk write)
+        /// from scratch on every single frame the clip is visible on.
         ///
-        /// Radius is a 0-1 fraction where 1 rounds each corner as far as it can go
-        /// — half the shorter side, giving a pill or a circle.
+        /// GetOrAdd's factory isn't guaranteed atomic across threads, so two
+        /// concurrent frame renders can race and both rasterize before either
+        /// publishes — harmless (both are byte-identical), just occasionally
+        /// wasted work. The loser deletes its own copy rather than leaking a
+        /// file nothing will ever reference; only the winner registers its path
+        /// with tempFiles, so cleanup doesn't accumulate duplicate entries
+        /// across every frame that happens to look this key up.
+        /// </summary>
+        private static string GetOrCreateMask(
+            int width, int height, float radiusFraction, ConcurrentBag<string> tempFiles)
+        {
+            var key = (width, height, radiusFraction);
+
+            if (MaskCache.TryGetValue(key, out string? existing)) return existing;
+
+            string candidate = RasterizeRoundedRectMask(width, height, radiusFraction);
+
+            if (MaskCache.TryAdd(key, candidate))
+            {
+                tempFiles.Add(candidate);
+                return candidate;
+            }
+
+            try { File.Delete(candidate); } catch { /* best-effort */ }
+            return MaskCache[key];
+        }
+
+        /// <summary>
+        /// Rasterizes a white rounded rectangle on black as RAW gray16le pixel
+        /// data — not a PNG. This mask is fed straight into the per-frame filter
+        /// graph as optimized media (see OptimizedMediaBuilder's own reasoning
+        /// for choosing FFV1 over a compressed codec): there's no reason to pay
+        /// PNG encode cost writing it and decode+format-conversion cost reading
+        /// it back when the rest of the pipeline already standardizes on raw
+        /// 16-bit planes. Skia antialiases the corner arcs, which is the whole
+        /// reason this isn't built from ffmpeg primitives instead.
+        ///
+        /// Radius is a 0-1 fraction where 1 rounds each corner as far as it can
+        /// go — half the shorter side, giving a pill or a circle.
         ///
         /// Note this always produces an AXIS-ALIGNED rounded rectangle. That is
         /// correct pre-transform, where the content is upright and the mask warps
@@ -297,16 +353,43 @@ namespace EditSharp.Render
             canvas.Flush();
 
             string path = GraphUtilities.GetImageTempFilePath(
-                $"roundmask_{Guid.NewGuid():N}.png");
+                $"roundmask_{Guid.NewGuid():N}.raw");
 
-            using (var image = surface.Snapshot())
-            using (SKData data = image.Encode(SKEncodedImageFormat.Png, 100))
-            using (FileStream stream = File.OpenWrite(path))
-            {
-                data.SaveTo(stream);
-            }
+            using SKImage image = surface.Snapshot();
+            using SKPixmap pixmap = image.PeekPixels();
+
+            WriteGray16LeFromRed(pixmap, width, height, path);
 
             return path;
+        }
+
+        /// <summary>
+        /// Takes the red channel (== green == blue here, since the draw above is
+        /// pure black/white) and expands each 8-bit sample to 16-bit LE by
+        /// replicating the byte into both octets (v, v) — 255 maps to 65535
+        /// exactly this way, matching the value*257 mapping ffmpeg's own
+        /// 8-to-16-bit conversions use, rather than the value*256 a naive
+        /// left-shift would produce.
+        /// </summary>
+        private static void WriteGray16LeFromRed(SKPixmap pixmap, int width, int height, string path)
+        {
+            ReadOnlySpan<byte> pixels = pixmap.GetPixelSpan();
+            int stride = pixmap.RowBytes;
+
+            using FileStream stream = File.OpenWrite(path);
+            byte[] row = new byte[width * 2];
+
+            for (int y = 0; y < height; y++)
+            {
+                int rowStart = y * stride;
+                for (int x = 0; x < width; x++)
+                {
+                    byte v = pixels[rowStart + (x * 4)]; // R of RGBA8888
+                    row[x * 2] = v;
+                    row[(x * 2) + 1] = v;
+                }
+                stream.Write(row, 0, row.Length);
+            }
         }
     }
 }

@@ -10,7 +10,7 @@ namespace EditSharp
     /// </summary>
     public static class EditSharpConfig
     {
-        private static string _tempDirectory = AppContext.BaseDirectory;
+        private static string _tempDirectory = Path.Combine(AppContext.BaseDirectory, "Temp");
 
         /// <summary>
         /// Root directory EditSharp writes scratch files into — rasterized text
@@ -66,6 +66,8 @@ namespace EditSharp
     public interface IEditSharpLogger
     {
         void Log(string message);
+
+        void LogVerbose(string message);
     }
 
     internal sealed class NullEditSharpLogger : IEditSharpLogger
@@ -73,5 +75,6 @@ namespace EditSharp
         public static readonly NullEditSharpLogger Instance = new();
         private NullEditSharpLogger() { }
         public void Log(string message) { }
+        public void LogVerbose(string message) { }
     }
 }

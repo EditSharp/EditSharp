@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using SkiaSharp;
 using EditSharp.Components;
+using EditSharp.Components.Clips;
 
 namespace EditSharp.Render
 {

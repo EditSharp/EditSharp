@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -232,110 +232,6 @@ namespace EditSharp.Render
             }
         }
 
-        /// <summary>
-        /// How far outside the exact projected quad the chain still writes pixels.
-        ///
-        /// The warped edge is antialiased by interpolating ACROSS the alpha step,
-        /// so `perspective` puts partial coverage a pixel or so beyond the quad
-        /// itself, and the area-resolve of the supersampled mask reaches a little
-        /// further again. Measured directly: a box sized to the quad alone lost
-        /// exactly one column of edge pixels on a clip whose edge fell on the box
-        /// boundary, and every inset clip was unaffected. 2px covers both.
-        /// </summary>
-        public const int EdgeSampleMargin = 2;
-
-        /// <summary>
-        /// The work frame for one clip: the union, across the clip's whole
-        /// duration, of where its content actually lands on the canvas.
-        ///
-        /// SAMPLED PER FRAME, not per keyframe. The screen-space extent between two
-        /// keyframes is not monotonic — a clip rotating from 0 to 90 degrees is at
-        /// its widest at 45, which is not a keyframe — so a keyframe-only union
-        /// comes out too small and clips content mid-animation. Per-frame sampling
-        /// is a few thousand corner projections for a long clip, which is nothing
-        /// next to rendering it, and it removes an entire class of "looked right on
-        /// paper" failure.
-        ///
-        /// extraMargin is for post-transform effects that draw OUTSIDE the content
-        /// — a drop shadow's blur and offset, a blur's spread. Those are screen-
-        /// space quantities so they add directly in canvas pixels.
-        ///
-        /// The result is clipped to the canvas (nothing outside it is visible), and
-        /// then grown if necessary so the frame can still hold the content plus its
-        /// transparent border: `perspective`'s input and output are the same
-        /// buffer, so it has to satisfy both at once.
-        /// </summary>
-        public static WorkRect ComputeWorkRect(
-            Clip clip, int nativeWidth, int nativeHeight,
-            int canvasWidth, int canvasHeight, int fps, double durationSeconds,
-            int extraMargin = 0)
-        {
-            var (contentW, contentH) = ComputeContentSize(
-                clip, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
-
-            var (fitW, fitH) = BaseFitSize(nativeWidth, nativeHeight, canvasWidth, canvasHeight);
-
-            double minX = double.MaxValue, minY = double.MaxValue;
-            double maxX = double.MinValue, maxY = double.MinValue;
-
-            int frames = Math.Max(1, (int)Math.Ceiling(durationSeconds * fps));
-
-            for (int i = 0; i <= frames; i++)
-            {
-                double t = Math.Min(i / (double)fps, durationSeconds);
-                ClipTransform transform = clip.TransformAt(TimeSpan.FromSeconds(t));
-
-                foreach ((int sx, int sy) in Corners)
-                {
-                    var (x, y) = ProjectCorner(
-                        sx, sy, transform, fitW, fitH, canvasWidth, canvasHeight);
-
-                    minX = Math.Min(minX, x);
-                    minY = Math.Min(minY, y);
-                    maxX = Math.Max(maxX, x);
-                    maxY = Math.Max(maxY, y);
-                }
-            }
-
-            int margin = extraMargin + EdgeSampleMargin;
-
-            int x0 = Math.Max(0, (int)Math.Floor(minX) - margin);
-            int y0 = Math.Max(0, (int)Math.Floor(minY) - margin);
-            int x1 = Math.Min(canvasWidth, (int)Math.Ceiling(maxX) + margin);
-            int y1 = Math.Min(canvasHeight, (int)Math.Ceiling(maxY) + margin);
-
-            //a clip animated entirely off-canvas still has to produce a legal
-            //buffer; the enable window is what stops it being seen, not this
-            if (x1 <= x0) { x0 = 0; x1 = 2; }
-            if (y1 <= y0) { y0 = 0; y1 = 2; }
-
-            //offsets kept even purely as a precaution around the supersampled
-            //mask's neighbour-upscale/area-downscale pair. Tested at odd offsets
-            //and the output was identical, so this is belt-and-braces rather than
-            //load-bearing — it costs at most one pixel of frame.
-            x0 -= x0 % 2;
-            y0 -= y0 % 2;
-
-            int width = Math.Max(x1 - x0, contentW + (2 * TransparentBorderPixels));
-            int height = Math.Max(y1 - y0, contentH + (2 * TransparentBorderPixels));
-
-            width += width % 2;
-            height += height % 2;
-
-            //ComputeContentSize caps the content to canvas minus two borders, so
-            //the minimum above can never exceed the canvas
-            width = Math.Min(width, canvasWidth);
-            height = Math.Min(height, canvasHeight);
-
-            if (x0 + width > canvasWidth) x0 = Math.Max(0, canvasWidth - width);
-            if (y0 + height > canvasHeight) y0 = Math.Max(0, canvasHeight - height);
-
-            return new WorkRect(x0, y0, width, height);
-        }
-
-        private static readonly (int X, int Y)[] Corners =
-            [(-1, +1), (+1, +1), (-1, -1), (+1, -1)];
-
         private static int EvenAtLeast2(int value)
         {
             value = Math.Max(2, value);
@@ -472,247 +368,42 @@ namespace EditSharp.Render
         }
 
         /// <summary>
-        /// The complete `perspective` filter arguments for a clip. When the clip
-        /// has no keyframes this is eight literal numbers and eval stays at init;
-        /// with keyframes each value becomes an expression in `on` and eval moves
-        /// to frame.
+        /// The complete `perspective` filter arguments for ONE FRAME, given a
+        /// transform already resolved to that frame's exact time (e.g. via
+        /// Clip.TransformAt). Always eight literal numbers and eval=init — there
+        /// is no animation for `perspective` to evaluate, because there is no
+        /// time in this filter graph at all: EditSharp resolved the clip's state
+        /// before building the command, rather than handing ffmpeg a keyframe
+        /// curve to evaluate via `on`/`t`.
         ///
-        /// `on` (the filter's output frame counter) is used rather than `t`
-        /// because `perspective` does not expose `t` at all — verified against the
-        /// filter directly. Since the output frame rate is fixed at build time,
-        /// on/fps is exactly the clip-relative time in seconds, and each clip is
-        /// its own stream so the counter starts at zero where the clip does.
-        ///
-        /// Passing the full canvas as the frame with a zero offset reproduces the
-        /// pre-bounding-box output exactly, which is what the full-canvas fallback
-        /// paths rely on.
+        /// This is the frame-by-frame render's equivalent of BuildPerspectiveArgs'
+        /// own no-keyframes branch — same ComputeQuad math, just called with a
+        /// transform pinned to a point in time instead of read off the clip
+        /// directly, so it works whether or not the clip itself is keyframed.
         /// </summary>
-        public static string BuildPerspectiveArgs(
-            Clip clip,
+        public static string BuildLiteralPerspectiveArgs(
+            ClipTransform transform,
             int nativeWidth, int nativeHeight,
             int canvasWidth, int canvasHeight,
             int frameWidth, int frameHeight,
             int offsetX, int offsetY,
-            int fps,
+            ContentPlacement placement,
             int coordinateScale = 1)
         {
-            var (contentWidth, contentHeight) = ComputeContentSize(
-                clip, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
+            Quad q = ComputeQuad(
+                transform, nativeWidth, nativeHeight, canvasWidth, canvasHeight,
+                frameWidth, frameHeight, offsetX, offsetY, placement);
 
-            ContentPlacement placement = PlaceInFrame(
-                contentWidth, contentHeight, frameWidth, frameHeight);
+            double k = coordinateScale;
 
-            var (contentW, contentH) = BaseFitSize(nativeWidth, nativeHeight, canvasWidth, canvasHeight);
-            var (baseW, baseH) = OutsetToFrame(contentW, contentH, frameWidth, frameHeight, placement);
-
-            if (clip.Keyframes.Count == 0)
-            {
-                Quad q = ComputeQuad(
-                    clip.Transform, nativeWidth, nativeHeight, canvasWidth, canvasHeight,
-                    frameWidth, frameHeight, offsetX, offsetY, placement);
-                double k = coordinateScale;
-
-                return $"perspective=" +
-                       $"x0={Num(q.X0 * k)}:y0={Num(q.Y0 * k)}:" +
-                       $"x1={Num(q.X1 * k)}:y1={Num(q.Y1 * k)}:" +
-                       $"x2={Num(q.X2 * k)}:y2={Num(q.Y2 * k)}:" +
-                       $"x3={Num(q.X3 * k)}:y3={Num(q.Y3 * k)}:" +
-                       $"sense=destination:eval=init";
-            }
-
-            var corners = new (double SignX, double SignY)[]
-            {
-                (-1, +1), // x0/y0 top-left
-                (+1, +1), // x1/y1 top-right
-                (-1, -1), // x2/y2 bottom-left
-                (+1, -1), // x3/y3 bottom-right
-            };
-
-            var parts = new List<string>();
-            for (int i = 0; i < corners.Length; i++)
-            {
-                var (sx, sy) = corners[i];
-                parts.Add($"x{i}='{CornerExpression(clip, sx, sy, baseW, baseH, canvasWidth, canvasHeight, fps, wantX: true, coordinateScale, offsetX, offsetY)}'");
-                parts.Add($"y{i}='{CornerExpression(clip, sx, sy, baseW, baseH, canvasWidth, canvasHeight, fps, wantX: false, coordinateScale, offsetX, offsetY)}'");
-            }
-
-            return $"perspective={string.Join(":", parts)}:sense=destination:eval=frame";
+            return $"perspective=" +
+                   $"x0={Num(q.X0 * k)}:y0={Num(q.Y0 * k)}:" +
+                   $"x1={Num(q.X1 * k)}:y1={Num(q.Y1 * k)}:" +
+                   $"x2={Num(q.X2 * k)}:y2={Num(q.Y2 * k)}:" +
+                   $"x3={Num(q.X3 * k)}:y3={Num(q.Y3 * k)}:" +
+                   $"sense=destination:eval=init";
         }
 
-        /// <summary>
-        /// One corner coordinate as an ffmpeg expression. The animated transform
-        /// properties are evaluated into registers first (st/ld), then the same
-        /// projection maths as ProjectCorner is written out against them — so the
-        /// C# and the filter agree by construction rather than by two independent
-        /// implementations happening to match.
-        /// </summary>
-        private static string CornerExpression(
-            Clip clip, double signX, double signY,
-            double baseWidth, double baseHeight,
-            int canvasWidth, int canvasHeight,
-            int fps, bool wantX, int coordinateScale,
-            int offsetX, int offsetY)
-        {
-            // clip-relative seconds; perspective exposes `on`, not `t`
-            string time = $"(on/{Num(fps)})";
-
-            string scaleX = Piecewise(clip, time, fps, t => t.Scale.X);
-            string scaleY = Piecewise(clip, time, fps, t => t.Scale.Y);
-            string rotation = Piecewise(clip, time, fps, t => t.Rotation);
-            string pitch = Piecewise(clip, time, fps, t => t.Pitch);
-            string yaw = Piecewise(clip, time, fps, t => t.Yaw);
-            string posX = Piecewise(clip, time, fps, t => t.Position.X);
-            string posY = Piecewise(clip, time, fps, t => t.Position.Y);
-
-            const double toRad = Math.PI / 180.0;
-            double cameraDistance = CameraDistance(canvasWidth);
-            double nearPlane = cameraDistance * NearPlaneFraction;
-
-            var sb = new StringBuilder();
-
-            // registers: 1 scaleX, 2 scaleY, 3 roll, 4 pitch, 5 yaw, 6 posX, 7 posY
-            sb.Append($"st(1,{scaleX});");
-            sb.Append($"st(2,{scaleY});");
-            sb.Append($"st(3,({rotation})*{Num(toRad)});");
-            sb.Append($"st(4,({pitch})*{Num(toRad)});");
-            sb.Append($"st(5,({yaw})*{Num(toRad)});");
-            sb.Append($"st(6,{posX});");
-            sb.Append($"st(7,{posY});");
-
-            // corner in model space, Y-up
-            string x0 = $"({Num(signX * baseWidth / 2.0)}*ld(1))";
-            string y0 = $"({Num(signY * baseHeight / 2.0)}*ld(2))";
-
-            // yaw about the vertical axis
-            string x1 = $"({x0}*cos(ld(5)))";
-            string z1 = $"(-{x0}*sin(ld(5)))";
-
-            // pitch about the horizontal axis
-            string y2 = $"({y0}*cos(ld(4))+{z1}*sin(ld(4)))";
-            string z2 = $"(-{y0}*sin(ld(4))+{z1}*cos(ld(4)))";
-
-            // perspective divide, clamped just short of the camera
-            string k = $"({Num(cameraDistance)}/({Num(cameraDistance)}-min({z2},{Num(nearPlane)})))";
-
-            string xp = $"({x1}*{k})";
-            string yp = $"({y2}*{k})";
-
-            // roll, then position, then into pixel space
-            //the whole corner formula is linear in output pixels, so a supersampled
-            //pass just needs every coordinate multiplied by the factor
-            string scale = coordinateScale == 1 ? "" : $"{Num(coordinateScale)}*";
-
-            //The projection above is in CANVAS pixels — it has to be, since camera
-            //distance and Position are both canvas-relative. The work frame enters
-            //here and only here, as a translation. It is subtracted BEFORE the
-            //supersample factor multiplies: the factor scales the work frame, so
-            //the translation belongs in work-frame units, not canvas ones.
-            if (wantX)
-            {
-                string xr = $"({xp}*cos(ld(3))+{yp}*sin(ld(3)))";
-                sb.Append(
-                    $"{scale}(({Num(canvasWidth / 2.0)}+{xr}+ld(6)*{Num(canvasWidth / 2.0)})" +
-                    $"-{Num(offsetX)})");
-            }
-            else
-            {
-                string yr = $"(-{xp}*sin(ld(3))+{yp}*cos(ld(3)))";
-                sb.Append(
-                    $"{scale}(({Num(canvasHeight / 2.0)}-({yr}+ld(7)*{Num(canvasHeight / 2.0)}))" +
-                    $"-{Num(offsetY)})");
-            }
-
-            return sb.ToString();
-        }
-
-        /// <summary>
-        /// A single transform property as a piecewise expression over the clip's
-        /// keyframes. Values are held before the first keyframe and after the
-        /// last; between any pair, progress runs through the same eased cubic
-        /// Clip.Ease uses.
-        ///
-        /// The easing is deliberately a cubic evaluated directly against
-        /// normalized time rather than a CSS-style cubic-bezier: solving a bezier
-        /// for its parameter given elapsed time is iterative, and ffmpeg
-        /// expressions cannot iterate. Written this way the filter reproduces
-        /// Clip.Ease exactly.
-        /// </summary>
-        private static string Piecewise(
-            Clip clip, string time, int fps, Func<ClipTransform, float> select)
-        {
-            List<Keyframe> ordered = [.. clip.Keyframes.OrderBy(k => k.Start)];
-
-            if (ordered.Count == 1) return Num(select(ordered[0].Transform));
-
-            // built from the last segment backwards so each `if` nests inside the
-            // previous one's else branch
-            string expression = Num(select(ordered[^1].Transform));
-
-            for (int i = ordered.Count - 2; i >= 0; i--)
-            {
-                Keyframe from = ordered[i];
-                Keyframe to = ordered[i + 1];
-
-                double fromValue = select(from.Transform);
-                double toValue = select(to.Transform);
-                double fromTime = from.Start.TotalSeconds;
-                double span = (to.Start - from.Start).TotalSeconds;
-
-                string segment;
-                if (span <= 0 || IsHold(from, to))
-                {
-                    // a Constant on either side means no motion across the segment
-                    segment = Num(fromValue);
-                }
-                else
-                {
-                    var (p1, p2) = ControlValues(from, to);
-
-                    string u = $"(({time}-{Num(fromTime)})/{Num(span)})";
-                    string eased =
-                        $"(3*(1-{u})*(1-{u})*{u}*{Num(p1)}" +
-                        $"+3*(1-{u})*{u}*{u}*{Num(p2)}" +
-                        $"+{u}*{u}*{u})";
-
-                    segment = $"({Num(fromValue)}+({Num(toValue - fromValue)})*{eased})";
-                }
-
-                expression = $"if(lt({time},{Num(to.Start.TotalSeconds)}),{segment},{expression})";
-            }
-
-            // hold the first keyframe's value for anything before it
-            double firstTime = ordered[0].Start.TotalSeconds;
-            if (firstTime > 0)
-            {
-                expression = $"if(lt({time},{Num(firstTime)}),{Num(select(ordered[0].Transform))},{expression})";
-            }
-
-            return expression;
-        }
-
-        private static bool IsHold(Keyframe from, Keyframe to) =>
-            from.InterpolationOut == Interpolation.Constant ||
-            to.InterpolationIn == Interpolation.Constant;
-
-        /// <summary>
-        /// The cubic's two interior control values. Placed so that a strength of 0
-        /// reproduces linear motion exactly — at p1 = 1/3 and p2 = 2/3 the cubic
-        /// collapses to u — and a strength of 1 leaves the curve fully flat at
-        /// that end. Linear and Bezier therefore agree at the boundary instead of
-        /// stepping.
-        /// </summary>
-        private static (double P1, double P2) ControlValues(Keyframe from, Keyframe to)
-        {
-            double p1 = from.InterpolationOut == Interpolation.Bezier
-                ? (1.0 - Math.Clamp(from.EaseOutStrength, 0f, 1f)) / 3.0
-                : 1.0 / 3.0;
-
-            double p2 = to.InterpolationIn == Interpolation.Bezier
-                ? 1.0 - ((1.0 - Math.Clamp(to.EaseInStrength, 0f, 1f)) / 3.0)
-                : 2.0 / 3.0;
-
-            return (p1, p2);
-        }
 
         private static double CameraDistance(int canvasWidth) =>
             (canvasWidth / 2.0) / Math.Tan(DegreesToRadians(FieldOfViewDegrees) / 2.0);

@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components;
 
-namespace EditSharp.Assembly
+namespace EditSharp.Render
 {
     /// <summary>
     /// Lookup tables shared across the assembly pipeline.
