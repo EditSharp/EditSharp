@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -190,7 +190,7 @@ namespace EditSharp.Render
             //resampling kernel, instead of in `perspective`'s two-tap bilinear
             string framed = context.Graph.NextLabel("clframe");
             context.Graph.FilterLines.Add(
-                $"[{contentLabel}]scale={p.Width}:{p.Height},setsar=1,fps={context.Fps}," +
+                $"[{contentLabel}]scale={p.Width}:{p.Height}:{GraphUtilities.ThreadPin},setsar=1,fps={context.Fps}," +
                 $"format={PixelFormats.Primary}," +
                 $"pad={context.FrameWidth}:{context.FrameHeight}:{p.X}:{p.Y}:color=black@0[{framed}]");
 
@@ -238,11 +238,18 @@ namespace EditSharp.Render
             //the clip's state is already resolved to this exact frame's time
             //(see Clip.TransformAt / FrameStateResolver), so the corners are
             //eight literal numbers with no keyframe expression at all
+            //ThreadPin on both perspectives and on the supersample scale pair
+            //below: these are the geometry/resampling filters present in the
+            //confirmed minimal reproduction of the slice-seam artifact, and
+            //`perspective` in particular runs on EVERY clip on EVERY frame
+            //whether or not a transform was actually set. See
+            //GraphUtilities.ThreadPin.
             string perspective = TransformExpressions.BuildLiteralPerspectiveArgs(
                 literalTransform, nativeWidth, nativeHeight,
                 context.CanvasWidth, context.CanvasHeight,
                 context.FrameWidth, context.FrameHeight,
-                context.OffsetX, context.OffsetY, context.Placement);
+                context.OffsetX, context.OffsetY, context.Placement)
+                + $":{GraphUtilities.ThreadPin}";
 
             //the mask is warped at MaskSupersample scale, so it needs the same quad
             //expressed in those larger coordinates
@@ -252,7 +259,8 @@ namespace EditSharp.Render
                     literalTransform, nativeWidth, nativeHeight,
                     context.CanvasWidth, context.CanvasHeight,
                     context.FrameWidth, context.FrameHeight,
-                    context.OffsetX, context.OffsetY, context.Placement, MaskSupersample);
+                    context.OffsetX, context.OffsetY, context.Placement, MaskSupersample)
+                    + $":{GraphUtilities.ThreadPin}";
 
             //filter_complex labels are single-consumer, so the stream has to be
             //split before feeding both the colour and the alpha path
@@ -266,11 +274,13 @@ namespace EditSharp.Render
             string upscale = MaskSupersample == 1
                 ? ""
                 : $"scale={context.FrameWidth * MaskSupersample}:" +
-                  $"{context.FrameHeight * MaskSupersample}:flags=neighbor,";
+                  $"{context.FrameHeight * MaskSupersample}:flags=neighbor:" +
+                  $"{GraphUtilities.ThreadPin},";
 
             string downscale = MaskSupersample == 1
                 ? ""
-                : $",scale={context.FrameWidth}:{context.FrameHeight}:flags=area";
+                : $",scale={context.FrameWidth}:{context.FrameHeight}:flags=area:" +
+                  $"{GraphUtilities.ThreadPin}";
 
             string warpedAlpha = context.Graph.NextLabel("cltfmask");
             context.Graph.FilterLines.Add(

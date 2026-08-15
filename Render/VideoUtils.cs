@@ -140,6 +140,13 @@ namespace EditSharp.Render
 
             var args = new List<string> { "-y", "-v", "error" };
 
+            //see EditSharpConfig.FilterThreads. The -vf scale below is exactly
+            //the kind of filter this applies to — ffmpeg 8.0's swscale is
+            //multi-threaded, unlike the effectively-serial one this pipeline
+            //was originally written against. Added before AddTrimmedInput
+            //because these are GLOBAL options and must precede -i.
+            args.AddRange(GraphUtilities.FilterThreadingArgs());
+
             AddTrimmedInput(args, source);
 
             if (scaleTo is { } size)

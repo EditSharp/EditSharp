@@ -26,7 +26,7 @@ namespace EditSharp.Render
         public HardwareAccelerator HardwareAccelerator { get; set; } = HardwareAccelerator.None;
 
         //how many sources can have their optimized media built concurrently
-        public int ExtractionConcurrency { get; set; } = 1;
+        public int ExtractionConcurrency { get; set; } = 2;
 
         //how many output frames can be rendered concurrently. Defaults to 1
         //(fully sequential, matching the original behaviour) rather than
@@ -35,7 +35,7 @@ namespace EditSharp.Render
         //render's turn to flush, so RAM and disk I/O both scale with this
         //directly. Raise it deliberately, watching both, rather than
         //defaulting to something that scales with core count.
-        public int FrameRenderConcurrency { get; set; } = 4;
+        public int FrameRenderConcurrency { get; set; } = 1;
 
         //path to where output should be rendered
         public required string OutputDirectory { get; set; }

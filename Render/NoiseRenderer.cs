@@ -112,10 +112,21 @@ namespace EditSharp.Render
             var args = new List<string>
             {
                 "-y", "-v", "error",
+            };
+
+            //see EditSharpConfig.FilterThreads. This file is generated once
+            //and then read by every frame the clip is visible on, so a seam
+            //baked in here would be reproduced identically on every one of
+            //those frames rather than flickering — worth pinning even though
+            //the confirmed reproduction was in the per-frame graph
+            args.AddRange(GraphUtilities.FilterThreadingArgs());
+
+            args.AddRange(new List<string>
+            {
                 "-filter_complex", filter,
                 "-map", "[out]",
                 "-c:v", Constants.VideoCodecNames[VideoCodec.FFV1],
-            };
+            });
 
             string? pixelFormat = VideoUtils.PixelFormatFor(VideoCodec.FFV1);
             if (pixelFormat != null)

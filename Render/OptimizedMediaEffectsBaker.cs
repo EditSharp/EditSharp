@@ -141,6 +141,14 @@ namespace EditSharp.Render
 
             var args = new List<string> { "-y", "-v", "error" };
 
+            //see EditSharpConfig.FilterThreads. This graph runs the SAME
+            //ClipEffects chains the per-frame path does (gblur, blend,
+            //alphamerge, scale), just once over a whole clip instead of per
+            //frame — so it is exposed to the identical inter-thread seam, and
+            //a seam baked into optimized media would then be replayed on
+            //every frame that reads it.
+            args.AddRange(GraphUtilities.FilterThreadingArgs());
+
             foreach (var input in graph.Inputs)
             {
                 if (input.ExtraArgs != null) args.AddRange(input.ExtraArgs);

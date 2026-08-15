@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -156,17 +156,6 @@ namespace EditSharp.Render
             var frameTasks = new Task<(byte[] Buffer, int Length)>[totalFrames];
             var sw = Stopwatch.StartNew();
 
-            //frame 0 alone can't tell us whether per-frame seek cost GROWS
-            //with how far into the source the target timestamp is — its own
-            //seek offset is always near zero. A second checkpoint partway
-            //through gives ffmpeg's own decode_video bench numbers something
-            //to compare against: if seeking without a usable Cues index falls
-            //back to an O(n) forward scan, the SAME clips' decode_video "real"
-            //time at this checkpoint should be visibly larger than at frame 0.
-            //100 if the render is that long, otherwise roughly the midpoint —
-            //either way, meaningfully further into the source than frame 0.
-            int benchmarkCheckpoint = Math.Min(100, totalFrames / 2);
-
             async Task<(byte[] Buffer, int Length)> RenderOneAsync(int frameIndex)
             {
                 await gate.WaitAsync();
@@ -183,44 +172,8 @@ namespace EditSharp.Render
                     FrameState state = FrameStateResolver.Resolve(
                         timeline, frameIndex, fps, optimizedMedia, nativeSizes, staticImages);
 
-                    bool benchmark = frameIndex == 0 || frameIndex == benchmarkCheckpoint;
-
-                    (byte[] Buffer, int Length) result = await RenderFrameAsync(
-                        state, chainBuilder, width, height, fps, tempFiles, benchmark);
-
-                    if (frameIndex == benchmarkCheckpoint)
-                    {
-                        //diagnostic only — re-renders frame 0's EXACT content
-                        //again, this late in the render, and discards the
-                        //output (never written to the accumulator, never
-                        //counted as a real frame). The comparison this buys:
-                        //if THIS takes roughly frame 0's original time, the
-                        //checkpoint's slowdown is driven by that frame's own
-                        //content (e.g. a more expensive resolved transform);
-                        //if it's roughly as slow as the REAL checkpoint frame
-                        //instead, the slowdown is driven by something that
-                        //accumulates over the render's lifetime — process
-                        //count, disk/AV state, memory fragmentation — since
-                        //the content here is IDENTICAL to frame 0's and only
-                        //WHEN it runs differs
-                        EditSharpConfig.Logger.Log(
-                            $"Diagnostic: replaying frame 0's content at position " +
-                            $"{frameIndex} for comparison...");
-
-                        FrameState replay = FrameStateResolver.Resolve(
-                            timeline, 0, fps, optimizedMedia, nativeSizes, staticImages);
-
-                        (byte[] Buffer, int Length) discarded = await RenderFrameAsync(
-                            replay, chainBuilder, width, height, fps, tempFiles, benchmark: true);
-
-                        //this one is never written anywhere — return it to the
-                        //pool immediately rather than leaving it for the GC,
-                        //same as every real frame's buffer does after it's
-                        //written to the accumulator below
-                        ArrayPool<byte>.Shared.Return(discarded.Buffer);
-                    }
-
-                    return result;
+                    return await RenderFrameAsync(
+                        state, chainBuilder, width, height, fps, tempFiles);
                 }
                 finally
                 {
@@ -311,7 +264,7 @@ namespace EditSharp.Render
                         using Process self = Process.GetCurrentProcess();
                         self.Refresh();
 
-                        EditSharpConfig.Logger.Log(
+                        EditSharpConfig.Logger.LogVerbose(
                             $"Resource sample @ frame {frameIndex + 1}: " +
                             $"handles={self.HandleCount}, threads={self.Threads.Count}, " +
                             $"managed heap={GC.GetTotalMemory(false) / (1024 * 1024)}MB, " +
@@ -470,7 +423,7 @@ namespace EditSharp.Render
         private static async Task<(byte[] Buffer, int Length)> RenderFrameAsync(
             FrameState state, IFrameFilterChainBuilder chainBuilder,
             int width, int height, int fps,
-            ConcurrentBag<string> tempFiles, bool benchmark)
+            ConcurrentBag<string> tempFiles)
         {
             var stageSw = Stopwatch.StartNew();
 
@@ -488,21 +441,15 @@ namespace EditSharp.Render
             long graphBuildMs = stageSw.ElapsedMilliseconds;
             stageSw.Restart();
 
-            //runs with ffmpeg's own -benchmark_all so it prints a decode/
-            //encode/flush timing breakdown to stderr, instead of the manual-
-            //command approach (which needs the filter_complex string
-            //re-quoted for a shell and evidently doesn't survive that
-            //intact). -v info rather than error is required for
-            //-benchmark_all's output to actually appear. The caller decides
-            //which frame indices this fires on (see RenderAllFramesAsync) —
-            //frame 0 plus a later checkpoint, so decode_video's "real" time
-            //for the SAME clips can be compared at a near-zero seek offset
-            //against a much larger one, to test whether seek cost grows with
-            //how far into the source the target timestamp is.
+            var args = new List<string> { "-y", "-v", "error" };
 
-            var args = benchmark
-                ? new List<string> { "-y", "-v", "info", "-benchmark_all" }
-                : new List<string> { "-y", "-v", "error" };
+            //THE fix for the inter-thread slice seams — see
+            //EditSharpConfig.FilterThreads. This call site is the one that
+            //actually mattered: it renders every output frame, so a seam
+            //introduced here lands in the accumulator and survives all the
+            //way into the delivered file. Added before any -i below, since
+            //these are global options.
+            args.AddRange(GraphUtilities.FilterThreadingArgs());
 
             foreach (var input in graph.Inputs)
             {
@@ -626,17 +573,6 @@ namespace EditSharp.Render
                     $"{state.FrameIndex}:\n{stderr}");
             }
 
-            //on the plain -v error frames stderr is normally empty and silently
-            //discarded — but this run asked ffmpeg for -benchmark_all, and that
-            //output only exists in stderr, so it has to be surfaced here or the
-            //whole point of running with it is lost
-            if (benchmark)
-            {
-                EditSharpConfig.Logger.Log(
-                    $"Frame {state.FrameIndex} ffmpeg -benchmark_all output " +
-                    $"(decode/encode/flush timing):\n{stderr}");
-            }
-
             EditSharpConfig.Logger.LogVerbose(
                 $"Frame {state.FrameIndex + 1}: graph build {graphBuildMs}ms, " +
                 $"process spawn {spawnMs}ms, ffmpeg run {runMs}ms " +
@@ -706,6 +642,15 @@ namespace EditSharp.Render
             await File.WriteAllTextAsync(scriptPath, filterComplex);
 
             var args = new List<string> { "-y", "-v", "error" };
+
+            //this pass runs the AUDIO filter graph (AudioMixer.Compose), so
+            //the video seams EditSharpConfig.FilterThreads describes can't
+            //arise here — the video side is a straight rawvideo passthrough.
+            //Pinned anyway for consistency: every invocation in this pipeline
+            //that carries a filter graph gets the same treatment, so there is
+            //no call site left where ffmpeg silently picks its own thread
+            //count and no one has reasoned about whether that's safe.
+            args.AddRange(GraphUtilities.FilterThreadingArgs());
 
             //input 0: the accumulated frames. Headerless raw data, so every
             //dimension ffmpeg would normally read from a container header has
