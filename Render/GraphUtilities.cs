@@ -30,50 +30,30 @@ namespace EditSharp.Render
             Math.Max(min, Math.Min(value, Math.Max(min, max)));
 
         /// <summary>
-        /// A PER-FILTER thread pin, appended to an individual filter's options
-        /// (e.g. <c>scale=1920:1080:flags=area:threads=1</c>) rather than
-        /// applied to the whole graph.
-        ///
-        /// This is the surgical version of EditSharpConfig.FilterThreads, and
-        /// exists because the global pin is a sledgehammer: it fixed the
-        /// inter-thread seam artifact but cost roughly 3x per-frame render time
-        /// on a real blueprint, because it also serialized every filter that was
-        /// never implicated — most importantly the effect chain (gblur, blend),
-        /// which is the expensive part of a frame with a drop shadow on it and
-        /// which runs at FULL CANVAS on every frame (see ClipVideoChain's notes
-        /// on PostTransform being deliberately out of the work-rect
-        /// optimization's scope).
-        ///
-        /// `threads` is a GENERIC libavfilter option available on any filter
-        /// supporting slice threading, not something each filter declares
-        /// individually — verified directly against perspective, scale, overlay,
-        /// gblur and blend, all of which accept it.
-        ///
-        /// WHICH filters carry this pin is a deliberate, and currently
-        /// CONSERVATIVE, line: everything in the geometry/resampling path that
-        /// was present in the confirmed minimal reproduction (a single
-        /// GeneratorClip, no effects, Normal blend — which still showed all 15
-        /// lines) is pinned, and nothing else is. That means every `scale`,
-        /// `perspective` and `overlay` in ClipVideoChain and FrameFilterChain,
-        /// while ClipEffects' own filters are left free to thread. If the lines
-        /// ever return with EditSharpConfig.FilterThreads at 0, the culprit is a
-        /// filter OUTSIDE this set and the honest move is to bisect rather than
-        /// guess — set FilterThreads back to 1 to confirm the fix still holds,
-        /// then widen this pin one filter at a time.
-        /// </summary>
-        public const string ThreadPin = "threads=1";
-
-        /// <summary>
         /// The GLOBAL ffmpeg options pinning libavfilter's thread count, to be
-        /// added to every invocation that runs a filter graph — see
-        /// EditSharpConfig.FilterThreads for the full reasoning (short version:
-        /// multi-threaded filter execution was leaving a zeroed-alpha seam at
-        /// each inter-thread slice boundary, producing threads-1 black lines
-        /// per frame).
+        /// added to every invocation that runs a filter graph.
         ///
-        /// Returns EMPTY when EditSharpConfig.FilterThreads is 0, which is the
-        /// "let ffmpeg use every core, and rely on the per-filter ThreadPin
-        /// above for correctness instead" setting.
+        /// THIS EXISTS AS A CORRECTNESS FIX — see EditSharpConfig.FilterThreads
+        /// for the full history. Short version: multi-threaded filter execution
+        /// was leaving a zeroed-alpha seam at each inter-thread slice boundary,
+        /// producing threads-1 evenly-spaced black lines confined to one half
+        /// of the frame. Confirmed on a 16-core machine as exactly 15 lines
+        /// (16 threads, 15 interior slice boundaries) starting exactly at
+        /// canvas-width/2.
+        ///
+        /// A per-filter version of this (a `threads=1` pin on individual
+        /// filters, leaving the rest of the graph free to thread) was tried and
+        /// reverted. It looked justified by an early benchmark showing the
+        /// global pin costing roughly 3x per-frame time on a real blueprint,
+        /// but that comparison turned out to be invalid — it was run with
+        /// Blueprint.FrameRenderConcurrency at 1 for the baseline and 4 for the
+        /// pinned case. Once both sides were measured at the same concurrency,
+        /// the global pin's actual cost was negligible, on this blueprint and
+        /// others. The per-filter version was strictly more code for no real
+        /// benefit it was purchased under a false premise, so it was removed
+        /// rather than kept "just in case" — see EditSharp-Handoff.md for
+        /// anyone who finds a stray `ThreadPin` reference in history and
+        /// wonders where it went.
         ///
         /// BOTH options are emitted, and that is not redundancy: ffmpeg splits
         /// this across two separate knobs, and which one applies depends on how
@@ -91,13 +71,8 @@ namespace EditSharp.Render
         /// </summary>
         public static string[] FilterThreadingArgs()
         {
-            int configured = EditSharpConfig.FilterThreads;
-
-            //0 means "unrestricted" — emit nothing and let ffmpeg pick, with
-            //the per-filter ThreadPin carrying correctness on its own
-            if (configured <= 0) return [];
-
-            string threads = configured.ToString(CultureInfo.InvariantCulture);
+            string threads = Math.Max(1, EditSharpConfig.FilterThreads)
+                .ToString(CultureInfo.InvariantCulture);
 
             return ["-filter_threads", threads, "-filter_complex_threads", threads];
         }

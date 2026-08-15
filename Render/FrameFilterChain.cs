@@ -417,7 +417,7 @@ namespace EditSharp.Render
             {
                 string plain = graph.NextLabel("frdraw");
                 graph.FilterLines.Add(
-                    $"[{accumulator}][{channel}]overlay=0:0:format=auto:{GraphUtilities.ThreadPin}[{plain}]");
+                    $"[{accumulator}][{channel}]overlay=0:0:format=auto[{plain}]");
 
                 return plain;
             }
@@ -443,14 +443,14 @@ namespace EditSharp.Render
 
             string blended = graph.NextLabel("frblended");
             graph.FilterLines.Add(
-                $"[{backdropCopy}][{blendSource}]blend=all_mode={mode}:shortest=0:{GraphUtilities.ThreadPin}[{blended}]");
+                $"[{backdropCopy}][{blendSource}]blend=all_mode={mode}:shortest=0[{blended}]");
 
             string masked = graph.NextLabel("frblendmasked");
             graph.FilterLines.Add($"[{blended}][{mask}]alphamerge[{masked}]");
 
             string next = graph.NextLabel("frdraw");
             graph.FilterLines.Add(
-                $"[{backdropKeep}][{masked}]overlay=0:0:format=auto:{GraphUtilities.ThreadPin}[{next}]");
+                $"[{backdropKeep}][{masked}]overlay=0:0:format=auto[{next}]");
 
             return next;
         }
@@ -475,7 +475,7 @@ namespace EditSharp.Render
 
             string flattened = graph.NextLabel("frout");
             graph.FilterLines.Add(
-                $"[{backdrop}][{accumulator}]overlay=0:0:format=auto:shortest=1:{GraphUtilities.ThreadPin}[{flattened}]");
+                $"[{backdrop}][{accumulator}]overlay=0:0:format=auto:shortest=1[{flattened}]");
 
             return flattened;
         }

@@ -56,20 +56,15 @@ namespace EditSharp
         /// </summary>
         public static string FfprobePath { get; set; } = "ffprobe";
 
-        private static int _filterThreads = 0;
+        private static int _filterThreads = 1;
 
         /// <summary>
         /// How many threads libavfilter may use to execute a filter graph
-        /// (ffmpeg's -filter_threads / -filter_complex_threads).
+        /// (ffmpeg's -filter_threads / -filter_complex_threads). Defaults to
+        /// 1 — deliberately NOT the processor count ffmpeg would otherwise
+        /// pick on its own.
         ///
-        /// 0 (the default) means UNRESTRICTED — ffmpeg uses every logical core,
-        /// and correctness is carried instead by the per-filter
-        /// GraphUtilities.ThreadPin applied to the specific filters implicated
-        /// below. 1 is the known-good sledgehammer: it fixes the artifact
-        /// described here outright, at roughly 3x the per-frame render cost.
-        /// Any other value pins the graph to exactly that many threads.
-        ///
-        /// THE ARTIFACT THIS EXISTS FOR:
+        /// THIS DEFAULT IS A CORRECTNESS FIX, NOT A TUNING CHOICE.
         ///
         /// Rendering on a 16-logical-core machine produced exactly 15 evenly
         /// spaced horizontal black lines across every frame — 15 being
@@ -100,35 +95,56 @@ namespace EditSharp
         ///     FinalizeOutputAsync's H.264/yuv420p encode ever runs, so the
         ///     final encode is not introducing them either.
         ///
-        /// Setting this to 1 was confirmed to eliminate the lines. Worth
-        /// knowing for anyone revisiting this: ffmpeg 8.0 (this project's
-        /// target) ships a rewritten, multi-threaded swscale, so a `scale`
-        /// that was effectively serial on the ffmpeg this pipeline was first
-        /// written against is not serial any more.
+        /// What's left is the per-frame filter graph itself, executed
+        /// multi-threaded. Every clip runs `perspective` unconditionally
+        /// (ClipVideoChain.Build always calls ApplyTransform, identity
+        /// transform or not), `scale` several times including the
+        /// MaskSupersample up/down pair, and the accumulator's own starting
+        /// frame (GraphUtilities.BuildTransparentBlank) is built fresh on
+        /// every single render regardless of blueprint — all filters
+        /// libavfilter is free to slice across threads. Worth knowing for
+        /// anyone revisiting this: ffmpeg 8.0 (this project's target) ships a
+        /// rewritten, multi-threaded swscale, so a `scale` that was
+        /// effectively serial on the ffmpeg this pipeline was first written
+        /// against is not serial any more.
         ///
-        /// WHY THE DEFAULT IS 0 AND NOT 1: pinning the whole graph also
-        /// serializes filters that were never implicated — above all the
-        /// effect chain, which is where a full blueprint's per-frame time
-        /// actually goes (a PostTransform drop shadow blurs at FULL CANVAS on
-        /// every frame). Measured on a real blueprint, the global pin took
-        /// per-frame time from 4-7s to over 15s. The per-filter ThreadPin
-        /// keeps the fix while leaving that chain parallel.
+        /// A PER-FILTER version of this fix (a `threads=1` pin on only the
+        /// specific filters implicated, leaving the rest of the graph free to
+        /// thread) was built, tested, and reverted — worth recording why, since
+        /// it looked like the right call at the time. An early A/B seemed to
+        /// show the global pin costing roughly 3x per-frame render time on a
+        /// real blueprint (4-7s baseline vs 15s+ pinned), which justified the
+        /// extra complexity. That comparison turned out to be invalid: the
+        /// baseline was measured at Blueprint.FrameRenderConcurrency=1 and the
+        /// pinned case at FrameRenderConcurrency=4 — an unrelated variable
+        /// left inconsistent between the two runs, not a cost of the pin
+        /// itself. Re-measured at matched concurrency, the global pin's actual
+        /// cost was negligible on this blueprint and every other one tested.
+        /// The per-filter mechanism (GraphUtilities.ThreadPin and a `threads=1`
+        /// suffix threaded through every filter emission in ClipVideoChain and
+        /// FrameFilterChain) was real code paid for under a false premise, so
+        /// it was removed rather than kept "just in case" — simplicity won
+        /// once the actual numbers were in. If a genuine need to reclaim
+        /// filter-level parallelism ever shows up, EditSharp-Handoff.md /
+        /// project history has the reverted version to start from rather than
+        /// rebuilding it from scratch.
         ///
-        /// Note that filter-level parallelism is not the only lever, and
-        /// arguably not the best one: this pipeline renders each frame in its
-        /// own process, so parallelism is better spent at the PROCESS level
-        /// (Blueprint.FrameRenderConcurrency, still defaulting to 1) than
-        /// inside one frame's graph. Whole frames are perfectly independent,
-        /// whereas filter slices have to stitch back together — which is the
-        /// very thing that went wrong here.
+        /// The single-frame render design is what makes 1 an acceptable
+        /// default rather than a painful one: parallelism here is better
+        /// spent at the PROCESS level (Blueprint.FrameRenderConcurrency,
+        /// which renders whole frames concurrently) than inside one frame's
+        /// graph, since whole frames are perfectly independent while filter
+        /// slices have to stitch back together — which is the very thing
+        /// going wrong. If you raise this, raise it while watching for the
+        /// lines to come back.
         /// </summary>
         public static int FilterThreads
         {
             get => _filterThreads;
-            set => _filterThreads = value >= 0
+            set => _filterThreads = value >= 1
                 ? value
                 : throw new ArgumentOutOfRangeException(
-                    nameof(value), "FilterThreads cannot be negative.");
+                    nameof(value), "FilterThreads must be at least 1.");
         }
     }
 

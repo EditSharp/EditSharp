@@ -35,7 +35,7 @@ namespace EditSharp.Render
         //render's turn to flush, so RAM and disk I/O both scale with this
         //directly. Raise it deliberately, watching both, rather than
         //defaulting to something that scales with core count.
-        public int FrameRenderConcurrency { get; set; } = 1;
+        public int FrameRenderConcurrency { get; set; } = 16;
 
         //path to where output should be rendered
         public required string OutputDirectory { get; set; }
