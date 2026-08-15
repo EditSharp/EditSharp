@@ -96,14 +96,33 @@ namespace EditSharp.Render
             {
                 foreach (Clip clip in channel.Clips.Values)
                 {
-                    if (clip is not SourceClip sourceClip) continue;
-                    if (sourceClip.Source.Type != SourceType.Video) continue;
-
                     //already queued via another channel? a Clip only ever
                     //belongs to one channel, so this can't happen today, but
                     //guarding costs nothing and saves a wasted re-encode if
                     //that ever changes
                     if (results.ContainsKey(clip)) continue;
+
+                    //`perlin` is a GENERATOR SOURCE with no seek — it produces
+                    //frames strictly sequentially from frame 0, so asking it
+                    //for output frame N (via trim=start_frame=N) makes ffmpeg
+                    //generate and discard every frame before it. Per-frame
+                    //that's O(N) work for frame N, making the whole render
+                    //O(N^2): measured at a dead-linear +28ms per frame index
+                    //on a 1080p noise clip, which is almost exactly the cost
+                    //of generating one 1080p perlin frame. Pre-rendering the
+                    //whole noise stream ONCE into intra-only FFV1 turns every
+                    //per-frame read back into an ordinary frame-exact seek —
+                    //the identical problem, and identical fix, that optimized
+                    //media already solves for video sources.
+                    if (clip is NoiseClip noiseClip)
+                    {
+                        tasks.Add(BuildNoiseAsync(
+                            noiseClip, fps, canvasWidth, canvasHeight, gate, results));
+                        continue;
+                    }
+
+                    if (clip is not SourceClip sourceClip) continue;
+                    if (sourceClip.Source.Type != SourceType.Video) continue;
 
                     tasks.Add(BuildOneAsync(
                         sourceClip, clip, fps, canvasWidth, canvasHeight,
@@ -121,6 +140,64 @@ namespace EditSharp.Render
                 $"Optimized media built for {tasks.Count} clip(s) in {sw.ElapsedMilliseconds}ms.");
 
             return new Dictionary<Clip, OptimizedMedia>(results);
+        }
+
+        /// <summary>
+        /// Pre-renders a NoiseClip's entire `perlin` stream to intra-only FFV1,
+        /// so the per-frame render can seek into it instead of regenerating
+        /// every preceding frame (see the O(N^2) explanation at the call site).
+        ///
+        /// Rendered at CANVAS size, not scaled by the clip's keyframe scale the
+        /// way a video source's optimized media is: `perlin` is generated at
+        /// whatever resolution it's asked for, and its Detail/SeetheRate are
+        /// already resolution-independent by construction (xscale is "noise
+        /// cells across the frame", not a pixel count), so generating larger
+        /// than canvas buys no extra detail — it would just be a bigger
+        /// version of the same pattern. There is also no native resolution to
+        /// avoid upscaling past, since nothing is being resampled from a
+        /// source file.
+        ///
+        /// No effects are baked here. A NoiseClip's PreTransform effects are
+        /// still applied per-frame by ClipVideoChain, unlike a video source's
+        /// — this method exists purely to make the noise itself seekable, and
+        /// keeping the two concerns separate avoids duplicating
+        /// OptimizedMediaEffectsBaker's whole graph-building path for a case
+        /// that hasn't been shown to need it.
+        /// </summary>
+        private static async Task BuildNoiseAsync(
+            NoiseClip clip, int fps, int canvasWidth, int canvasHeight,
+            SemaphoreSlim gate, ConcurrentDictionary<Clip, OptimizedMedia> results)
+        {
+            await gate.WaitAsync();
+            try
+            {
+                EditSharpConfig.Logger.LogVerbose(
+                    $"Noise optimized media starting ({clip.Duration.TotalSeconds:F2}s @ " +
+                    $"{canvasWidth}x{canvasHeight})...");
+
+                var sw = Stopwatch.StartNew();
+
+                string path = await NoiseRenderer.RenderAsync(
+                    clip, fps, canvasWidth, canvasHeight);
+
+                MediaInfo info = await MediaProbe.ProbeAsync(path);
+                double available = info.Duration?.TotalSeconds ?? clip.Duration.TotalSeconds;
+
+                //same half-open [Start, End) reasoning as BuildOneAsync's
+                int deleteAfterFrame = (int)Math.Ceiling(clip.End.TotalSeconds * fps) - 1;
+
+                results[clip] = new OptimizedMedia(
+                    path, deleteAfterFrame, info.Width, info.Height, available,
+                    EffectsBaked: false);
+
+                EditSharpConfig.Logger.LogVerbose(
+                    $"Noise optimized media built in {sw.ElapsedMilliseconds}ms " +
+                    $"({info.Width}x{info.Height}, {available:F2}s available) -> {path}");
+            }
+            finally
+            {
+                gate.Release();
+            }
         }
 
         private static async Task BuildOneAsync(

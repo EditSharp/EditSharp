@@ -347,6 +347,18 @@ namespace EditSharp.Render
         public const string Gbrp = "gbrp16le";
         public const string Gbrap = "gbrap16le";
         public const string Gray = "gray16le";
+
+        //gbrap16le: 4 planes (G, B, R, A), each a full-resolution 16-bit
+        //(2-byte) sample with no chroma subsampling — unlike a YUV format,
+        //every plane is the same width x height. Total bytes per pixel
+        //across all four planes: 4 x 2 = 8. Kept next to Primary itself
+        //rather than as a separate hardcoded constant elsewhere, since
+        //anything that needs to know a raw Primary-format buffer's exact
+        //byte size (see FrameRenderer's per-frame pipe read) has to stay in
+        //lockstep with this specific format — the same single-source-of-
+        //truth reasoning as PixelFormatFor referencing Primary directly
+        //instead of its own separate "gbrap16le" literal.
+        public const int PrimaryBytesPerPixel = 8;
     }
 
     /// <summary>

@@ -266,7 +266,14 @@ namespace EditSharp.Render
 
             switch (frameClip.Clip)
             {
-                case SourceClip when frameClip.SourcePath != null && frameClip.IsVideoSeek:
+                //any clip reading from pre-rendered, frame-exact-seekable
+                //media — a video SourceClip's optimized media, or a
+                //NoiseClip's pre-rendered perlin stream (see
+                //OptimizedMediaBuilder.BuildNoiseAsync). Both are intra-only
+                //FFV1 and read identically, so there is nothing type-specific
+                //to branch on beyond having a path and a seek
+                case SourceClip or NoiseClip
+                    when frameClip.SourcePath != null && frameClip.IsVideoSeek:
                 {
                     //-ss BEFORE -i so ffmpeg seeks rather than decoding from the
                     //front; exact here because the optimized media is intra-only
@@ -331,26 +338,22 @@ namespace EditSharp.Render
                     nativeWidth = canvasWidth;
                     nativeHeight = canvasHeight;
 
-                    double xscale = Math.Max(noise.Detail, 0f) * 1000.0;
-                    double yscale = xscale * canvasHeight / (double)canvasWidth;
-                    double tscale = Math.Max(noise.SeetheRate, 0f) * 10.0;
-                    uint seed = unchecked((uint)noise.Seed);
-
-                    //`perlin` derives its time coordinate from pts, and this
-                    //stream only ever has frame 0 — so the clip's elapsed time
-                    //has to be dialled in by starting the stream at that offset
-                    //rather than by letting it run. setpts shifts frame 0's pts
-                    //to the clip-relative time, so the noise seethes correctly
-                    //across the render instead of freezing on its first pattern.
+                    //FALLBACK ONLY — normally a NoiseClip is pre-rendered to
+                    //seekable media and takes the seek case at the top of this
+                    //switch instead. This path is O(N) for output frame N:
+                    //`perlin` is a generator source with no seek, so
+                    //trim=start_frame=N doesn't skip ahead, it generates and
+                    //discards every frame before N. Across a render that's
+                    //O(N^2) — measured at a dead-linear +28ms per frame index
+                    //at 1080p before the pre-render existed. Reachable only if
+                    //OptimizedMediaBuilder somehow produced no entry for this
+                    //clip; correct, just slow.
                     string label = graph.NextLabel("frnoise");
+                    int startFrame = (int)Math.Round(frameClip.ClipSeconds * fps);
+
                     graph.FilterLines.Add(
-                        $"perlin=size={canvasWidth}x{canvasHeight}:rate={fps}:" +
-                        $"random_mode=seed:random_seed={seed}:" +
-                        $"xscale={GraphUtilities.Num(xscale)}:" +
-                        $"yscale={GraphUtilities.Num(yscale)}:" +
-                        $"tscale={GraphUtilities.Num(tscale)}," +
-                        $"trim=start_frame={(int)Math.Round(frameClip.ClipSeconds * fps)}:" +
-                        $"end_frame={(int)Math.Round(frameClip.ClipSeconds * fps) + 1}," +
+                        $"{NoiseRenderer.BuildPerlinSource(noise, fps, canvasWidth, canvasHeight)}," +
+                        $"trim=start_frame={startFrame}:end_frame={startFrame + 1}," +
                         $"setpts=PTS-STARTPTS," +
                         $"format={PixelFormats.Primary},settb=AVTB[{label}]");
 

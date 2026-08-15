@@ -135,11 +135,20 @@ namespace EditSharp.Render
             string? sourcePath = null;
             double seek = 0;
             bool isVideoSeek = false;
+            bool preTransformEffectsBaked = false;
 
-            if (clip is SourceClip && optimizedMedia.TryGetValue(clip, out var media))
+            //any clip that HAS optimized media reads from it, not just a
+            //SourceClip — NoiseClip now pre-renders its `perlin` stream the
+            //same way (see OptimizedMediaBuilder.BuildNoiseAsync), since
+            //`perlin` is a generator source with no seek and regenerating
+            //every preceding frame made the render O(N^2). The dictionary
+            //membership IS the condition; there's nothing type-specific left
+            //about reading a seekable pre-rendered file
+            if (optimizedMedia.TryGetValue(clip, out var media))
             {
                 sourcePath = media.Path;
                 isVideoSeek = true;
+                preTransformEffectsBaked = media.EffectsBaked;
 
                 //This pipeline's current extension behaviour is FREEZE FRAME:
                 //a clip whose Duration outlasts its source holds the source's
@@ -170,6 +179,7 @@ namespace EditSharp.Render
                 NativeWidth = width,
                 NativeHeight = height,
                 ClipSeconds = clipSeconds,
+                PreTransformEffectsBaked = preTransformEffectsBaked,
             };
         }
     }

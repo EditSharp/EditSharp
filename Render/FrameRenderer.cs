@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -152,7 +153,7 @@ namespace EditSharp.Render
             Stream accumulator, ConcurrentBag<string> tempFiles)
         {
             using var gate = new SemaphoreSlim(Math.Max(1, concurrency));
-            var frameTasks = new Task<byte[]>[totalFrames];
+            var frameTasks = new Task<(byte[] Buffer, int Length)>[totalFrames];
             var sw = Stopwatch.StartNew();
 
             //frame 0 alone can't tell us whether per-frame seek cost GROWS
@@ -166,7 +167,7 @@ namespace EditSharp.Render
             //either way, meaningfully further into the source than frame 0.
             int benchmarkCheckpoint = Math.Min(100, totalFrames / 2);
 
-            async Task<byte[]> RenderOneAsync(int frameIndex)
+            async Task<(byte[] Buffer, int Length)> RenderOneAsync(int frameIndex)
             {
                 await gate.WaitAsync();
                 try
@@ -184,7 +185,7 @@ namespace EditSharp.Render
 
                     bool benchmark = frameIndex == 0 || frameIndex == benchmarkCheckpoint;
 
-                    byte[] result = await RenderFrameAsync(
+                    (byte[] Buffer, int Length) result = await RenderFrameAsync(
                         state, chainBuilder, width, height, fps, tempFiles, benchmark);
 
                     if (frameIndex == benchmarkCheckpoint)
@@ -209,8 +210,14 @@ namespace EditSharp.Render
                         FrameState replay = FrameStateResolver.Resolve(
                             timeline, 0, fps, optimizedMedia, nativeSizes, staticImages);
 
-                        _ = await RenderFrameAsync(
+                        (byte[] Buffer, int Length) discarded = await RenderFrameAsync(
                             replay, chainBuilder, width, height, fps, tempFiles, benchmark: true);
+
+                        //this one is never written anywhere — return it to the
+                        //pool immediately rather than leaving it for the GC,
+                        //same as every real frame's buffer does after it's
+                        //written to the accumulator below
+                        ArrayPool<byte>.Shared.Return(discarded.Buffer);
                     }
 
                     return result;
@@ -237,40 +244,37 @@ namespace EditSharp.Render
                 //launched and Task.WhenAll is finally reached, which is what an
                 //earlier version of this method did and which silently hid a
                 //frame 0 failure behind what looked like a hang
-                byte[] data = await frameTasks[frameIndex];
+                (byte[] buffer, int length) = await frameTasks[frameIndex];
 
-                //THE actual cause of the progressive per-frame slowdown: a
-                //completed Task<byte[]> keeps its Result reachable for as
-                //long as the Task itself is reachable, and frameTasks stayed
-                //reachable — as a live array — for the ENTIRE render, all the
-                //way until this method returns. Every frame's raw output
-                //(1920x1080 gbrap16le = ~16.6MB) was therefore being pinned
-                //in memory forever after it had already been written out and
-                //was no longer needed — by frame 100, ~1.6GB of dead buffers
-                //kept alive by nothing but this array slot. That growing
-                //retained heap (mostly Large Object Heap, since each buffer
-                //is well past the 85KB LOH threshold) means growing GC
-                //pressure over the render's lifetime, and a GC pause on the
-                //thread draining ffmpeg's stdout pipe stalls that read —
-                //which stalls ffmpeg's own write() to a small, unconsumed
-                //pipe buffer, inflating ITS measured elapsed time even
-                //though its own decode/encode/flush bench numbers stay flat
-                //(none of them account for time spent blocked on a pipe
-                //write). Confirmed against the actual evidence: growth was
-                //shown to be content-independent (a replayed frame 0 late in
-                //the render was just as slow as the real frame at that
-                //position), which rules out anything content/transform-
-                //related and points at exactly this kind of accumulating
-                //resource state instead.
-                //
-                //Clearing the slot the moment its result is consumed is what
-                //makes that buffer collectible immediately rather than at
-                //the end of the whole render — memory use should now stay
-                //roughly flat across a render's length instead of growing
-                //with frame count.
+                //frameTasks retaining a completed Task's Result (its buffer)
+                //for the whole render was a REAL bug, fixed by clearing this
+                //slot the moment it's consumed — but it turned out not to be
+                //the actual cause of the progressive slowdown. The real cause
+                //(confirmed via Process resource sampling — handles/threads/
+                //managed heap all flat, but GC gen0≈gen1≈gen2 climbing in
+                //lockstep, meaning EVERY collection was a full gen2 sweep) was
+                //that each frame's ~16.6MB buffer is a Large Object Heap
+                //allocation, and the LOH is only ever reclaimed as part of a
+                //gen2 collection — so a fresh LOH allocation on literally every
+                //frame forced a full heap scan every time, regardless of GC
+                //mode (confirmed: enabling Server GC didn't help either, since
+                //the trigger is the allocation pattern itself, not which GC
+                //flavor is handling it). RenderFrameAsync now rents this
+                //buffer from ArrayPool<byte>.Shared instead of allocating
+                //fresh via MemoryStream.ToArray() every frame — Return() right
+                //after use is what makes the pool actually reusable rather
+                //than degrading into the same one-fresh-allocation-per-frame
+                //pattern this was meant to fix.
                 frameTasks[frameIndex] = null!;
 
-                await accumulator.WriteAsync(data);
+                try
+                {
+                    await accumulator.WriteAsync(buffer.AsMemory(0, length));
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
 
                 EditSharpConfig.Logger.LogVerbose(
                     $"Rendered frame {frameIndex + 1}/{totalFrames} " +
@@ -427,7 +431,43 @@ namespace EditSharp.Render
         /// command-line limit, switch this call site to the same script-file
         /// trick.
         /// </summary>
-        private static async Task<byte[]> RenderFrameAsync(
+        /// <summary>
+        /// Renders one frame and returns its raw pixel bytes in a buffer
+        /// RENTED from ArrayPool&lt;byte&gt;.Shared, along with the exact number
+        /// of bytes actually used (buffer.Length may be larger — the pool
+        /// rounds up to its own bucket sizes). The caller MUST call
+        /// ArrayPool&lt;byte&gt;.Shared.Return(buffer) once done with it, on
+        /// every path including error/discard, or the pool degrades back
+        /// into fresh-allocation-per-frame.
+        ///
+        /// This used to accumulate into a MemoryStream and return
+        /// stream.ToArray() — a fresh, exactly-trimmed allocation every
+        /// single frame. At 1920x1080 gbrap16le that's ~16.6MB, comfortably
+        /// past .NET's 85KB Large Object Heap threshold, and the LOH is only
+        /// ever reclaimed as part of a full gen2 collection — so a fresh LOH
+        /// allocation on literally every frame forced a full heap scan every
+        /// time. Confirmed directly via Process resource sampling on a real
+        /// render (handles/threads/managed-heap-size all flat across the
+        /// render, but gen0/gen1/gen2 GC counts climbing in lockstep — i.e.
+        /// EVERY collection was promoted to a full gen2 sweep) and confirmed
+        /// NOT to be a GC-flavor issue (Server GC made no difference — the
+        /// allocation pattern itself is the trigger, not which GC handles
+        /// it). Renting the same handful of buffers across hundreds of
+        /// frames instead of allocating fresh every time removes the
+        /// trigger entirely.
+        ///
+        /// Reading directly into an exactly-sized buffer, rather than a
+        /// growable MemoryStream, is possible because raw video output at a
+        /// fixed resolution and pixel format has a fully deterministic byte
+        /// count (see PixelFormats.PrimaryBytesPerPixel) — the same
+        /// assumption FinalizeOutputAsync's accumulator read already relies
+        /// on. The trailing zero-byte-probe read is a safety check on that
+        /// assumption: if ffmpeg ever produces more than the computed size
+        /// (e.g. because the format's actual byte layout doesn't match what
+        /// PrimaryBytesPerPixel assumes), this fails loudly rather than
+        /// silently truncating a frame.
+        /// </summary>
+        private static async Task<(byte[] Buffer, int Length)> RenderFrameAsync(
             FrameState state, IFrameFilterChainBuilder chainBuilder,
             int width, int height, int fps,
             ConcurrentBag<string> tempFiles, bool benchmark)
@@ -499,30 +539,92 @@ namespace EditSharp.Render
             var stderr = new StringBuilder();
             process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
 
-            //timed separately from graph build above and from CopyToAsync below
+            //timed separately from graph build above and from the read below
             //so a slow frame can be attributed to one of three distinct causes:
             //.NET building the args/graph, the OS actually getting the process
             //running (process.Start() returning), or ffmpeg's own filter
-            //execution (everything from Start() to the stdout copy finishing)
+            //execution (everything from Start() to the read finishing)
             var spawnSw = Stopwatch.StartNew();
             process.Start();
             long spawnMs = spawnSw.ElapsedMilliseconds;
 
             process.BeginErrorReadLine();
 
-            //drained concurrently with stderr rather than read after exit —
-            //the same deadlock risk MediaProbe's own comments describe: a full
-            //pipe buffer blocks the child if nothing is consuming the other one
-            var runSw = Stopwatch.StartNew();
-            using var stdout = new MemoryStream();
-            await process.StandardOutput.BaseStream.CopyToAsync(stdout);
-            await process.WaitForExitAsync();
-            long runMs = runSw.ElapsedMilliseconds;
+            //deterministic byte count for raw video at a fixed resolution and
+            //pixel format — see PixelFormats.PrimaryBytesPerPixel and this
+            //method's own remarks for why this replaces a growable
+            //MemoryStream.ToArray() per frame. buffer.Length may exceed
+            //expectedBytes (ArrayPool rounds up to its own bucket sizes);
+            //expectedBytes is the caller's contract for how much of it is
+            //actually valid.
+            int expectedBytes = width * height * PixelFormats.PrimaryBytesPerPixel;
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(expectedBytes);
+
+            long runMs;
+            try
+            {
+                //drained concurrently with stderr rather than read after exit —
+                //the same deadlock risk MediaProbe's own comments describe: a
+                //full pipe buffer blocks the child if nothing is consuming the
+                //other one
+                var runSw = Stopwatch.StartNew();
+
+                Stream pipe = process.StandardOutput.BaseStream;
+                int totalRead = 0;
+                while (totalRead < expectedBytes)
+                {
+                    int read = await pipe.ReadAsync(buffer.AsMemory(totalRead, expectedBytes - totalRead));
+                    if (read == 0)
+                    {
+                        await process.WaitForExitAsync();
+                        throw new InvalidOperationException(
+                            $"ffmpeg produced only {totalRead} of the expected {expectedBytes} " +
+                            $"bytes for frame {state.FrameIndex} before closing its output pipe " +
+                            $"(exit code {process.ExitCode}):\n{stderr}");
+                    }
+                    totalRead += read;
+                }
+
+                //one more read past the expected size: if this returns
+                //anything at all, PrimaryBytesPerPixel's assumption about
+                //this format's byte layout is wrong for this stream, and
+                //silently keeping only the first expectedBytes would produce
+                //a corrupted frame rather than a loud failure
+                Memory<byte> probe = new byte[1];
+                int extra = await pipe.ReadAsync(probe);
+                if (extra > 0)
+                {
+                    //ffmpeg is still writing and nothing will drain it further
+                    //once this throws — left alone it would sit blocked on a
+                    //full pipe forever rather than exiting. Best-effort: this
+                    //branch is only reachable if the byte-size assumption
+                    //above is actually wrong, so a failed kill isn't worth
+                    //failing over
+                    try { process.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+
+                    throw new InvalidOperationException(
+                        $"ffmpeg produced MORE than the expected {expectedBytes} bytes for " +
+                        $"frame {state.FrameIndex} — PixelFormats.PrimaryBytesPerPixel's " +
+                        $"assumption (width*height*{PixelFormats.PrimaryBytesPerPixel}) doesn't " +
+                        $"match this stream's actual byte layout.");
+                }
+
+                await process.WaitForExitAsync();
+                runMs = runSw.ElapsedMilliseconds;
+            }
+            catch
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+                throw;
+            }
 
             if (process.ExitCode != 0)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
                 throw new InvalidOperationException(
                     $"ffmpeg exited with code {process.ExitCode} rendering frame " +
                     $"{state.FrameIndex}:\n{stderr}");
+            }
 
             //on the plain -v error frames stderr is normally empty and silently
             //discarded — but this run asked ffmpeg for -benchmark_all, and that
@@ -540,7 +642,7 @@ namespace EditSharp.Render
                 $"process spawn {spawnMs}ms, ffmpeg run {runMs}ms " +
                 $"({graph.Inputs.Count} input(s), {graph.FilterLines.Count} filter line(s)).");
 
-            return stdout.ToArray();
+            return (buffer, expectedBytes);
         }
 
         /// <summary>
