@@ -120,8 +120,54 @@ namespace EditSharp.Render
             TransformExpressions.WorkRect rect = TransformExpressions.ComputeWorkRect(
                 clip, literalTransform, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
 
-            var (contentWidth, contentHeight) = TransformExpressions.ComputeContentSize(
-                clip, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
+            //IDENTITY FAST PATH eligibility. Two conditions, both required:
+            //
+            //  1. THIS frame's resolved transform is the exact no-op.
+            //  2. The clip never scales beyond 1x ANYWHERE in its keyframe
+            //     range (or its un-keyed Transform, if it has no keyframes).
+            //
+            //Condition 2 exists because ComputeContentSize below doesn't size
+            //content for this frame — it sizes it for the clip's LARGEST
+            //keyframed scale, so a later zoom stays sharp (see its own
+            //remarks). A clip that's animated elsewhere but happens to rest
+            //on an identity frame right now can still be holding content
+            //sized for a bigger moment; skipping the warp there wouldn't
+            //just leave a cosmetic artifact, it would render that oversized
+            //content at full size instead of shrunk to this frame's actual
+            //on-screen size. Only a clip whose scale never exceeds 1x
+            //anywhere is guaranteed to already have content sized exactly
+            //right, independent of which frame this is.
+            (double maxScaleX, double maxScaleY) = TransformExpressions.MaxScale(clip);
+            bool identity = IsIdentityTransform(literalTransform) &&
+                             maxScaleX <= 1.0 && maxScaleY <= 1.0;
+
+            int contentWidth, contentHeight;
+
+            if (identity)
+            {
+                //No perspective warp is going to run for this clip, so there
+                //is no reason to reserve TransformExpressions.
+                //TransparentBorderPixels of margin for one to sample into.
+                //That margin exists ONLY to give the warp something to clamp
+                //against at its edge, and is normally invisible because the
+                //warp's own quad math (OutsetToFrame) deliberately projects
+                //destination corners LARGER than the frame, stretching the
+                //border-reserved content back out and cropping the margin
+                //away. Skipping the warp while still sizing content through
+                //the border-reserving ComputeContentSize would leave that
+                //margin as a real, visible transparent gap around the clip
+                //instead of erasing it. Sizing off the plain aspect fit
+                //instead avoids ever creating the margin in the first place.
+                var (baseW, baseH) = TransformExpressions.BaseFitSize(
+                    nativeWidth, nativeHeight, canvasWidth, canvasHeight);
+                contentWidth = Math.Max(2, (int)Math.Round(baseW));
+                contentHeight = Math.Max(2, (int)Math.Round(baseH));
+            }
+            else
+            {
+                (contentWidth, contentHeight) = TransformExpressions.ComputeContentSize(
+                    clip, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
+            }
 
             //the content is CENTRED in the frame, which is what makes the frame's
             //model-space outset symmetric — see PlaceInFrame
@@ -150,23 +196,14 @@ namespace EditSharp.Render
                 ? preEffects
                 : ApplyModulate(clip, preEffects, context);
 
-            //IDENTITY FAST PATH: when this frame's resolved transform is the
-            //exact no-op (Position 0,0 / Scale 1,1 / Rotation=Pitch=Yaw=0),
-            //ApplyTransform's perspective warp maps the frame's own corners
-            //back onto themselves — see TransformExpressions.ProjectCorner,
-            //which with every field at its identity value reduces to exactly
-            //the placement rectangle Frame() already produced. The warp is
-            //mathematically a pass-through in that case but NOT free to run:
-            //split + 2x-supersampled alphaextract/perspective/area-downscale
-            //on the mask, fillborders+perspective on the colour, and a final
-            //alphamerge, all at the work rect's full resolution — measured
-            //as the dominant per-clip cost in this pipeline (~500ms/clip).
-            //Skipping it for untransformed clips (static backgrounds,
-            //full-bleed generators/noise, un-animated overlays) removes
-            //that cost outright rather than shaving it. Transformed clips
-            //are completely unaffected — same warp, same MaskSupersample,
-            //same antialiasing, exactly as before.
-            string transformed = IsIdentityTransform(literalTransform)
+            //See the `identity` computation above: true only when this frame's
+            //transform is an exact no-op AND the clip never scales beyond 1x
+            //anywhere in its keyframe range, which together guarantee content
+            //was sized (border-free, above) to already match exactly what
+            //this frame needs — nothing left for the warp to do. Transformed
+            //clips are completely unaffected by any of this — same warp, same
+            //MaskSupersample, same antialiasing, exactly as before.
+            string transformed = identity
                 ? modulated
                 : ApplyTransform(modulated, nativeWidth, nativeHeight, context, literalTransform);
 
