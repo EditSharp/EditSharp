@@ -150,8 +150,25 @@ namespace EditSharp.Render
                 ? preEffects
                 : ApplyModulate(clip, preEffects, context);
 
-            string transformed = ApplyTransform(
-                modulated, nativeWidth, nativeHeight, context, literalTransform);
+            //IDENTITY FAST PATH: when this frame's resolved transform is the
+            //exact no-op (Position 0,0 / Scale 1,1 / Rotation=Pitch=Yaw=0),
+            //ApplyTransform's perspective warp maps the frame's own corners
+            //back onto themselves — see TransformExpressions.ProjectCorner,
+            //which with every field at its identity value reduces to exactly
+            //the placement rectangle Frame() already produced. The warp is
+            //mathematically a pass-through in that case but NOT free to run:
+            //split + 2x-supersampled alphaextract/perspective/area-downscale
+            //on the mask, fillborders+perspective on the colour, and a final
+            //alphamerge, all at the work rect's full resolution — measured
+            //as the dominant per-clip cost in this pipeline (~500ms/clip).
+            //Skipping it for untransformed clips (static backgrounds,
+            //full-bleed generators/noise, un-animated overlays) removes
+            //that cost outright rather than shaving it. Transformed clips
+            //are completely unaffected — same warp, same MaskSupersample,
+            //same antialiasing, exactly as before.
+            string transformed = IsIdentityTransform(literalTransform)
+                ? modulated
+                : ApplyTransform(modulated, nativeWidth, nativeHeight, context, literalTransform);
 
             //everything above ran at the tight work rect's size. Pad back out to
             //full canvas — a pure border fill, no resampling — and build a
@@ -220,6 +237,21 @@ namespace EditSharp.Render
 
             return next;
         }
+
+        /// <summary>
+        /// True when a transform contributes nothing: dead centre, unscaled,
+        /// unrotated. Exact equality is deliberate, not an approximation —
+        /// these values come from either an explicit default or a
+        /// Clip.TransformAt lerp between two keyframes, and lerping between
+        /// two values that are themselves exactly identity produces the
+        /// exact identity value back out with no floating-point drift (the
+        /// delta term is exactly zero, not merely close to it, so `from +
+        /// (to - from) * t` collapses to `from` exactly for any t).
+        /// </summary>
+        private static bool IsIdentityTransform(ClipTransform t) =>
+            t.Position.X == 0f && t.Position.Y == 0f &&
+            t.Scale.X == 1f && t.Scale.Y == 1f &&
+            t.Rotation == 0f && t.Pitch == 0f && t.Yaw == 0f;
 
         /// <summary>
         /// The transform itself: one `perspective` per stream, colour and alpha
