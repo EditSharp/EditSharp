@@ -146,6 +146,42 @@ namespace EditSharp
                 : throw new ArgumentOutOfRangeException(
                     nameof(value), "FilterThreads must be at least 1.");
         }
+
+        /// <summary>
+        /// Which swscale backend(s) ffmpeg 9.0+ is allowed to use for scale/
+        /// format conversions (the scaler's -sws_backends flag). Defaults to
+        /// "x86" — explicitly opting in to the new x86 SIMD kernel backend
+        /// from 9.0's swscale rewrite.
+        ///
+        /// THIS DEFAULT IS DELIBERATE, NOT FFMPEG'S OWN DEFAULT. Per FFmpeg's
+        /// scaler docs, sws_backends defaults to 'auto', which resolves to
+        /// 'stable' unless the 'unstable' flag is set — and SWS_BACKEND_X86
+        /// is defined as part of SWS_BACKEND_UNSTABLE, not
+        /// SWS_BACKEND_STABLE. So on a stock 9.0 build, every scale/format
+        /// conversion in this pipeline is running the plain C reference
+        /// path, not the SIMD path, unless this is set explicitly.
+        ///
+        /// This is orthogonal to FilterThreads, not a rerun of the same
+        /// bug: FilterThreads controls libavfilter's cross-thread SLICING of
+        /// a frame into pieces (the thing that produced the black-line
+        /// seams — see that property's remarks), while sws_backends
+        /// controls which SIMD kernel swscale uses to do the per-pixel math
+        /// WITHIN a single thread's execution. FilterThreads=1 means there
+        /// is only one slice/one thread; sws_backends=x86 just makes that
+        /// one thread faster. Nothing here re-partitions the frame, so the
+        /// seam mechanism the black-line fix addressed shouldn't apply.
+        ///
+        /// That said, this has not yet been verified against a real render
+        /// on the actual 9.0 build — ffmpeg's own docs describe x86 as an
+        /// "unstable" backend (their word, likely meaning "newer/less
+        /// battle-tested", not literally unsafe), and the swscale rewrite
+        /// itself is very new. If a render regresses in a way that smells
+        /// at all like the black-line bug (seams, banding, wrong alpha)
+        /// after this is turned on, that is the first thing to revert and
+        /// would mean the two are not as orthogonal in practice as they are
+        /// on paper.
+        /// </summary>
+        public static string SwsBackends { get; set; } = "x86";
     }
 
     /// <summary>

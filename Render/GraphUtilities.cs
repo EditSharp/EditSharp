@@ -68,13 +68,31 @@ namespace EditSharp.Render
         /// These are GLOBAL options: they must appear before any -i, so callers
         /// add them at the head of the argument list alongside -y/-v, never
         /// after an input.
+        ///
+        /// ALSO carries -sws_backends (EditSharpConfig.SwsBackends), which is
+        /// a different knob answering a different question — see that
+        /// property's remarks for the full reasoning. Short version:
+        /// -filter_threads/-filter_complex_threads control whether libavfilter
+        /// SLICES a frame across multiple threads (the thing that caused the
+        /// seam bug above); -sws_backends controls which SIMD kernel swscale
+        /// uses to do the per-pixel math WITHIN whichever thread(s) end up
+        /// running. Pinning thread count to 1 doesn't touch which backend that
+        /// one thread uses, so the two settings are orthogonal and both belong
+        /// in this same "global args, must precede any -i" bucket rather than
+        /// being split into a second method callers would have to remember to
+        /// also add.
         /// </summary>
         public static string[] FilterThreadingArgs()
         {
             string threads = Math.Max(1, EditSharpConfig.FilterThreads)
                 .ToString(CultureInfo.InvariantCulture);
 
-            return ["-filter_threads", threads, "-filter_complex_threads", threads];
+            return
+            [
+                "-filter_threads", threads,
+                "-filter_complex_threads", threads,
+                "-sws_backends", EditSharpConfig.SwsBackends,
+            ];
         }
 
         /// <summary>
