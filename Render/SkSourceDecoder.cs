@@ -78,7 +78,13 @@ namespace EditSharp.Render
         /// Starts decoding `sourcePath` from `sourceStartSeconds` (the
         /// clip's own trim offset into the file — ONE seek here, paid once
         /// at stream setup, categorically different from the old per-frame
-        /// seek cost this replaces), conformed to `fps`, at `width`x`height`.
+        /// seek cost this replaces), conformed to `fps`, at `width`x`height`
+        /// — the DECODE TARGET (see SkClipContentSource.GetOrOpenDecoder),
+        /// which is the clip's own max-scale content size capped at native
+        /// resolution, NOT unconditionally native resolution the way this
+        /// used to work. `plan` (see DecodeHwAccelPlan) resolves both the
+        /// -hwaccel args AND which scale filter (GPU or CPU) builds the
+        /// actual -vf string — defaults to DecodeHwAccelPlan.Software.
         ///
         /// Output pixel format is rgba8888 — NOT PixelFormats.Primary
         /// (gbrap16le). That 16-bit choice was explicitly tied to the OLD
@@ -89,20 +95,12 @@ namespace EditSharp.Render
         /// step. This anticipates item 12's likely direction without fully
         /// deciding bit depth here — flagged, not silently assumed final.
         /// </summary>
-        /// <summary>
-        /// `hwAccelArgs` — e.g. ["-hwaccel", "cuda"] or empty for software —
-        /// resolved once up front by FfmpegRunner.GetDecodeHwAccelArgsAsync
-        /// against this exact source path (see FrameRenderer.ProbeVideoAsync,
-        /// where that probe now runs alongside MediaProbe) and passed straight
-        /// through here, not re-resolved per clip/frame. Must appear before
-        /// `-i` — ffmpeg's -hwaccel is an input-scoped option.
-        /// </summary>
         public static SkSourceDecoder Start(
             string sourcePath, double sourceStartSeconds, int fps, int width, int height,
-            System.Collections.Generic.IReadOnlyList<string>? hwAccelArgs = null)
+            DecodeHwAccelPlan? plan = null)
         {
-            string filter = $"fps={fps},scale={width}:{height}," +
-                             $"format=rgba,settb=AVTB";
+            plan ??= DecodeHwAccelPlan.Software;
+            string filter = plan.BuildFilterGraph(fps, width, height);
 
             var args = new System.Collections.Generic.List<string>
             {
@@ -110,9 +108,7 @@ namespace EditSharp.Render
             };
 
             args.AddRange(GraphUtilities.FilterThreadingArgs());
-
-            if (hwAccelArgs != null && hwAccelArgs.Count > 0)
-                args.AddRange(hwAccelArgs);
+            args.AddRange(plan.HwAccelArgs);
 
             if (sourceStartSeconds > 0)
             {

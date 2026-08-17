@@ -40,7 +40,7 @@ namespace EditSharp.Render
         private readonly int _fps;
         private readonly IReadOnlyDictionary<Clip, (int Width, int Height)> _nativeSizes;
         private readonly IReadOnlyDictionary<Clip, string> _staticImagePaths;
-        private readonly IReadOnlyDictionary<Clip, List<string>> _decodeHwAccelArgs;
+        private readonly IReadOnlyDictionary<Clip, DecodeHwAccelPlan> _decodePlans;
 
         private readonly Dictionary<Clip, SkSourceDecoder> _videoDecoders = new();
         private readonly Dictionary<Clip, SKImage> _staticContent = new();
@@ -49,12 +49,12 @@ namespace EditSharp.Render
             int fps,
             IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes,
             IReadOnlyDictionary<Clip, string> staticImagePaths,
-            IReadOnlyDictionary<Clip, List<string>> decodeHwAccelArgs)
+            IReadOnlyDictionary<Clip, DecodeHwAccelPlan> decodePlans)
         {
             _fps = fps;
             _nativeSizes = nativeSizes;
             _staticImagePaths = staticImagePaths;
-            _decodeHwAccelArgs = decodeHwAccelArgs;
+            _decodePlans = decodePlans;
         }
 
         /// <summary>
@@ -76,7 +76,7 @@ namespace EditSharp.Render
             switch (frameClip.Clip)
             {
                 case SourceClip { Source.Type: SourceType.Video } source:
-                    return (GetOrOpenDecoder(frameClip.Clip, source).NextFrame(), true);
+                    return (GetOrOpenDecoder(frameClip.Clip, source, canvasWidth, canvasHeight).NextFrame(), true);
 
                 case SourceClip { Source.Type: SourceType.Image }:
                 case TextClip:
@@ -98,7 +98,7 @@ namespace EditSharp.Render
             }
         }
 
-        private SkSourceDecoder GetOrOpenDecoder(Clip clip, SourceClip source)
+        private SkSourceDecoder GetOrOpenDecoder(Clip clip, SourceClip source, int canvasWidth, int canvasHeight)
         {
             if (_videoDecoders.TryGetValue(clip, out SkSourceDecoder? existing))
                 return existing;
@@ -118,15 +118,36 @@ namespace EditSharp.Render
             //setup rather than once per frame
             double startSeconds = (source.Source.Start ?? TimeSpan.Zero).TotalSeconds;
 
-            //Decoding+scaling straight to the clip's own native size, not
-            //ComputeContentSize's smaller target — leaves the redundant
-            //"decode native, then Skia-resize down to content size" cost
-            //flagged rather than optimized away here; see the migration
-            //manifest's deferred-verification list.
-            _decodeHwAccelArgs.TryGetValue(clip, out List<string>? hwAccelArgs);
+            //Decode target: the SAME max-scale-across-the-clip's-own-keyframe-
+            //range content size ClipVideoChain/SkiaClipCompositorSketch.Composite
+            //already computes for the Skia resize step (TransformExpressions
+            //.ComputeContentSize/.MaxScale — unchanged, reused as-is), capped at
+            //native resolution per axis independently. Was previously
+            //unconditionally native resolution regardless of how small the clip
+            //ever actually renders — flagged as a known redundancy, now closed:
+            //ffmpeg no longer decodes/scales detail the compositor was always
+            //going to immediately throw away in its own resize step. Computed
+            //ONCE per clip at decoder-open time from static keyframe data, not
+            //per-frame — still fully compatible with FrameStateResolver.Resolve's
+            //stateless-per-frame design, and avoids the ffmpeg-process-restart
+            //cost a literal per-frame-varying decode resolution would require.
+            //
+            //Capped independently per axis (not a single uniform cap) since
+            //MaxScale itself is independent per axis (non-uniform scale is a
+            //real, supported case) — matches how ComputeContentSize already
+            //treats width/height as independent.
+            (int desiredWidth, int desiredHeight) = TransformExpressions.ComputeContentSize(
+                clip, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
+
+            int decodeWidth = Math.Min(desiredWidth, nativeWidth);
+            int decodeHeight = Math.Min(desiredHeight, nativeHeight);
+
+            DecodeHwAccelPlan plan = _decodePlans.TryGetValue(clip, out DecodeHwAccelPlan? resolvedPlan)
+                ? resolvedPlan
+                : DecodeHwAccelPlan.Software;
 
             SkSourceDecoder decoder = SkSourceDecoder.Start(
-                source.Source.Path, startSeconds, _fps, nativeWidth, nativeHeight, hwAccelArgs);
+                source.Source.Path, startSeconds, _fps, decodeWidth, decodeHeight, plan);
 
             _videoDecoders[clip] = decoder;
             return decoder;

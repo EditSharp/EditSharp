@@ -1,4 +1,5 @@
 using EditSharp;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -151,69 +152,100 @@ namespace EditSharp.Render
         }
 
         /// <summary>
-        /// Resolves the ffmpeg decode args (e.g. ["-hwaccel", "cuda"]) to prepend
-        /// before `-i sourcePath` in SkSourceDecoder.Start, or an empty list for
-        /// software decode. Probed against the ACTUAL source, not just the codec
-        /// name — hwaccel support depends on the source's own codec/profile in a
-        /// way a generic probe can't predict (a GPU that decodes H.264 via NVDEC
-        /// may not decode a particular AV1 profile the same way), same reasoning
+        /// Resolves the full decode plan (hwaccel args + which scale filter to
+        /// use, see DecodeHwAccelPlan) for a source, or DecodeHwAccelPlan.Software
+        /// for software decode/scale. Probed against the ACTUAL source, not just
+        /// the codec name — hwaccel support depends on the source's own codec/
+        /// profile in a way a generic probe can't predict, same reasoning
         /// GetVideoEncoderSettingsAsync's trial-encode already relies on for
-        /// encode. HardwareAccelerator.None returns an empty list unconditionally,
-        /// no probing at all — matches encode's same "None means an absolute
-        /// guarantee, not a preference" contract.
+        /// encode. HardwareAccelerator.None returns DecodeHwAccelPlan.Software
+        /// unconditionally, no probing at all — matches encode's same "None
+        /// means an absolute guarantee, not a preference" contract.
+        ///
+        /// The probe runs each candidate's REAL intended filter chain (hwaccel +
+        /// hwaccel_output_format + the GPU scale filter itself + hwdownload),
+        /// against a small placeholder size (320x240) rather than the clip's
+        /// real decode target — the probe's job is confirming the MECHANISM
+        /// works (is scale_cuda actually compiled into this ffmpeg build, etc),
+        /// not validating a specific size, and the real per-clip decode target
+        /// isn't known until SkClipContentSource.GetOrOpenDecoder computes it
+        /// from the clip's own max-scale — deliberately decoupled so this probe
+        /// can run once per source at content-prep time, before any per-clip
+        /// sizing exists. This is exactly the lesson the encode-side quality-arg
+        /// bug taught: a probe that doesn't exercise the real pipeline shape can
+        /// pass while the real pipeline still breaks (there, NVENC's -preset p4
+        /// silently broke hevc_qsv because the probe never tried quality args at
+        /// all; here, testing bare `-hwaccel` without the scale filter would
+        /// have the same blind spot for scale_cuda/scale_vulkan specifically).
         ///
         /// Same loud-fallback-logging contract as encode: if every hardware
-        /// candidate fails for this source, this logs via Log (not LogVerbose)
-        /// once, naming the source, before returning the software (empty) args.
+        /// candidate fails for this source, this logs via LogWarning once,
+        /// naming the source, before returning DecodeHwAccelPlan.Software.
         /// </summary>
-        public static async Task<List<string>> GetDecodeHwAccelArgsAsync(
+        public static async Task<DecodeHwAccelPlan> GetDecodePlanAsync(
             string sourcePath, HardwareAccelerator hwAccel)
         {
             if (hwAccel != HardwareAccelerator.GPU)
-                return new List<string>();
+                return DecodeHwAccelPlan.Software;
 
-            foreach (string? candidate in Constants.DecodeHwAccelCandidates)
+            foreach ((string candidate, string? outputFormat, string? scaleFilter) in Constants.DecodeHwAccelCandidates)
             {
-                if (candidate == null)
-                    break; // reached the explicit "software" sentinel — nothing left to try
+                var plan = new DecodeHwAccelPlan(candidate, outputFormat, scaleFilter);
 
-                if (await IsDecodeHwAccelAvailableAsync(candidate, sourcePath))
+                if (await IsDecodePlanAvailableAsync(plan, sourcePath))
                 {
                     EditSharpConfig.Logger.LogVerbose(
-                        $"Decode: using hwaccel '{candidate}' for '{sourcePath}'.");
-                    return new List<string> { "-hwaccel", candidate };
+                        $"Decode: using '{candidate}'" +
+                        (plan.UsesGpuScale ? $" with GPU scale ('{scaleFilter}')" : " (CPU scale fallback)") +
+                        $" for '{sourcePath}'.");
+                    return plan;
                 }
 
                 EditSharpConfig.Logger.LogVerbose(
-                    $"Decode: hwaccel candidate '{candidate}' unavailable for '{sourcePath}', trying next.");
+                    $"Decode: candidate '{candidate}' unavailable for '{sourcePath}', trying next.");
             }
 
             EditSharpConfig.Logger.LogWarning(
                 $"HardwareAccelerator.GPU requested, but no decode hwaccel works for '{sourcePath}' " +
                 "on this machine. Falling back to software decode for this source.");
 
-            return new List<string>();
+            return DecodeHwAccelPlan.Software;
         }
 
-        // Keyed on (candidate, sourcePath) rather than candidate alone — hwaccel
+        // Keyed on (candidate, sourcePath) rather than plan identity — hwaccel
         // support can legitimately differ between two sources with different
         // codecs/profiles, unlike encoder availability which only depends on the
         // machine. Cached so re-visiting the same source (e.g. a clip trimmed
         // into two pieces on the timeline) doesn't re-probe.
         private static readonly ConcurrentDictionary<(string Candidate, string Path), Task<bool>>
-            DecodeHwAccelAvailabilityCache = new();
+            DecodePlanAvailabilityCache = new();
 
-        private static Task<bool> IsDecodeHwAccelAvailableAsync(string candidate, string sourcePath) =>
-            DecodeHwAccelAvailabilityCache.GetOrAdd((candidate, sourcePath), key => ProbeDecodeHwAccelAsync(key.Candidate, key.Path));
+        private static Task<bool> IsDecodePlanAvailableAsync(DecodeHwAccelPlan plan, string sourcePath) =>
+            DecodePlanAvailabilityCache.GetOrAdd(
+                (plan.Candidate, sourcePath), _ => ProbeDecodePlanAsync(plan, sourcePath));
 
         /// <summary>
-        /// Whether ffmpeg can actually decode `sourcePath` using `-hwaccel
-        /// candidate` on this machine right now — a real 1-frame trial decode,
-        /// same shape and same reasoning as ProbeEncoderAsync (the flag being
-        /// recognized doesn't mean the hardware/driver/codec combination
-        /// actually works).
+        /// Whether ffmpeg can actually run `plan`'s REAL intended filter chain
+        /// against `sourcePath` on this machine right now — a real 1-frame trial
+        /// decode at a small placeholder size (320x240; see GetDecodePlanAsync's
+        /// remarks on why a placeholder is correct here), same shape and same
+        /// reasoning as ProbeEncoderAsync (a flag/filter being recognized by
+        /// name doesn't mean the hardware/driver/codec combination actually
+        /// works end to end).
+        ///
+        /// On failure, logs ffmpeg's actual stderr via LogVerbose before
+        /// returning false — "unavailable" collapses several genuinely
+        /// different failure causes into one boolean (ffmpeg built without
+        /// this hwaccel/filter at all; a device-selection conflict, e.g. an
+        /// iGPU and a dGPU both enumerating as candidates for the same API;
+        /// this specific source's codec/profile not being decodable via this
+        /// path) that all look identical from the outside without this. Added
+        /// specifically because CUDA unexpectedly lost to d3d11va on a machine
+        /// with an active dGPU — don't want to guess at why the same way the
+        /// NVENC/QSV quality-arg bug was guessed at before it broke a real
+        /// encode; this makes the real ffmpeg error visible instead.
         /// </summary>
-        private static async Task<bool> ProbeDecodeHwAccelAsync(string candidate, string sourcePath)
+        private static async Task<bool> ProbeDecodePlanAsync(DecodeHwAccelPlan plan, string sourcePath)
         {
             try
             {
@@ -225,28 +257,38 @@ namespace EditSharp.Render
                     UseShellExecute = false,
                     CreateNoWindow = true,
                 };
-                foreach (var arg in new[]
+
+                var args = new List<string> { "-v", "error" };
+                args.AddRange(plan.HwAccelArgs);
+                args.AddRange(new[]
                 {
-                    "-v", "error",
-                    "-hwaccel", candidate,
                     "-i", sourcePath,
+                    "-vf", plan.BuildFilterGraph(fps: 1, width: 320, height: 240),
                     "-frames:v", "1", "-f", "null", "-",
-                })
-                {
-                    psi.ArgumentList.Add(arg);
-                }
+                });
+
+                foreach (string arg in args) psi.ArgumentList.Add(arg);
 
                 using var process = new Process { StartInfo = psi };
                 process.Start();
 
-                Task stdoutTask = process.StandardOutput.ReadToEndAsync();
-                Task stderrTask = process.StandardError.ReadToEndAsync();
+                Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
+                Task<string> stderrTask = process.StandardError.ReadToEndAsync();
                 await Task.WhenAll(stdoutTask, stderrTask, process.WaitForExitAsync());
+
+                if (process.ExitCode != 0)
+                {
+                    EditSharpConfig.Logger.LogVerbose(
+                        $"Decode: probe for '{plan.Candidate}' against '{sourcePath}' failed " +
+                        $"(exit {process.ExitCode}): {stderrTask.Result.Trim()}");
+                }
 
                 return process.ExitCode == 0;
             }
-            catch
+            catch (Exception ex)
             {
+                EditSharpConfig.Logger.LogVerbose(
+                    $"Decode: probe for '{plan.Candidate}' against '{sourcePath}' threw: {ex.Message}");
                 return false;
             }
         }

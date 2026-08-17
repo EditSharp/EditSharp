@@ -50,19 +50,32 @@ namespace EditSharp.Render
         };
 
         // ffmpeg -hwaccel candidates for source DECODE, in TRY-FIRST-TO-LAST
-        // priority order: vendor-specific first (fastest, needs a matching
-        // GPU), d3d11va as a broad Windows fallback that works across
-        // vendors via DXVA, then no -hwaccel flag at all (plain software
-        // decode) as the final, always-available fallback — represented as
-        // null rather than a string since it's "omit the flag", not a flag
-        // value. GetDecodeHwAccelArgsAsync probes each against the actual
-        // source being decoded, same trial-and-fallback shape as encode.
-        public static readonly string?[] DecodeHwAccelCandidates =
+        // priority order: cuda then vulkan, both GPU-scale-capable (decode AND
+        // the resize step stay on the GPU, only the final already-small frame
+        // gets downloaded for the pipe), THEN d3d11va as a broad Windows
+        // decode-only fallback (no widely available D3D11VA GPU scale filter
+        // in stock ffmpeg, so this one gets hardware DECODE but CPU scale — a
+        // real, deliberate asymmetry, not an oversight, and specifically why
+        // it ranks below both GPU-scale candidates rather than above them),
+        // then plain software as the final fallback (ScaleFilter null,
+        // HwaccelOutputFormat null).
+        //
+        // scale_cuda and scale_vulkan are the two GPU-scale filters actually
+        // exercised — NOT verified against this project's actual installed
+        // ffmpeg build (same honesty flag as HardwareCodecNames' encoder
+        // names). GetDecodePlanAsync's probe runs the REAL intended filter
+        // chain (hwaccel + hwaccel_output_format + the scale filter itself +
+        // hwdownload), not just bare `-hwaccel`, specifically because
+        // encoder/filter availability can fail independently of basic decode
+        // working — same lesson FfmpegRunner's own encode-side quality-arg
+        // bug already taught once this pass (a probe that doesn't exercise
+        // the REAL pipeline can pass while the real pipeline still breaks).
+        public static readonly (string Candidate, string? HwaccelOutputFormat, string? ScaleFilter)[]
+            DecodeHwAccelCandidates =
         [
-            "cuda",
-            "d3d11va",
-            "vulkan",
-            null,
+            ("cuda", "cuda", "scale_cuda"),
+            ("vulkan", "vulkan", "scale_vulkan"),
+            ("d3d11va", null, null), // decode-only — CPU scale/format-convert fallback for this candidate specifically
         ];
 
         public static readonly Dictionary<AudioCodec, string> AudioCodecNames = new()

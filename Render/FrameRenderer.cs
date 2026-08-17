@@ -90,12 +90,12 @@ namespace EditSharp.Render
             //not a behaviour change worth its own checklist item.
             var nativeSizes = new ConcurrentDictionary<Clip, (int, int)>();
             var staticImagePaths = new ConcurrentDictionary<Clip, string>();
-            var decodeHwAccelArgs = new ConcurrentDictionary<Clip, List<string>>();
+            var decodePlans = new ConcurrentDictionary<Clip, DecodeHwAccelPlan>();
 
             var prepSw = Stopwatch.StartNew();
             await PrepareContentAsync(
                 timeline, width, height, blueprint.HardwareAccelerator,
-                nativeSizes, staticImagePaths, decodeHwAccelArgs, tempFiles);
+                nativeSizes, staticImagePaths, decodePlans, tempFiles);
             EditSharpConfig.Logger.LogVerbose($"Content prepared in {prepSw.ElapsedMilliseconds}ms.");
 
             //when a video clip's decoder can be torn down — computed once,
@@ -116,7 +116,7 @@ namespace EditSharp.Render
                 "(sequential, in-process Skia compositor).");
 
             using var contentSource = new SkClipContentSource(
-                fps, nativeSizes, staticImagePaths, decodeHwAccelArgs);
+                fps, nativeSizes, staticImagePaths, decodePlans);
 
             // One GRContext (or null -> software raster) for the whole render
             // session, and one surface pool sitting on top of it — both live
@@ -211,7 +211,7 @@ namespace EditSharp.Render
             Timeline timeline, int canvasWidth, int canvasHeight, HardwareAccelerator hwAccel,
             ConcurrentDictionary<Clip, (int, int)> nativeSizes,
             ConcurrentDictionary<Clip, string> staticImagePaths,
-            ConcurrentDictionary<Clip, List<string>> decodeHwAccelArgs,
+            ConcurrentDictionary<Clip, DecodeHwAccelPlan> decodePlans,
             ConcurrentBag<string> tempFiles)
         {
             var tasks = new List<Task>();
@@ -223,7 +223,7 @@ namespace EditSharp.Render
                     switch (clip)
                     {
                         case SourceClip { Source.Type: SourceType.Video } video:
-                            tasks.Add(ProbeVideoAsync(clip, video, hwAccel, nativeSizes, decodeHwAccelArgs));
+                            tasks.Add(ProbeVideoAsync(clip, video, hwAccel, nativeSizes, decodePlans));
                             break;
 
                         case SourceClip { Source.Type: SourceType.Image } image:
@@ -244,7 +244,7 @@ namespace EditSharp.Render
         private static async Task ProbeVideoAsync(
             Clip clip, SourceClip video, HardwareAccelerator hwAccel,
             ConcurrentDictionary<Clip, (int, int)> nativeSizes,
-            ConcurrentDictionary<Clip, List<string>> decodeHwAccelArgs)
+            ConcurrentDictionary<Clip, DecodeHwAccelPlan> decodePlans)
         {
             (int width, int height) = await MediaProbe.GetDimensionsAsync(video.Source.Path);
             nativeSizes[clip] = (width, height);
@@ -253,7 +253,7 @@ namespace EditSharp.Render
             // already paying an async round-trip for — not re-resolved per
             // frame or per decoder open (see SkSourceDecoder.Start's own
             // remarks on why the result is just passed straight through).
-            decodeHwAccelArgs[clip] = await FfmpegRunner.GetDecodeHwAccelArgsAsync(video.Source.Path, hwAccel);
+            decodePlans[clip] = await FfmpegRunner.GetDecodePlanAsync(video.Source.Path, hwAccel);
         }
 
         private static async Task PrepareImageAsync(
