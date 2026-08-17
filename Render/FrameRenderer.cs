@@ -166,6 +166,8 @@ namespace EditSharp.Render
         {
             var sw = Stopwatch.StartNew();
 
+            long previousElapsedMs = 0;
+
             for (int frameIndex = 0; frameIndex < totalFrames; frameIndex++)
             {
                 FrameState state = FrameStateResolver.Resolve(timeline, frameIndex, fps, nativeSizes);
@@ -187,9 +189,18 @@ namespace EditSharp.Render
                     foreach (Clip clip in finished) contentSource.ReleaseDecoder(clip);
                 }
 
+                long currentElapsedMs = sw.ElapsedMilliseconds;
+                long frameDeltaMs = currentElapsedMs - previousElapsedMs;
+                previousElapsedMs = currentElapsedMs;
+
+                //Both numbers together, not just cumulative — cumulative alone
+                //means reading per-frame cost requires subtracting consecutive
+                //log lines by hand, which every real profiling pass in this
+                //project so far has had to do manually. Matches the shape the
+                //old ffmpeg-based renderer's own progress output already had.
                 EditSharpConfig.Logger.LogVerbose(
                     $"Rendered frame {frameIndex + 1}/{totalFrames} " +
-                    $"({sw.ElapsedMilliseconds}ms elapsed).");
+                    $"({frameDeltaMs}ms this frame, {currentElapsedMs}ms elapsed).");
             }
         }
 
