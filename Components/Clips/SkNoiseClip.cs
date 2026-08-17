@@ -2,7 +2,7 @@ using System;
 using SkiaSharp;
 using EditSharp.Components;
 
-namespace EditSharp.Components.Clips
+namespace EditSharp.Render
 {
     /// <summary>
     /// Item 10, decided in conversation: eliminate the pre-render pass
@@ -150,7 +150,8 @@ namespace EditSharp.Components.Clips
         /// no dependency on any other frame. Every frame is O(1) regardless
         /// of frame index, which is the entire point of this item.
         /// </summary>
-        public static SKImage Render(NoiseClip clip, double clipSeconds, int canvasWidth, int canvasHeight)
+        public static SKImage Render(
+            NoiseClip clip, double clipSeconds, int canvasWidth, int canvasHeight, SkSurfacePool pool)
         {
             double xscale = Math.Max(clip.Detail, 0f) * DetailCellsPerCanvas;
             double yscale = xscale * canvasHeight / (double)canvasWidth;
@@ -186,11 +187,17 @@ namespace EditSharp.Components.Clips
             using SKShader shader = Effect.ToShader(uniforms);
             using var paint = new SKPaint { Shader = shader };
 
-            using SKSurface surface = SKSurface.Create(
-                new SKImageInfo(canvasWidth, canvasHeight, SKColorType.Rgba8888, SKAlphaType.Premul));
-            surface.Canvas.DrawRect(new SKRect(0, 0, canvasWidth, canvasHeight), paint);
-
-            return surface.Snapshot();
+            SKSurface surface = pool.Rent(canvasWidth, canvasHeight);
+            try
+            {
+                surface.Canvas.Clear(SKColors.Transparent);
+                surface.Canvas.DrawRect(new SKRect(0, 0, canvasWidth, canvasHeight), paint);
+                return surface.Snapshot();
+            }
+            finally
+            {
+                pool.Return(surface, canvasWidth, canvasHeight);
+            }
         }
     }
 }

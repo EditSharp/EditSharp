@@ -40,6 +40,7 @@ namespace EditSharp.Render
         private readonly int _fps;
         private readonly IReadOnlyDictionary<Clip, (int Width, int Height)> _nativeSizes;
         private readonly IReadOnlyDictionary<Clip, string> _staticImagePaths;
+        private readonly IReadOnlyDictionary<Clip, List<string>> _decodeHwAccelArgs;
 
         private readonly Dictionary<Clip, SkSourceDecoder> _videoDecoders = new();
         private readonly Dictionary<Clip, SKImage> _staticContent = new();
@@ -47,11 +48,13 @@ namespace EditSharp.Render
         public SkClipContentSource(
             int fps,
             IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes,
-            IReadOnlyDictionary<Clip, string> staticImagePaths)
+            IReadOnlyDictionary<Clip, string> staticImagePaths,
+            IReadOnlyDictionary<Clip, List<string>> decodeHwAccelArgs)
         {
             _fps = fps;
             _nativeSizes = nativeSizes;
             _staticImagePaths = staticImagePaths;
+            _decodeHwAccelArgs = decodeHwAccelArgs;
         }
 
         /// <summary>
@@ -68,7 +71,7 @@ namespace EditSharp.Render
         /// own SourceClip-with-no-video-stream case.
         /// </summary>
         public (SKImage? Image, bool Transient) GetContent(
-            FrameClip frameClip, int canvasWidth, int canvasHeight)
+            FrameClip frameClip, int canvasWidth, int canvasHeight, SkSurfacePool pool)
         {
             switch (frameClip.Clip)
             {
@@ -84,10 +87,10 @@ namespace EditSharp.Render
                     return (null, false);
 
                 case GeneratorClip generator:
-                    return (SkGeneratorClip.Render(generator, frameClip.ClipSeconds), true);
+                    return (SkGeneratorClip.Render(generator, frameClip.ClipSeconds, pool), true);
 
                 case NoiseClip noise:
-                    return (SkNoiseClip.Render(noise, frameClip.ClipSeconds, canvasWidth, canvasHeight), true);
+                    return (SkNoiseClip.Render(noise, frameClip.ClipSeconds, canvasWidth, canvasHeight, pool), true);
 
                 default:
                     throw new NotSupportedException(
@@ -120,8 +123,10 @@ namespace EditSharp.Render
             //"decode native, then Skia-resize down to content size" cost
             //flagged rather than optimized away here; see the migration
             //manifest's deferred-verification list.
+            _decodeHwAccelArgs.TryGetValue(clip, out List<string>? hwAccelArgs);
+
             SkSourceDecoder decoder = SkSourceDecoder.Start(
-                source.Source.Path, startSeconds, _fps, nativeWidth, nativeHeight);
+                source.Source.Path, startSeconds, _fps, nativeWidth, nativeHeight, hwAccelArgs);
 
             _videoDecoders[clip] = decoder;
             return decoder;

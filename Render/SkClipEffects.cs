@@ -28,7 +28,8 @@ namespace EditSharp.Render
         /// whatever buffer happens to be in hand).
         /// </summary>
         public static SKImage ApplyStage(
-            List<Effect> effects, EffectStage stage, SKImage input, SkClipChainContext context)
+            List<Effect> effects, EffectStage stage, SKImage input, SkClipChainContext context,
+            SkSurfacePool pool)
         {
             if (effects == null || effects.Count == 0) return input;
 
@@ -38,9 +39,9 @@ namespace EditSharp.Render
             {
                 SKImage next = effect switch
                 {
-                    BlurEffect blur => ApplyBlur(blur, current, context),
-                    DropShadowEffect shadow => ApplyDropShadow(shadow, current, context),
-                    RoundedCornersEffect rounded => ApplyRoundedCorners(rounded, current),
+                    BlurEffect blur => ApplyBlur(blur, current, context, pool),
+                    DropShadowEffect shadow => ApplyDropShadow(shadow, current, context, pool),
+                    RoundedCornersEffect rounded => ApplyRoundedCorners(rounded, current, pool),
                     _ => throw new NotSupportedException(
                         $"Unknown Effect subtype: {effect.GetType().Name}"),
                 };
@@ -95,23 +96,29 @@ namespace EditSharp.Render
         /// needed to preserve that property; it falls out of clipping being
         /// implemented that way rather than needing to be arranged for.
         /// </summary>
-        private static SKImage ApplyRoundedCorners(RoundedCornersEffect effect, SKImage input)
+        private static SKImage ApplyRoundedCorners(RoundedCornersEffect effect, SKImage input, SkSurfacePool pool)
         {
             float radius = Math.Clamp(effect.Radius, 0f, 1f) * (Math.Min(input.Width, input.Height) / 2f);
 
-            using var surface = SKSurface.Create(
-                new SKImageInfo(input.Width, input.Height, SKColorType.Rgba8888, SKAlphaType.Premul));
-            SKCanvas canvas = surface.Canvas;
-            canvas.Clear(SKColors.Transparent);
+            SKSurface surface = pool.Rent(input.Width, input.Height);
+            try
+            {
+                SKCanvas canvas = surface.Canvas;
+                canvas.Clear(SKColors.Transparent);
 
-            var roundRect = new SKRoundRect(new SKRect(0, 0, input.Width, input.Height), radius, radius);
+                var roundRect = new SKRoundRect(new SKRect(0, 0, input.Width, input.Height), radius, radius);
 
-            canvas.Save();
-            canvas.ClipRoundRect(roundRect, SKClipOperation.Intersect, antialias: true);
-            canvas.DrawImage(input, 0, 0);
-            canvas.Restore();
+                canvas.Save();
+                canvas.ClipRoundRect(roundRect, SKClipOperation.Intersect, antialias: true);
+                canvas.DrawImage(input, 0, 0);
+                canvas.Restore();
 
-            return surface.Snapshot();
+                return surface.Snapshot();
+            }
+            finally
+            {
+                pool.Return(surface, input.Width, input.Height);
+            }
         }
 
         /// <summary>
@@ -129,14 +136,14 @@ namespace EditSharp.Render
         /// in the same proportion, instead of dragging real colour toward
         /// black the way straight-alpha RGBA does. Nothing extra to do.
         /// </summary>
-        private static SKImage ApplyBlur(BlurEffect effect, SKImage input, SkClipChainContext context)
+        private static SKImage ApplyBlur(BlurEffect effect, SKImage input, SkClipChainContext context, SkSurfacePool pool)
         {
             float sigma = (float)Math.Clamp(effect.Radius * context.CanvasWidth, 0.1, 1024.0);
 
             using var filter = SKImageFilter.CreateBlur(sigma, sigma, SKShaderTileMode.Decal);
             using var paint = new SKPaint { ImageFilter = filter };
 
-            return DrawFiltered(input, paint, input.Width, input.Height);
+            return DrawFiltered(input, paint, input.Width, input.Height, pool);
         }
 
         /// <summary>
@@ -152,7 +159,8 @@ namespace EditSharp.Render
         /// CreateDropShadow takes one SKColor rather than a separate
         /// opacity multiplier.
         /// </summary>
-        private static SKImage ApplyDropShadow(DropShadowEffect effect, SKImage input, SkClipChainContext context)
+        private static SKImage ApplyDropShadow(
+            DropShadowEffect effect, SKImage input, SkClipChainContext context, SkSurfacePool pool)
         {
             float sigma = (float)Math.Clamp(effect.BlurRadius * context.CanvasWidth, 0.1, 1024.0);
 
@@ -168,7 +176,7 @@ namespace EditSharp.Render
             using var filter = SKImageFilter.CreateDropShadow(dx, dy, sigma, sigma, shadowColor);
             using var paint = new SKPaint { ImageFilter = filter };
 
-            return DrawFiltered(input, paint, input.Width, input.Height);
+            return DrawFiltered(input, paint, input.Width, input.Height, pool);
         }
 
         /// <summary>
@@ -178,14 +186,20 @@ namespace EditSharp.Render
         /// 4 — a real cost worth revisiting once profiling exists, not
         /// addressed here.
         /// </summary>
-        private static SKImage DrawFiltered(SKImage input, SKPaint paint, int width, int height)
+        private static SKImage DrawFiltered(SKImage input, SKPaint paint, int width, int height, SkSurfacePool pool)
         {
-            using var surface = SKSurface.Create(
-                new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Premul));
-            SKCanvas canvas = surface.Canvas;
-            canvas.Clear(SKColors.Transparent);
-            canvas.DrawImage(input, 0, 0, paint);
-            return surface.Snapshot();
+            SKSurface surface = pool.Rent(width, height);
+            try
+            {
+                SKCanvas canvas = surface.Canvas;
+                canvas.Clear(SKColors.Transparent);
+                canvas.DrawImage(input, 0, 0, paint);
+                return surface.Snapshot();
+            }
+            finally
+            {
+                pool.Return(surface, width, height);
+            }
         }
     }
 }

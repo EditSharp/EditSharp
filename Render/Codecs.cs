@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Text;
 
@@ -21,24 +21,34 @@ namespace EditSharp.Render
     }
 
     /// <summary>
-    /// Which render pipeline builds each frame, and which encoder finishes the
-    /// output. This now does double duty: it still selects the final encoder
-    /// (NVENC vs software), and it ALSO selects the per-frame filter-chain
-    /// construction strategy — CPU stock filters (perspective, alphamerge,
-    /// colorchannelmixer, fillborders, ...) for None, the libplacebo GPU shader
-    /// chain for Nvenc. See FrameClipVideoChain / the render-mode abstraction
-    /// in FrameRenderer.
+    /// A single top-level switch covering every stage of the pipeline that
+    /// has a hardware path at all: source DECODE (SkSourceDecoder's ffmpeg
+    /// subprocesses), in-process COMPOSITE (the Skia GRContext the
+    /// compositor's surfaces are backed by, see GpuContext/SkSurfacePool),
+    /// and final ENCODE (FfmpegRunner's mux/encode step). Replaces the old
+    /// Nvenc-only enum, which named one specific vendor encoder rather than
+    /// describing an intent — this one says "use hardware wherever it's
+    /// available" and leaves resolving that to the fastest option ACTUALLY
+    /// present on the machine at each of the three stages independently.
     ///
-    /// HardwareDecoder used to be a separate, independent knob (decode only,
-    /// entirely orthogonal to which encoder or filter chain was in play). It
-    /// no longer has a meaning: the frame-by-frame render reads already-decoded
-    /// optimized media (see OptimizedMediaBuilder), so there is no per-render
-    /// source decode step left for it to apply to. Removed rather than kept
-    /// around unused.
+    /// None forces software at every single stage, deliberately and
+    /// unconditionally — not "prefer software", an absolute guarantee, since
+    /// this is the value a consumer reaches for specifically to get
+    /// deterministic, hardware-independent output (e.g. matching a
+    /// reference render, or working around a suspect driver).
+    ///
+    /// GPU attempts hardware at each stage independently, probes it before
+    /// committing, and falls back to software FOR THAT STAGE ONLY if the
+    /// probe fails — decided in conversation: a machine with working NVENC
+    /// but no GPU decode support shouldn't lose GPU encoding just because
+    /// decode fell back. Every fallback is logged loudly via
+    /// EditSharpConfig.Logger.Log (not LogVerbose) specifically so a sudden,
+    /// unexplained slowdown on GPU is never silent — see FfmpegRunner and
+    /// GpuContext for where each stage's probe and fallback actually happen.
     /// </summary>
     public enum HardwareAccelerator
     {
         None,
-        Nvenc,
+        GPU,
     }
 }

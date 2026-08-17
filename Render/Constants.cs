@@ -25,15 +25,45 @@ namespace EditSharp.Render
             [VideoCodec.FFV1] = "ffv1",
         };
 
-        // NVENC uses different encoder names than the software libraries above.
-        // GIF has no NVENC equivalent — it always encodes on the CPU regardless of
-        // HardwareAccelerator, since there's no such thing as a hardware GIF encoder.
-        public static readonly Dictionary<VideoCodec, string> NvencCodecNames = new()
+        // Hardware encoder candidates per codec, in TRY-FIRST-TO-LAST priority
+        // order. GetVideoEncoderSettingsAsync probes each in turn with a
+        // trial encode and uses the first that actually works on this
+        // machine — vendor availability varies (NVIDIA/AMD/Intel), so this
+        // is a preference order, not an assumption any specific one exists.
+        // GIF has no hardware equivalent at all — it always encodes on the
+        // CPU regardless of HardwareAccelerator, since there's no such thing
+        // as a hardware GIF encoder.
+        //
+        // NOT VERIFIED against this project's actual installed ffmpeg build
+        // — h264_nvenc/hevc_nvenc are known-good from the pre-existing
+        // NvencCodecNames table this replaces, but av1_amf/h264_qsv/etc.
+        // names are written from general ffmpeg encoder-naming convention,
+        // not confirmed here. GetVideoEncoderSettingsAsync's own trial-encode
+        // probe is exactly the safety net for that — an unavailable or
+        // misnamed encoder just fails its probe and falls through to the
+        // next candidate, same as any other legitimately-unsupported one.
+        public static readonly Dictionary<VideoCodec, string[]> HardwareCodecNames = new()
         {
-            [VideoCodec.H264] = "h264_nvenc",
-            [VideoCodec.H265] = "hevc_nvenc",
-            [VideoCodec.AV1] = "av1_nvenc", // requires an RTX 40-series or newer GPU
+            [VideoCodec.H264] = ["h264_nvenc", "h264_amf", "h264_qsv"],
+            [VideoCodec.H265] = ["hevc_nvenc", "hevc_amf", "hevc_qsv"],
+            [VideoCodec.AV1] = ["av1_nvenc", "av1_amf", "av1_qsv"], // av1_nvenc needs an RTX 40-series+ GPU
         };
+
+        // ffmpeg -hwaccel candidates for source DECODE, in TRY-FIRST-TO-LAST
+        // priority order: vendor-specific first (fastest, needs a matching
+        // GPU), d3d11va as a broad Windows fallback that works across
+        // vendors via DXVA, then no -hwaccel flag at all (plain software
+        // decode) as the final, always-available fallback — represented as
+        // null rather than a string since it's "omit the flag", not a flag
+        // value. GetDecodeHwAccelArgsAsync probes each against the actual
+        // source being decoded, same trial-and-fallback shape as encode.
+        public static readonly string?[] DecodeHwAccelCandidates =
+        [
+            "cuda",
+            "d3d11va",
+            "vulkan",
+            null,
+        ];
 
         public static readonly Dictionary<AudioCodec, string> AudioCodecNames = new()
         {

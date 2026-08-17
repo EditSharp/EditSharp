@@ -34,39 +34,45 @@ namespace EditSharp.Render
         /// </summary>
         public static SKImage Compose(
             SKImage outgoing, SKImage incoming, Transition? transition,
-            double progress, int canvasWidth, int canvasHeight)
+            double progress, int canvasWidth, int canvasHeight, SkSurfacePool pool)
         {
             float p = (float)Math.Clamp(progress, 0.0, 1.0);
 
-            using SKSurface surface = SKSurface.Create(new SKImageInfo(
-                canvasWidth, canvasHeight, SKColorType.Rgba8888, SKAlphaType.Premul));
-            SKCanvas canvas = surface.Canvas;
-            canvas.Clear(SKColors.Transparent);
-
-            switch (transition)
+            SKSurface surface = pool.Rent(canvasWidth, canvasHeight);
+            try
             {
-                case null:
-                case FadeTransition:
-                    DrawFade(canvas, outgoing, incoming, p);
-                    break;
+                SKCanvas canvas = surface.Canvas;
+                canvas.Clear(SKColors.Transparent);
 
-                case FadeToColorTransition fadeToColor:
-                    DrawFadeToColor(canvas, outgoing, incoming, p, canvasWidth, canvasHeight, fadeToColor.Color);
-                    break;
+                switch (transition)
+                {
+                    case null:
+                    case FadeTransition:
+                        DrawFade(canvas, outgoing, incoming, p);
+                        break;
 
-                case SlideTransition slide:
-                    DrawSlide(canvas, outgoing, incoming, p, canvasWidth, canvasHeight, slide.Angle);
-                    break;
+                    case FadeToColorTransition fadeToColor:
+                        DrawFadeToColor(canvas, outgoing, incoming, p, canvasWidth, canvasHeight, fadeToColor.Color);
+                        break;
 
-                default:
-                    throw new NotSupportedException(
-                        $"Transition type {transition.GetType().Name} has no Skia " +
-                        "implementation. The ~44 old ffmpeg xfade names (WipeLeft, " +
-                        "CircleOpen, Dissolve, etc.) have no Transition subclass at " +
-                        "all yet — see Transition.cs and the migration manifest.");
+                    case SlideTransition slide:
+                        DrawSlide(canvas, outgoing, incoming, p, canvasWidth, canvasHeight, slide.Angle);
+                        break;
+
+                    default:
+                        throw new NotSupportedException(
+                            $"Transition type {transition.GetType().Name} has no Skia " +
+                            "implementation. The ~44 old ffmpeg xfade names (WipeLeft, " +
+                            "CircleOpen, Dissolve, etc.) have no Transition subclass at " +
+                            "all yet — see Transition.cs and the migration manifest.");
+                }
+
+                return surface.Snapshot();
             }
-
-            return surface.Snapshot();
+            finally
+            {
+                pool.Return(surface, canvasWidth, canvasHeight);
+            }
         }
 
         /// <summary>Direct alpha crossfade — outgoing fades out as incoming fades in.</summary>

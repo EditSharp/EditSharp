@@ -89,8 +89,17 @@ namespace EditSharp.Render
         /// step. This anticipates item 12's likely direction without fully
         /// deciding bit depth here — flagged, not silently assumed final.
         /// </summary>
+        /// <summary>
+        /// `hwAccelArgs` — e.g. ["-hwaccel", "cuda"] or empty for software —
+        /// resolved once up front by FfmpegRunner.GetDecodeHwAccelArgsAsync
+        /// against this exact source path (see FrameRenderer.ProbeVideoAsync,
+        /// where that probe now runs alongside MediaProbe) and passed straight
+        /// through here, not re-resolved per clip/frame. Must appear before
+        /// `-i` — ffmpeg's -hwaccel is an input-scoped option.
+        /// </summary>
         public static SkSourceDecoder Start(
-            string sourcePath, double sourceStartSeconds, int fps, int width, int height)
+            string sourcePath, double sourceStartSeconds, int fps, int width, int height,
+            System.Collections.Generic.IReadOnlyList<string>? hwAccelArgs = null)
         {
             string filter = $"fps={fps},scale={width}:{height}," +
                              $"format=rgba,settb=AVTB";
@@ -101,6 +110,9 @@ namespace EditSharp.Render
             };
 
             args.AddRange(GraphUtilities.FilterThreadingArgs());
+
+            if (hwAccelArgs != null && hwAccelArgs.Count > 0)
+                args.AddRange(hwAccelArgs);
 
             if (sourceStartSeconds > 0)
             {

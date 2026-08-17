@@ -90,9 +90,12 @@ namespace EditSharp.Render
             //not a behaviour change worth its own checklist item.
             var nativeSizes = new ConcurrentDictionary<Clip, (int, int)>();
             var staticImagePaths = new ConcurrentDictionary<Clip, string>();
+            var decodeHwAccelArgs = new ConcurrentDictionary<Clip, List<string>>();
 
             var prepSw = Stopwatch.StartNew();
-            await PrepareContentAsync(timeline, width, height, nativeSizes, staticImagePaths, tempFiles);
+            await PrepareContentAsync(
+                timeline, width, height, blueprint.HardwareAccelerator,
+                nativeSizes, staticImagePaths, decodeHwAccelArgs, tempFiles);
             EditSharpConfig.Logger.LogVerbose($"Content prepared in {prepSw.ElapsedMilliseconds}ms.");
 
             //when a video clip's decoder can be torn down — computed once,
@@ -112,7 +115,20 @@ namespace EditSharp.Render
                 $"Rendering {totalFrames} frame(s) at {width}x{height}@{fps}fps " +
                 "(sequential, in-process Skia compositor).");
 
-            using var contentSource = new SkClipContentSource(fps, nativeSizes, staticImagePaths);
+            using var contentSource = new SkClipContentSource(
+                fps, nativeSizes, staticImagePaths, decodeHwAccelArgs);
+
+            // One GRContext (or null -> software raster) for the whole render
+            // session, and one surface pool sitting on top of it — both live
+            // exactly as long as the frame loop below, since nothing about
+            // either is safe to share across separate renders (a GRContext
+            // wraps a real GPU device/command-queue handle; the pool's
+            // contents are only valid while that context is). Seeded with one
+            // canvas-sized surface per channel — see SkSurfacePool's own
+            // remarks for why that count, specifically.
+            using GpuContext gpuContext = GpuContext.Create(blueprint.HardwareAccelerator);
+            using var surfacePool = new SkSurfacePool(
+                gpuContext.GRContext, width, height, timeline.Channels.Count);
 
             using (var accumulator = new FileStream(
                 accumulatorPath, FileMode.Create, FileAccess.Write, FileShare.None,
@@ -120,7 +136,7 @@ namespace EditSharp.Render
             {
                 await RenderAllFramesAsync(
                     timeline, fps, width, height, nativeSizes, contentSource,
-                    decoderReleaseSchedule, totalFrames, accumulator);
+                    decoderReleaseSchedule, totalFrames, accumulator, surfacePool);
             }
 
             EditSharpConfig.Logger.Log("Finalizing output (mux + encode)...");
@@ -146,7 +162,7 @@ namespace EditSharp.Render
             ConcurrentDictionary<Clip, (int, int)> nativeSizes,
             SkClipContentSource contentSource,
             Dictionary<int, List<Clip>> decoderReleaseSchedule,
-            int totalFrames, Stream accumulator)
+            int totalFrames, Stream accumulator, SkSurfacePool surfacePool)
         {
             var sw = Stopwatch.StartNew();
 
@@ -155,7 +171,7 @@ namespace EditSharp.Render
                 FrameState state = FrameStateResolver.Resolve(timeline, frameIndex, fps, nativeSizes);
 
                 (byte[] buffer, int length) = SkFrameCompositor.RenderFrame(
-                    state, contentSource, width, height, fps);
+                    state, contentSource, width, height, fps, surfacePool);
 
                 try
                 {
@@ -192,9 +208,10 @@ namespace EditSharp.Render
         /// those two, not a missing-data bug).
         /// </summary>
         private static Task PrepareContentAsync(
-            Timeline timeline, int canvasWidth, int canvasHeight,
+            Timeline timeline, int canvasWidth, int canvasHeight, HardwareAccelerator hwAccel,
             ConcurrentDictionary<Clip, (int, int)> nativeSizes,
             ConcurrentDictionary<Clip, string> staticImagePaths,
+            ConcurrentDictionary<Clip, List<string>> decodeHwAccelArgs,
             ConcurrentBag<string> tempFiles)
         {
             var tasks = new List<Task>();
@@ -206,7 +223,7 @@ namespace EditSharp.Render
                     switch (clip)
                     {
                         case SourceClip { Source.Type: SourceType.Video } video:
-                            tasks.Add(ProbeVideoAsync(clip, video, nativeSizes));
+                            tasks.Add(ProbeVideoAsync(clip, video, hwAccel, nativeSizes, decodeHwAccelArgs));
                             break;
 
                         case SourceClip { Source.Type: SourceType.Image } image:
@@ -225,10 +242,18 @@ namespace EditSharp.Render
         }
 
         private static async Task ProbeVideoAsync(
-            Clip clip, SourceClip video, ConcurrentDictionary<Clip, (int, int)> nativeSizes)
+            Clip clip, SourceClip video, HardwareAccelerator hwAccel,
+            ConcurrentDictionary<Clip, (int, int)> nativeSizes,
+            ConcurrentDictionary<Clip, List<string>> decodeHwAccelArgs)
         {
             (int width, int height) = await MediaProbe.GetDimensionsAsync(video.Source.Path);
             nativeSizes[clip] = (width, height);
+
+            // Resolved once, up front, alongside the size probe this was
+            // already paying an async round-trip for — not re-resolved per
+            // frame or per decoder open (see SkSourceDecoder.Start's own
+            // remarks on why the result is just passed straight through).
+            decodeHwAccelArgs[clip] = await FfmpegRunner.GetDecodeHwAccelArgsAsync(video.Source.Path, hwAccel);
         }
 
         private static async Task PrepareImageAsync(

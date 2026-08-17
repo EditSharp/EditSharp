@@ -2,7 +2,7 @@ using System;
 using SkiaSharp;
 using EditSharp.Components;
 
-namespace EditSharp.Components.Clips
+namespace EditSharp.Render
 {
     /// <summary>
     /// Item 9: GeneratorClip was already the trivial case the checklist
@@ -45,14 +45,20 @@ namespace EditSharp.Components.Clips
         /// see class remarks for why that's still correct despite the
         /// actual image being 1x1.
         /// </summary>
-        public static SKImage Render(GeneratorClip clip, double clipSeconds)
+        public static SKImage Render(GeneratorClip clip, double clipSeconds, SkSurfacePool pool)
         {
             SKColor colour = ColourAt(clip, clipSeconds);
 
-            using SKSurface surface = SKSurface.Create(
-                new SKImageInfo(1, 1, SKColorType.Rgba8888, SKAlphaType.Premul));
-            surface.Canvas.Clear(colour);
-            return surface.Snapshot();
+            SKSurface surface = pool.Rent(1, 1);
+            try
+            {
+                surface.Canvas.Clear(colour);
+                return surface.Snapshot();
+            }
+            finally
+            {
+                pool.Return(surface, 1, 1);
+            }
         }
 
         /// <summary>

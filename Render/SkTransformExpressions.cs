@@ -204,6 +204,7 @@ namespace EditSharp.Render
             ClipTransform literalTransform,
             int nativeWidth, int nativeHeight,
             SkClipChainContext context,
+            SkSurfacePool pool,
             bool modulateAlreadyApplied = false,
             bool preTransformEffectsBaked = false)
         {
@@ -212,7 +213,7 @@ namespace EditSharp.Render
             // 1. Rasterize content down to its ComputeContentSize dims.
             //    Ordinary Skia resize (mipmapped/linear), no bespoke math
             //    needed here unlike the warp itself.
-            using SKImage sized = ResizeContent(nativeContent, contentWidth, contentHeight);
+            using SKImage sized = ResizeContent(nativeContent, contentWidth, contentHeight, pool);
 
             // 2. PreTransform effects, at content resolution (not native,
             //    not canvas) — decided in-conversation: downscale first,
@@ -221,13 +222,13 @@ namespace EditSharp.Render
             //    res first.
             SKImage preEffects = preTransformEffectsBaked
                 ? sized
-                : ClipEffectsSk.ApplyStage(clip.Effects, EffectStage.PreTransform, sized, context);
+                : ClipEffectsSk.ApplyStage(clip.Effects, EffectStage.PreTransform, sized, context, pool);
 
             // 3. Modulate — per-channel multiply, same skip-if-identity rule
             //    as before, now a ColorFilter instead of colorchannelmixer.
             SKImage modulated = modulateAlreadyApplied
                 ? preEffects
-                : ApplyModulateSk(clip, preEffects);
+                : ApplyModulateSk(clip, preEffects, pool);
 
             // 4. Warp-draw. No identity fast path needed anymore in the old
             //    sense — ClipVideoChain's identity fast path existed to skip
@@ -260,16 +261,25 @@ namespace EditSharp.Render
             }
             else
             {
-                using SKSurface layer = SKSurface.Create(new SKImageInfo(
-                    context.CanvasWidth, context.CanvasHeight, SKColorType.Rgba8888, SKAlphaType.Premul));
-                layer.Canvas.Clear(SKColors.Transparent);
-                DrawWarped(layer.Canvas, modulated, matrix);
+                SKSurface layer = pool.Rent(context.CanvasWidth, context.CanvasHeight);
+                SKImage warped;
+                try
+                {
+                    layer.Canvas.Clear(SKColors.Transparent);
+                    DrawWarped(layer.Canvas, modulated, matrix);
+                    warped = layer.Snapshot();
+                }
+                finally
+                {
+                    pool.Return(layer, context.CanvasWidth, context.CanvasHeight);
+                }
 
-                using SKImage warped = layer.Snapshot();
-                using SKImage postEffects = ClipEffectsSk.ApplyStage(
-                    clip.Effects, EffectStage.PostTransform, warped, context);
-
-                canvas.DrawImage(postEffects, 0, 0);
+                using (warped)
+                using (SKImage postEffects = ClipEffectsSk.ApplyStage(
+                    clip.Effects, EffectStage.PostTransform, warped, context, pool))
+                {
+                    canvas.DrawImage(postEffects, 0, 0);
+                }
             }
 
             if (!ReferenceEquals(modulated, sized) && !ReferenceEquals(modulated, preEffects))
@@ -290,40 +300,52 @@ namespace EditSharp.Render
             canvas.Restore();
         }
 
-        private static SKImage ResizeContent(SKImage source, int width, int height)
+        private static SKImage ResizeContent(SKImage source, int width, int height, SkSurfacePool pool)
         {
-            using var surface = SKSurface.Create(
-                new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Premul));
-            var canvas = surface.Canvas;
-            canvas.Clear(SKColors.Transparent);
-            var sampling = new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear);
-            var dest = new SKRect(0, 0, width, height);
-            canvas.DrawImage(source, dest, sampling);
-            return surface.Snapshot();
+            SKSurface surface = pool.Rent(width, height);
+            try
+            {
+                var canvas = surface.Canvas;
+                canvas.Clear(SKColors.Transparent);
+                var sampling = new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear);
+                var dest = new SKRect(0, 0, width, height);
+                canvas.DrawImage(source, dest, sampling);
+                return surface.Snapshot();
+            }
+            finally
+            {
+                pool.Return(surface, width, height);
+            }
         }
 
-        private static SKImage ApplyModulateSk(Clip clip, SKImage source)
+        private static SKImage ApplyModulateSk(Clip clip, SKImage source, SkSurfacePool pool)
         {
             var colour = clip.Modulate;
             if (colour.Red == 255 && colour.Green == 255 && colour.Blue == 255 && colour.Alpha == 255)
                 return source;
 
-            using var surface = SKSurface.Create(
-                new SKImageInfo(source.Width, source.Height, SKColorType.Rgba8888, SKAlphaType.Premul));
-            var canvas = surface.Canvas;
-            canvas.Clear(SKColors.Transparent);
-
-            float[] matrix =
+            SKSurface surface = pool.Rent(source.Width, source.Height);
+            try
             {
-                colour.Red / 255f, 0, 0, 0, 0,
-                0, colour.Green / 255f, 0, 0, 0,
-                0, 0, colour.Blue / 255f, 0, 0,
-                0, 0, 0, colour.Alpha / 255f, 0,
-            };
+                var canvas = surface.Canvas;
+                canvas.Clear(SKColors.Transparent);
 
-            using var paint = new SKPaint { ColorFilter = SKColorFilter.CreateColorMatrix(matrix) };
-            canvas.DrawImage(source, 0, 0, paint);
-            return surface.Snapshot();
+                float[] matrix =
+                {
+                    colour.Red / 255f, 0, 0, 0, 0,
+                    0, colour.Green / 255f, 0, 0, 0,
+                    0, 0, colour.Blue / 255f, 0, 0,
+                    0, 0, 0, colour.Alpha / 255f, 0,
+                };
+
+                using var paint = new SKPaint { ColorFilter = SKColorFilter.CreateColorMatrix(matrix) };
+                canvas.DrawImage(source, 0, 0, paint);
+                return surface.Snapshot();
+            }
+            finally
+            {
+                pool.Return(surface, source.Width, source.Height);
+            }
         }
     }
 }

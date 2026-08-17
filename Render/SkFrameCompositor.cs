@@ -40,19 +40,28 @@ namespace EditSharp.Render
         /// </summary>
         public static (byte[] Buffer, int Length) RenderFrame(
             FrameState frame, SkClipContentSource contentSource,
-            int canvasWidth, int canvasHeight, int fps)
+            int canvasWidth, int canvasHeight, int fps, SkSurfacePool pool)
         {
-            using SKSurface accumulator = SKSurface.Create(new SKImageInfo(
-                canvasWidth, canvasHeight, SKColorType.Rgba8888, SKAlphaType.Premul));
-            accumulator.Canvas.Clear(SKColors.Transparent);
-
-            foreach (FrameChannel channel in frame.Channels)
+            SKSurface accumulator = pool.Rent(canvasWidth, canvasHeight);
+            SKImage composite;
+            try
             {
-                SKImage? drawn = ComposeChannel(channel, contentSource, canvasWidth, canvasHeight, fps);
-                if (drawn == null) continue;
+                accumulator.Canvas.Clear(SKColors.Transparent);
 
-                using (drawn)
-                    SkChannelCompositor.Draw(accumulator.Canvas, drawn, channel.BlendMode);
+                foreach (FrameChannel channel in frame.Channels)
+                {
+                    SKImage? drawn = ComposeChannel(channel, contentSource, canvasWidth, canvasHeight, fps, pool);
+                    if (drawn == null) continue;
+
+                    using (drawn)
+                        SkChannelCompositor.Draw(accumulator.Canvas, drawn, channel.BlendMode);
+                }
+
+                composite = accumulator.Snapshot();
+            }
+            finally
+            {
+                pool.Return(accumulator, canvasWidth, canvasHeight);
             }
 
             //drop the composite onto opaque black — deliberately the very
@@ -60,14 +69,20 @@ namespace EditSharp.Render
             //blend mode and every transition above sees real transparency
             //to work with rather than a channel that was already dropped
             //onto black
-            using SKSurface flattened = SKSurface.Create(new SKImageInfo(
-                canvasWidth, canvasHeight, SKColorType.Rgba8888, SKAlphaType.Premul));
-            flattened.Canvas.Clear(SKColors.Black);
+            SKSurface flattened = pool.Rent(canvasWidth, canvasHeight);
+            try
+            {
+                flattened.Canvas.Clear(SKColors.Black);
 
-            using (SKImage composite = accumulator.Snapshot())
-                flattened.Canvas.DrawImage(composite, 0, 0);
+                using (composite)
+                    flattened.Canvas.DrawImage(composite, 0, 0);
 
-            return ReadRgba8888(flattened, canvasWidth, canvasHeight);
+                return ReadRgba8888(flattened, canvasWidth, canvasHeight);
+            }
+            finally
+            {
+                pool.Return(flattened, canvasWidth, canvasHeight);
+            }
         }
 
         /// <summary>
@@ -80,19 +95,25 @@ namespace EditSharp.Render
         /// </summary>
         private static SKImage? ComposeChannel(
             FrameChannel channel, SkClipContentSource contentSource,
-            int canvasWidth, int canvasHeight, int fps)
+            int canvasWidth, int canvasHeight, int fps, SkSurfacePool pool)
         {
             var rendered = new List<SKImage>(channel.Clips.Count);
 
             foreach (FrameClip clip in channel.Clips)
             {
-                using SKSurface clipSurface = SKSurface.Create(new SKImageInfo(
-                    canvasWidth, canvasHeight, SKColorType.Rgba8888, SKAlphaType.Premul));
-                clipSurface.Canvas.Clear(SKColors.Transparent);
+                SKSurface clipSurface = pool.Rent(canvasWidth, canvasHeight);
+                try
+                {
+                    clipSurface.Canvas.Clear(SKColors.Transparent);
 
-                DrawClip(clipSurface.Canvas, clip, contentSource, canvasWidth, canvasHeight, fps);
+                    DrawClip(clipSurface.Canvas, clip, contentSource, canvasWidth, canvasHeight, fps, pool);
 
-                rendered.Add(clipSurface.Snapshot());
+                    rendered.Add(clipSurface.Snapshot());
+                }
+                finally
+                {
+                    pool.Return(clipSurface, canvasWidth, canvasHeight);
+                }
             }
 
             if (rendered.Count == 0) return null;
@@ -103,7 +124,7 @@ namespace EditSharp.Render
             {
                 return SkTransitionCompositor.Compose(
                     rendered[0], rendered[1], channel.Transition, channel.TransitionProgress,
-                    canvasWidth, canvasHeight);
+                    canvasWidth, canvasHeight, pool);
             }
         }
 
@@ -118,10 +139,10 @@ namespace EditSharp.Render
         /// </summary>
         private static void DrawClip(
             SKCanvas canvas, FrameClip frameClip, SkClipContentSource contentSource,
-            int canvasWidth, int canvasHeight, int fps)
+            int canvasWidth, int canvasHeight, int fps, SkSurfacePool pool)
         {
             (SKImage? content, bool transient) = contentSource.GetContent(
-                frameClip, canvasWidth, canvasHeight);
+                frameClip, canvasWidth, canvasHeight, pool);
 
             if (content == null) return; //audio-only SourceClip
 
@@ -142,7 +163,7 @@ namespace EditSharp.Render
 
                 SkiaClipCompositorSketch.Composite(
                     canvas, content, frameClip.Clip, frameClip.Transform,
-                    nativeWidth, nativeHeight, context);
+                    nativeWidth, nativeHeight, context, pool);
             }
             finally
             {
