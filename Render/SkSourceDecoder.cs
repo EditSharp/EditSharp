@@ -168,12 +168,41 @@ namespace EditSharp.Render
         /// last successfully decoded frame is returned again for every
         /// further call, rather than throwing or returning null.
         /// </summary>
+        // Cumulative time spent blocked on the pipe read, across every call —
+        // reported alongside each per-call time so both "is this frame slow"
+        // and "is decode slow overall" are visible without re-deriving from
+        // a series of per-call numbers by hand.
+        private TimeSpan _cumulativeReadTime = TimeSpan.Zero;
+
+        /// <summary>
+        /// TEMPORARY INSTRUMENTATION — added specifically to isolate the
+        /// video-clip blueprint's per-frame cost, which was disproportionately
+        /// worse than every shader/generator-only blueprint even after the
+        /// GPU compositing fix (that fix touches Skia's own draw calls only;
+        /// it does nothing for this pipe read, which is a separate ffmpeg
+        /// subprocess's decode/scale/format-convert work). Logs at
+        /// LogVerbose, one line per call, so a normal render isn't spammed
+        /// unless verbose logging is already on for exactly this kind of
+        /// investigation. Remove once the bottleneck is confirmed/ruled out
+        /// and, if confirmed, once a real fix (most likely a background
+        /// prefetch buffer overlapping decode with compositing, rather than
+        /// this synchronous blocking read) replaces this method's current
+        /// shape — this timing call stays in that fix's way, not something
+        /// worth preserving permanently.
+        /// </summary>
         public SKImage NextFrame()
         {
             if (!_exhausted)
             {
+                var sw = Stopwatch.StartNew();
                 byte[] buffer = new byte[_frameByteSize];
                 int totalRead = ReadFully(_stdout, buffer);
+                sw.Stop();
+                _cumulativeReadTime += sw.Elapsed;
+
+                EditSharpConfig.Logger.LogVerbose(
+                    $"SkSourceDecoder: pipe read took {sw.ElapsedMilliseconds}ms this frame " +
+                    $"({_cumulativeReadTime.TotalMilliseconds:F0}ms cumulative for this decoder).");
 
                 if (totalRead == _frameByteSize)
                 {
