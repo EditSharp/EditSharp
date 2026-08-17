@@ -261,24 +261,76 @@ namespace EditSharp.Render
             }
             else
             {
-                SKSurface layer = pool.Rent(context.CanvasWidth, context.CanvasHeight);
-                SKImage warped;
-                try
-                {
-                    layer.Canvas.Clear(SKColors.Transparent);
-                    DrawWarped(layer.Canvas, modulated, matrix);
-                    warped = layer.Snapshot();
-                }
-                finally
-                {
-                    pool.Return(layer, context.CanvasWidth, context.CanvasHeight);
-                }
+                // Bounding box of the warped content in canvas space — map
+                // all 4 corners individually (not an axis-aligned shortcut)
+                // since `matrix` can be a genuine homography (perspective),
+                // not just an affine transform; the bbox of a warped quad's
+                // 4 mapped corners is still correct for a general projective
+                // map, same reasoning DrawWarped itself already relies on.
+                SKPoint p0 = matrix.MapPoint(new SKPoint(0, 0));
+                SKPoint p1 = matrix.MapPoint(new SKPoint(modulated.Width, 0));
+                SKPoint p2 = matrix.MapPoint(new SKPoint(modulated.Width, modulated.Height));
+                SKPoint p3 = matrix.MapPoint(new SKPoint(0, modulated.Height));
 
-                using (warped)
-                using (SKImage postEffects = ClipEffectsSk.ApplyStage(
-                    clip.Effects, EffectStage.PostTransform, warped, context, pool))
+                float minX = Math.Min(Math.Min(p0.X, p1.X), Math.Min(p2.X, p3.X));
+                float maxX = Math.Max(Math.Max(p0.X, p1.X), Math.Max(p2.X, p3.X));
+                float minY = Math.Min(Math.Min(p0.Y, p1.Y), Math.Min(p2.Y, p3.Y));
+                float maxY = Math.Max(Math.Max(p0.Y, p1.Y), Math.Max(p2.Y, p3.Y));
+
+                float margin = ClipEffectsSk.ComputePostTransformMargin(clip.Effects, context);
+                minX -= margin; maxX += margin;
+                minY -= margin; maxY += margin;
+
+                // Clamp to canvas bounds — nothing outside the canvas is
+                // ever visible, so there's no reason to allocate for it.
+                minX = Math.Max(minX, 0);
+                minY = Math.Max(minY, 0);
+                maxX = Math.Min(maxX, context.CanvasWidth);
+                maxY = Math.Min(maxY, context.CanvasHeight);
+
+                int layerX = (int)Math.Floor(minX);
+                int layerY = (int)Math.Floor(minY);
+                int layerWidth = (int)Math.Ceiling(maxX) - layerX;
+                int layerHeight = (int)Math.Ceiling(maxY) - layerY;
+
+                if (layerWidth <= 0 || layerHeight <= 0)
                 {
-                    canvas.DrawImage(postEffects, 0, 0);
+                    // Clip is entirely off-canvas this frame (scrolled/
+                    // animated out of view) — skip the whole PostTransform
+                    // pass. A real, additional saving on top of the bbox
+                    // shrink itself: the old canvas-sized path paid full
+                    // cost for an off-screen clip too.
+                }
+                else
+                {
+                    SKSurface layer = pool.Rent(layerWidth, layerHeight);
+                    SKImage warped;
+                    try
+                    {
+                        layer.Canvas.Clear(SKColors.Transparent);
+                        layer.Canvas.Save();
+                        // Shift canvas-space coordinates into the smaller
+                        // layer's own local space — plain Save/Translate/
+                        // Restore rather than composing a second SKMatrix,
+                        // since DrawWarped already takes a canvas and this
+                        // needs no change to that method or to `matrix`
+                        // itself.
+                        layer.Canvas.Translate(-layerX, -layerY);
+                        DrawWarped(layer.Canvas, modulated, matrix);
+                        layer.Canvas.Restore();
+                        warped = layer.Snapshot();
+                    }
+                    finally
+                    {
+                        pool.Return(layer, layerWidth, layerHeight);
+                    }
+
+                    using (warped)
+                    using (SKImage postEffects = ClipEffectsSk.ApplyStage(
+                        clip.Effects, EffectStage.PostTransform, warped, context, pool))
+                    {
+                        canvas.DrawImage(postEffects, layerX, layerY);
+                    }
                 }
             }
 

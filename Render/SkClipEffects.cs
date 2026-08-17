@@ -159,6 +159,60 @@ namespace EditSharp.Render
         /// CreateDropShadow takes one SKColor rather than a separate
         /// opacity multiplier.
         /// </summary>
+        /// <summary>
+        /// How far a clip's PostTransform effects need the offscreen surface
+        /// to extend BEYOND the warped content's own bounds, in canvas
+        /// pixels — used by SkiaClipCompositorSketch.Composite to size the
+        /// PostTransform offscreen layer to a tight bounding box instead of
+        /// always the full canvas (see that method's own remarks: for a
+        /// clip at 0.3x scale, canvas-sized was ~11x more pixels than the
+        /// content ever needed, across every PostTransform pass — warp
+        /// draw, the filter itself, and the final composite-back).
+        ///
+        /// DELIBERATELY THE SAME MATH AS ApplyBlur/ApplyDropShadow's own
+        /// sigma/dx/dy formulas below, not a separate approximation — if
+        /// these two drift apart, the margin under-estimates what the real
+        /// filter needs and the shadow/blur gets clipped at the surface
+        /// edge, silently, which is a correctness bug not just a perf one.
+        ///
+        /// MARGIN IS SYMMETRIC ON ALL 4 SIDES, A DELIBERATE SIMPLIFICATION —
+        /// a drop shadow offset in one direction only actually needs extra
+        /// room on that side, not all four. Symmetric is safe (never clips)
+        /// but over-allocates in the non-shadow direction. Flagged as a
+        /// real, known slack in the bbox, not tightened here — asymmetric
+        /// per-side padding is a further optimization on top of this one
+        /// if the bbox is ever profiled as still too generous.
+        /// </summary>
+        public static float ComputePostTransformMargin(List<Effect> effects, SkClipChainContext context)
+        {
+            if (effects == null) return 0f;
+
+            float margin = 0f;
+
+            foreach (Effect effect in effects.Where(e => e.Enabled && e.Stage == EffectStage.PostTransform))
+            {
+                float needed = effect switch
+                {
+                    BlurEffect blur =>
+                        (float)Math.Clamp(blur.Radius * context.CanvasWidth, 0.1, 1024.0) * 3f,
+
+                    DropShadowEffect shadow =>
+                        (float)Math.Clamp(shadow.BlurRadius * context.CanvasWidth, 0.1, 1024.0) * 3f
+                        + Math.Max(
+                            Math.Abs(shadow.Offset.X * context.CanvasWidth / 2f),
+                            Math.Abs(shadow.Offset.Y * context.CanvasHeight / 2f)),
+
+                    RoundedCornersEffect => 0f, // clips inward, never expands bounds
+
+                    _ => 0f,
+                };
+
+                margin = Math.Max(margin, needed);
+            }
+
+            return margin;
+        }
+
         private static SKImage ApplyDropShadow(
             DropShadowEffect effect, SKImage input, SkClipChainContext context, SkSurfacePool pool)
         {
