@@ -1,0 +1,172 @@
+using System;
+using System.Collections.Generic;
+using SkiaSharp;
+using EditSharp.Components;
+using EditSharp.Components.Clips;
+
+namespace EditSharp.Render
+{
+    /// <summary>
+    /// Item 13: the piece FrameRenderConcurrency's removal (item 11) and
+    /// SkSourceDecoder's design (also item 11) were both explicitly building
+    /// toward — a place for a video clip's decoder to actually LIVE across
+    /// many frames, since FrameStateResolver.Resolve is (deliberately)
+    /// fully stateless per frame and has nowhere to hold one.
+    ///
+    /// One instance per render. Owns:
+    ///   - one SkSourceDecoder per active video SourceClip, opened lazily on
+    ///     that clip's FIRST visible frame and disposed by the caller via
+    ///     ReleaseDecoder once the clip's visible window ends (see
+    ///     FrameRenderer's decoder-release schedule — same shape as the old
+    ///     OptimizedMediaBuilder deletion schedule, just keyed on Clip
+    ///     identity instead of a file path).
+    ///   - one cached SKImage per Image SourceClip / TextClip, decoded once
+    ///     and reused for every frame it's visible on (mirrors the old
+    ///     "static image, read once" path exactly, just via SkiaSharp's own
+    ///     decoder instead of a per-frame ffmpeg `-loop 1` input).
+    ///
+    /// GeneratorClip/NoiseClip need no cached state at all — SkGeneratorClip
+    /// .Render/SkNoiseClip.Render are pure functions of (clip, time), so
+    /// those cases just call straight through every frame.
+    ///
+    /// CALLER CONTRACT, load-bearing: GetContent must be called for a given
+    /// video clip's FrameClip exactly once per frame it's visible on, in
+    /// strictly increasing frame order, matching SkSourceDecoder.NextFrame's
+    /// own contract — this class does not itself enforce that, it just
+    /// forwards to the decoder.
+    /// </summary>
+    internal sealed class SkClipContentSource : IDisposable
+    {
+        private readonly int _fps;
+        private readonly IReadOnlyDictionary<Clip, (int Width, int Height)> _nativeSizes;
+        private readonly IReadOnlyDictionary<Clip, string> _staticImagePaths;
+
+        private readonly Dictionary<Clip, SkSourceDecoder> _videoDecoders = new();
+        private readonly Dictionary<Clip, SKImage> _staticContent = new();
+
+        public SkClipContentSource(
+            int fps,
+            IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes,
+            IReadOnlyDictionary<Clip, string> staticImagePaths)
+        {
+            _fps = fps;
+            _nativeSizes = nativeSizes;
+            _staticImagePaths = staticImagePaths;
+        }
+
+        /// <summary>
+        /// This frame's pixel content for one clip, and whether the CALLER
+        /// owns disposing it. Transient content (a video decoder's frame,
+        /// a generator's 1x1 fill, a noise field) is fresh every call and
+        /// must be disposed by the caller once this frame's draw is done.
+        /// Long-lived content (a cached static image) is owned by THIS
+        /// class and must NOT be disposed by the caller — it's reused on
+        /// every future frame the clip is visible on.
+        ///
+        /// Returns (null, false) for an audio-only SourceClip — it occupies
+        /// a channel slot but draws nothing, same as the old ffmpeg path's
+        /// own SourceClip-with-no-video-stream case.
+        /// </summary>
+        public (SKImage? Image, bool Transient) GetContent(
+            FrameClip frameClip, int canvasWidth, int canvasHeight)
+        {
+            switch (frameClip.Clip)
+            {
+                case SourceClip { Source.Type: SourceType.Video } source:
+                    return (GetOrOpenDecoder(frameClip.Clip, source).NextFrame(), true);
+
+                case SourceClip { Source.Type: SourceType.Image }:
+                case TextClip:
+                    return (GetOrLoadStaticImage(frameClip.Clip), false);
+
+                case SourceClip:
+                    //audio-only — no video stream to draw
+                    return (null, false);
+
+                case GeneratorClip generator:
+                    return (SkGeneratorClip.Render(generator, frameClip.ClipSeconds), true);
+
+                case NoiseClip noise:
+                    return (SkNoiseClip.Render(noise, frameClip.ClipSeconds, canvasWidth, canvasHeight), true);
+
+                default:
+                    throw new NotSupportedException(
+                        $"Unknown Clip subtype: {frameClip.Clip.GetType().Name}");
+            }
+        }
+
+        private SkSourceDecoder GetOrOpenDecoder(Clip clip, SourceClip source)
+        {
+            if (_videoDecoders.TryGetValue(clip, out SkSourceDecoder? existing))
+                return existing;
+
+            (int nativeWidth, int nativeHeight) = _nativeSizes.TryGetValue(clip, out var size)
+                ? size
+                : (0, 0);
+
+            if (nativeWidth <= 0 || nativeHeight <= 0)
+                throw new InvalidOperationException(
+                    "No native size registered for a video clip — MediaProbe must " +
+                    "run (see FrameRenderer.PrepareContentAsync) before rendering.");
+
+            //Source.Start already carries any head-trim advance (see
+            //SourceClip.OnTrimmedFromStart) — this IS the one-time seek
+            //SkSourceDecoder's own remarks describe, paid once at stream
+            //setup rather than once per frame
+            double startSeconds = (source.Source.Start ?? TimeSpan.Zero).TotalSeconds;
+
+            //Decoding+scaling straight to the clip's own native size, not
+            //ComputeContentSize's smaller target — leaves the redundant
+            //"decode native, then Skia-resize down to content size" cost
+            //flagged rather than optimized away here; see the migration
+            //manifest's deferred-verification list.
+            SkSourceDecoder decoder = SkSourceDecoder.Start(
+                source.Source.Path, startSeconds, _fps, nativeWidth, nativeHeight);
+
+            _videoDecoders[clip] = decoder;
+            return decoder;
+        }
+
+        private SKImage GetOrLoadStaticImage(Clip clip)
+        {
+            if (_staticContent.TryGetValue(clip, out SKImage? cached))
+                return cached;
+
+            if (!_staticImagePaths.TryGetValue(clip, out string? path))
+                throw new InvalidOperationException(
+                    $"No static image path registered for a {clip.GetType().Name} — " +
+                    "FrameRenderer.PrepareContentAsync must run before rendering.");
+
+            using SKData data = SKData.Create(path)
+                ?? throw new InvalidOperationException($"Could not read '{path}'.");
+
+            SKImage image = SKImage.FromEncodedData(data)
+                ?? throw new InvalidOperationException($"Could not decode image '{path}'.");
+
+            _staticContent[clip] = image;
+            return image;
+        }
+
+        /// <summary>
+        /// Terminates and forgets a clip's video decoder once its visible
+        /// window is over (see FrameRenderer's decoder-release schedule).
+        /// A no-op for any clip that never had one — safe to call
+        /// unconditionally rather than requiring the caller to know which
+        /// clips are video.
+        /// </summary>
+        public void ReleaseDecoder(Clip clip)
+        {
+            if (_videoDecoders.Remove(clip, out SkSourceDecoder? decoder))
+                decoder.Dispose();
+        }
+
+        public void Dispose()
+        {
+            foreach (SkSourceDecoder decoder in _videoDecoders.Values) decoder.Dispose();
+            _videoDecoders.Clear();
+
+            foreach (SKImage image in _staticContent.Values) image.Dispose();
+            _staticContent.Clear();
+        }
+    }
+}

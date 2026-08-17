@@ -1,4 +1,5 @@
 using EditSharp.Components.Clips;
+using EditSharp.Components.Transitions;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -10,7 +11,7 @@ namespace EditSharp.Components
         public string Name = "Channel";
 
         //how this channel combines with everything beneath it
-        public BlendMode BlendMode { get; set; } = BlendMode.Normal;
+        public ChannelBlendMode BlendMode { get; set; } = ChannelBlendMode.SrcOver;
 
         //how loud the channel's audio should be
         public float Volume { get; set; } = 1f;

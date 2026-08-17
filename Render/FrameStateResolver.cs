@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components;
 using EditSharp.Components.Clips;
+using EditSharp.Components.Transitions;
 
 namespace EditSharp.Render
 {
@@ -13,15 +14,22 @@ namespace EditSharp.Render
     ///
     /// This is where time leaves the pipeline. Downstream of here nothing
     /// knows about keyframes, easing curves, clip start times or transition
-    /// durations; the filter chain gets literals only.
+    /// durations; SkFrameCompositor gets literals only.
+    ///
+    /// Item 13 change: no more optimizedMedia/staticImages dictionaries —
+    /// those existed to tell the old ffmpeg-per-frame path WHERE a clip's
+    /// pixels lived on disk (a seekable file, a static image, nothing).
+    /// That's SkClipContentSource's job now, driven by the Clip's own
+    /// runtime type rather than precomputed here. All this resolver still
+    /// needs from FrameRenderer's upfront prep is each clip's NATIVE PIXEL
+    /// SIZE, for aspect-fit math — nativeSizes is unchanged in shape from
+    /// before, just narrower in purpose.
     /// </summary>
     internal static class FrameStateResolver
     {
         public static FrameState Resolve(
             Timeline timeline, int frameIndex, int fps,
-            IReadOnlyDictionary<Clip, OptimizedMediaBuilder.OptimizedMedia> optimizedMedia,
-            IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes,
-            IReadOnlyDictionary<Clip, string> staticImages)
+            IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes)
         {
             TimeSpan time = TimeSpan.FromSeconds(frameIndex / (double)fps);
 
@@ -29,9 +37,7 @@ namespace EditSharp.Render
 
             foreach (Channel channel in timeline.Channels)
             {
-                FrameChannel? resolved = ResolveChannel(
-                    channel, time, optimizedMedia, nativeSizes, staticImages);
-
+                FrameChannel? resolved = ResolveChannel(channel, time, nativeSizes);
                 if (resolved != null) channels.Add(resolved);
             }
 
@@ -40,9 +46,7 @@ namespace EditSharp.Render
 
         private static FrameChannel? ResolveChannel(
             Channel channel, TimeSpan time,
-            IReadOnlyDictionary<Clip, OptimizedMediaBuilder.OptimizedMedia> optimizedMedia,
-            IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes,
-            IReadOnlyDictionary<Clip, string> staticImages)
+            IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes)
         {
             //clips on a channel cannot overlap, so at most one is live at any
             //instant — the second entry, when there is one, comes from a
@@ -52,26 +56,22 @@ namespace EditSharp.Render
 
             if (active == null) return null;
 
-            var clips = new List<FrameClip>
-            {
-                BuildFrameClip(active, time, optimizedMedia, nativeSizes, staticImages),
-            };
+            var clips = new List<FrameClip> { BuildFrameClip(active, time, nativeSizes) };
 
             var (transition, progress, outgoing) = ResolveTransition(channel, active, time);
 
-            if (transition != null && outgoing != null)
+            if (transition is not null && outgoing != null)
             {
-                //xfade takes the OUTGOING clip first, so the incoming clip that
-                //was resolved above moves into second place
-                clips.Insert(0, BuildFrameClip(
-                    outgoing, time, optimizedMedia, nativeSizes, staticImages));
+                //xfade-equivalent takes the OUTGOING clip first, so the
+                //incoming clip resolved above moves into second place
+                clips.Insert(0, BuildFrameClip(outgoing, time, nativeSizes));
             }
 
             return new FrameChannel
             {
                 BlendMode = channel.BlendMode,
                 Clips = clips,
-                Transition = transition?.Type,
+                Transition = transition,
                 TransitionProgress = progress,
             };
         }
@@ -82,11 +82,12 @@ namespace EditSharp.Render
         ///
         /// A transition belongs to the clip it transitions OUT of, and only
         /// counts when the two clips actually touch — a transition declared
-        /// across a gap is ignored rather than stretching either clip to close it.
+        /// across a gap is ignored rather than stretching either clip to
+        /// close it.
         ///
-        /// The transition occupies the START of the incoming clip: neither clip
-        /// loses any time to it, and the incoming clip begins real playback once
-        /// the transition ends.
+        /// The transition occupies the START of the incoming clip: neither
+        /// clip loses any time to it, and the incoming clip begins real
+        /// playback once the transition ends.
         /// </summary>
         private static (Transition? Transition, double Progress, Clip? Outgoing) ResolveTransition(
             Channel channel, Clip active, TimeSpan time)
@@ -106,8 +107,8 @@ namespace EditSharp.Render
             if (seconds <= 0) return (null, 0, null);
 
             //clamped so a transition can never be longer than either clip it
-            //joins, with a small floor so a zero/negative duration never divides
-            //by zero below
+            //joins, with a small floor so a zero/negative duration never
+            //divides by zero below
             seconds = GraphUtilities.Clamp(
                 seconds, 0.05,
                 Math.Max(0.05,
@@ -121,65 +122,24 @@ namespace EditSharp.Render
 
         private static FrameClip BuildFrameClip(
             Clip clip, TimeSpan time,
-            IReadOnlyDictionary<Clip, OptimizedMediaBuilder.OptimizedMedia> optimizedMedia,
-            IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes,
-            IReadOnlyDictionary<Clip, string> staticImages)
+            IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes)
         {
             double clipSeconds = (time - clip.Start).TotalSeconds;
 
-            //Clip.TransformAt owns the keyframe/easing rules; resolving them here
-            //rather than reimplementing is what keeps the frame-by-frame path
-            //and the existing whole-window path producing the same motion
+            //Clip.TransformAt owns the keyframe/easing rules; resolving them
+            //here rather than reimplementing is what keeps this path and
+            //the (long-gone) whole-window path producing the same motion
             ClipTransform transform = clip.TransformAt(TimeSpan.FromSeconds(clipSeconds));
 
-            string? sourcePath = null;
-            double seek = 0;
-            bool isVideoSeek = false;
-            bool preTransformEffectsBaked = false;
-
-            //any clip that HAS optimized media reads from it, not just a
-            //SourceClip — NoiseClip now pre-renders its `perlin` stream the
-            //same way (see OptimizedMediaBuilder.BuildNoiseAsync), since
-            //`perlin` is a generator source with no seek and regenerating
-            //every preceding frame made the render O(N^2). The dictionary
-            //membership IS the condition; there's nothing type-specific left
-            //about reading a seekable pre-rendered file
-            if (optimizedMedia.TryGetValue(clip, out var media))
-            {
-                sourcePath = media.Path;
-                isVideoSeek = true;
-                preTransformEffectsBaked = media.EffectsBaked;
-
-                //This pipeline's current extension behaviour is FREEZE FRAME:
-                //a clip whose Duration outlasts its source holds the source's
-                //last real frame rather than looping. Clamping the seek to
-                //just inside AvailableSeconds is what produces that — without
-                //it, a clip running past its source's length would ask the
-                //optimized media to seek past its own end.
-                seek = Math.Min(clipSeconds, Math.Max(0, media.AvailableSeconds - 0.0005));
-            }
-            else if (staticImages.TryGetValue(clip, out string? staticPath))
-            {
-                //an Image SourceClip or a TextClip — no decode, no seek, the
-                //same file is read for every frame the clip is visible on
-                sourcePath = staticPath;
-            }
-
-            var (width, height) = nativeSizes.TryGetValue(clip, out var size)
-                ? size
-                : (0, 0);
+            var (width, height) = nativeSizes.TryGetValue(clip, out var size) ? size : (0, 0);
 
             return new FrameClip
             {
                 Clip = clip,
                 Transform = transform,
-                SourcePath = sourcePath,
-                SourceSeekSeconds = seek,
-                IsVideoSeek = isVideoSeek,
                 NativeWidth = width,
                 NativeHeight = height,
                 ClipSeconds = clipSeconds,
-                PreTransformEffectsBaked = preTransformEffectsBaked,
             };
         }
     }

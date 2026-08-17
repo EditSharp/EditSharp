@@ -4,75 +4,18 @@ using EditSharp.Components;
 namespace EditSharp.Render
 {
     /// <summary>
-    /// Shared lookup tables used across the assembly pipeline: ffmpeg's xfade
-    /// transition names, and encoder names for each VideoCodec (both software
-    /// and NVENC) and AudioCodec.
+    /// Shared lookup tables used across the assembly pipeline: encoder names
+    /// for each VideoCodec (both software and NVENC) and AudioCodec.
+    ///
+    /// XfadeNames (TransitionType -> ffmpeg xfade name) removed as part of
+    /// the Skia compositor migration's item 8 — Transition is now an
+    /// abstract class (FadeTransition/FadeToColorTransition/SlideTransition,
+    /// see Transition.cs) with no TransitionType enum to key a dictionary
+    /// on. Nothing needs an ffmpeg xfade name string anymore for any
+    /// transition that has a Skia implementation.
     /// </summary>
     internal static partial class Constants
     {
-        // Maps TransitionType enum to ffmpeg's xfade transition names.
-        public static readonly Dictionary<TransitionType, string> XfadeNames = new()
-        {
-            [TransitionType.Fade] = "fade",
-            [TransitionType.FadeBlack] = "fadeblack",
-            [TransitionType.FadeWhite] = "fadewhite",
-            [TransitionType.FadeGrays] = "fadegrays",
-            [TransitionType.FadeFast] = "fadefast",
-            [TransitionType.FadeSlow] = "fadeslow",
-            [TransitionType.Dissolve] = "dissolve",
-            [TransitionType.Distance] = "distance",
-            [TransitionType.Pixelize] = "pixelize",
-            [TransitionType.WipeLeft] = "wipeleft",
-            [TransitionType.WipeRight] = "wiperight",
-            [TransitionType.WipeUp] = "wipeup",
-            [TransitionType.WipeDown] = "wipedown",
-            [TransitionType.WipeTopLeft] = "wipetl",
-            [TransitionType.WipeTopRight] = "wipetr",
-            [TransitionType.WipeBottomLeft] = "wipebl",
-            [TransitionType.WipeBottomRight] = "wipebr",
-            [TransitionType.SlideLeft] = "slideleft",
-            [TransitionType.SlideRight] = "slideright",
-            [TransitionType.SlideUp] = "slideup",
-            [TransitionType.SlideDown] = "slidedown",
-            [TransitionType.SmoothLeft] = "smoothleft",
-            [TransitionType.SmoothRight] = "smoothright",
-            [TransitionType.SmoothUp] = "smoothup",
-            [TransitionType.SmoothDown] = "smoothdown",
-            [TransitionType.CircleOpen] = "circleopen",
-            [TransitionType.CircleClose] = "circleclose",
-            [TransitionType.CircleCrop] = "circlecrop",
-            [TransitionType.RectCrop] = "rectcrop",
-            [TransitionType.Radial] = "radial",
-            [TransitionType.VerticalOpen] = "vertopen",
-            [TransitionType.VerticalClose] = "vertclose",
-            [TransitionType.HorizontalOpen] = "horzopen",
-            [TransitionType.HorizontalClose] = "horzclose",
-            [TransitionType.DiagonalTopLeft] = "diagtl",
-            [TransitionType.DiagonalTopRight] = "diagtr",
-            [TransitionType.DiagonalBottomLeft] = "diagbl",
-            [TransitionType.DiagonalBottomRight] = "diagbr",
-            [TransitionType.SliceLeft] = "hlslice",
-            [TransitionType.SliceRight] = "hrslice",
-            [TransitionType.SliceUp] = "vuslice",
-            [TransitionType.SliceDown] = "vdslice",
-            [TransitionType.WindLeft] = "hlwind",
-            [TransitionType.WindRight] = "hrwind",
-            [TransitionType.WindUp] = "vuwind",
-            [TransitionType.WindDown] = "vdwind",
-            [TransitionType.CoverLeft] = "coverleft",
-            [TransitionType.CoverRight] = "coverright",
-            [TransitionType.CoverUp] = "coverup",
-            [TransitionType.CoverDown] = "coverdown",
-            [TransitionType.RevealLeft] = "revealleft",
-            [TransitionType.RevealRight] = "revealright",
-            [TransitionType.RevealUp] = "revealup",
-            [TransitionType.RevealDown] = "revealdown",
-            [TransitionType.SqueezeHorizontal] = "squeezeh",
-            [TransitionType.SqueezeVertical] = "squeezev",
-            [TransitionType.ZoomIn] = "zoomin",
-            [TransitionType.HorizontalBlur] = "hblur",
-        };
-
         public static readonly Dictionary<VideoCodec, string> VideoCodecNames = new()
         {
             [VideoCodec.H264] = "libx264",

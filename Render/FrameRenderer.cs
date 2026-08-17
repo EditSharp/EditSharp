@@ -7,31 +7,47 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 using EditSharp;
 using EditSharp.Components;
 using EditSharp.Components.Clips;
+using EditSharp.Components.Transitions;
 
 namespace EditSharp.Render
 {
     /// <summary>
-    /// Entry point for the frame-by-frame render strategy — this pipeline's only
-    /// render path (the old single-filter_complex-per-window approach and its
-    /// supporting classes have been removed rather than kept alongside this one).
+    /// Entry point for the render strategy — item 13's full rewrite of the
+    /// render loop, wiring items 3-12's Skia compositor into an actual
+    /// end-to-end render for the first time.
     ///
-    /// Shape of a render:
-    ///   1. Build optimized media for every video source clip, upfront, with
-    ///      bounded concurrency (OptimizedMediaBuilder).
-    ///   2. Prepare everything else that's static across a clip's whole life —
-    ///      an Image source's dimensions, a TextClip's ONE rasterized PNG —
-    ///      so the per-frame loop never repeats work a clip's own content
-    ///      doesn't actually vary frame to frame.
-    ///   3. Render every output frame, one ffmpeg process each, appending each
-    ///      frame's raw rgba64le bytes to a single growing lossless file.
-    ///      Optimized media is deleted the moment no remaining frame needs it.
-    ///   4. Mux that lossless video against the timeline's audio (see
-    ///      FinalizeOutputAsync) and encode to Blueprint's chosen codec.
+    /// Shape of a render, POST-rewrite:
+    ///   1. Probe every video/image source's native size (MediaProbe) and
+    ///      rasterize every TextClip's PNG (TextRasterizer) — everything
+    ///      about a clip that's constant across its whole life, done once
+    ///      up front exactly as before. NO OptimizedMediaBuilder step
+    ///      anymore — that pre-render pass existed to give independent
+    ///      per-frame ffmpeg processes fast random-access seeks (items 10,
+    ///      11), and there is no such process left to serve.
+    ///   2. Render every output frame SEQUENTIALLY (no concurrency gate —
+    ///      see below) directly against an in-process SKCanvas
+    ///      (SkFrameCompositor), appending each frame's raw RGBA8888 bytes
+    ///      to a single growing lossless accumulator file. A video clip's
+    ///      SkSourceDecoder is opened on its first visible frame and
+    ///      disposed once its visible window ends (SkClipContentSource).
+    ///   3. Mux that accumulated video against the timeline's audio
+    ///      (FinalizeOutputAsync) and encode to Blueprint's chosen codec —
+    ///      the one ffmpeg subprocess step left on the video side, and the
+    ///      only lossy step in the whole pipeline.
+    ///
+    /// WHY FULLY SEQUENTIAL, NOT JUST "CONCURRENCY DEFAULTS TO 1": item 11
+    /// already decided FrameRenderConcurrency (parallel OUTPUT frames) is
+    /// incompatible with a single ordered pipe per video source and
+    /// dropped the Blueprint property, but left FrameRenderer's own
+    /// semaphore/task-array machinery in place, gated at 1. That machinery
+    /// has no remaining purpose now that RenderFrameAsync's replacement
+    /// (SkFrameCompositor.RenderFrame) is synchronous, in-process Skia
+    /// work rather than an awaited ffmpeg subprocess — there's nothing left
+    /// to overlap. Removed outright here, not just left gated at 1.
     /// </summary>
     public static class FrameRenderer
     {
@@ -60,41 +76,32 @@ namespace EditSharp.Render
 
         private static async Task RenderCoreAsync(Blueprint blueprint, ConcurrentBag<string> tempFiles)
         {
-            IFrameFilterChainBuilder chainBuilder = SelectChainBuilder(blueprint.HardwareAccelerator);
-
             Timeline timeline = blueprint.Timeline;
             int width = blueprint.Resolution.Item1;
             int height = blueprint.Resolution.Item2;
             int fps = blueprint.Framerate;
 
-            Dictionary<Clip, OptimizedMediaBuilder.OptimizedMedia> optimizedMedia =
-                await OptimizedMediaBuilder.BuildAsync(
-                    timeline, fps, width, height, tempFiles, blueprint.ExtractionConcurrency);
+            //ConcurrentDictionary rather than plain Dictionary: PrepareContentAsync
+            //below runs one task per clip needing probing/rasterizing, all
+            //writing into these same two dictionaries concurrently. The old
+            //PrepareStaticContentAsync had this exact same shape and used a
+            //plain Dictionary, which is not safe for concurrent writes even to
+            //distinct keys (internal resize can race) — fixed here in passing,
+            //not a behaviour change worth its own checklist item.
+            var nativeSizes = new ConcurrentDictionary<Clip, (int, int)>();
+            var staticImagePaths = new ConcurrentDictionary<Clip, string>();
 
-            foreach (OptimizedMediaBuilder.OptimizedMedia media in optimizedMedia.Values)
-                tempFiles.Add(media.Path);
+            var prepSw = Stopwatch.StartNew();
+            await PrepareContentAsync(timeline, width, height, nativeSizes, staticImagePaths, tempFiles);
+            EditSharpConfig.Logger.LogVerbose($"Content prepared in {prepSw.ElapsedMilliseconds}ms.");
 
-            var nativeSizes = new Dictionary<Clip, (int, int)>();
-            var staticImages = new Dictionary<Clip, string>();
-
-            //native size for every VIDEO clip comes straight from the probe
-            //OptimizedMediaBuilder already did — no second ffprobe call for
-            //what's already known
-            foreach ((Clip clip, OptimizedMediaBuilder.OptimizedMedia media) in optimizedMedia)
-                nativeSizes[clip] = (media.NativeWidth, media.NativeHeight);
-
-            var staticSw = Stopwatch.StartNew();
-            await PrepareStaticContentAsync(
-                timeline, width, height, nativeSizes, staticImages, tempFiles);
-            EditSharpConfig.Logger.LogVerbose($"Static content prepared in {staticSw.ElapsedMilliseconds}ms.");
-
-            //precomputed once, up front — every clip's Start/Duration/End is
-            //already known, so there is nothing to discover at render time.
-            //Grouped by frame index rather than scanned per clip per frame: an
-            //O(1) dictionary lookup per frame instead of an O(clips) scan
-            Dictionary<int, List<string>> deletionSchedule = optimizedMedia.Values
-                .GroupBy(m => m.DeleteAfterFrame)
-                .ToDictionary(g => g.Key, g => g.Select(m => m.Path).ToList());
+            //when a video clip's decoder can be torn down — computed once,
+            //up front, from each clip's own known End time. Same role as the
+            //old OptimizedMediaBuilder deletion schedule, keyed on Clip
+            //identity instead of a media file path since there's no file to
+            //delete anymore, only a subprocess to kill
+            Dictionary<int, List<Clip>> decoderReleaseSchedule =
+                BuildDecoderReleaseSchedule(timeline, fps);
 
             int totalFrames = Math.Max(1, (int)Math.Ceiling(timeline.Duration.TotalSeconds * fps));
 
@@ -103,16 +110,17 @@ namespace EditSharp.Render
 
             EditSharpConfig.Logger.Log(
                 $"Rendering {totalFrames} frame(s) at {width}x{height}@{fps}fps " +
-                $"(concurrency {blueprint.FrameRenderConcurrency}).");
+                "(sequential, in-process Skia compositor).");
+
+            using var contentSource = new SkClipContentSource(fps, nativeSizes, staticImagePaths);
 
             using (var accumulator = new FileStream(
                 accumulatorPath, FileMode.Create, FileAccess.Write, FileShare.None,
                 bufferSize: 1 << 20))
             {
                 await RenderAllFramesAsync(
-                    timeline, fps, width, height, chainBuilder, optimizedMedia, nativeSizes,
-                    staticImages, deletionSchedule, totalFrames,
-                    blueprint.FrameRenderConcurrency, accumulator, tempFiles);
+                    timeline, fps, width, height, nativeSizes, contentSource,
+                    decoderReleaseSchedule, totalFrames, accumulator);
             }
 
             EditSharpConfig.Logger.Log("Finalizing output (mux + encode)...");
@@ -122,103 +130,32 @@ namespace EditSharp.Render
         }
 
         /// <summary>
-        /// Renders every output frame, up to FrameRenderConcurrency at once, and
-        /// writes each one to the accumulator STRICTLY in order.
-        ///
-        /// Every frame's task is launched immediately; the SemaphoreSlim inside
-        /// RenderOneAsync is what actually bounds how many are mid-render at
-        /// once, not this method. Frames can finish rendering out of order once
-        /// more than one is in flight, but two things both require frame i to
-        /// be fully settled before frame i+1 is acted on: the accumulator is a
-        /// headerless raw stream with no per-frame timestamps, so writes must
-        /// land in order; and a clip's optimized media must not be deleted
-        /// until every frame that could still need it — up to and including its
-        /// DeleteAfterFrame — has actually finished rendering, not merely been
-        /// scheduled. Awaiting frameTasks[frameIndex] in a plain increasing loop
-        /// satisfies both for free, and — just as importantly — surfaces a
-        /// fault on any frame the moment that frame's turn comes up. An earlier
-        /// version of this method buffered completions into a side dictionary
-        /// and only reached its final Task.WhenAll after every frame had been
-        /// LAUNCHED, which meant a frame 0 exception sat unobserved for the
-        /// entire render and looked identical to a hang.
+        /// Renders every output frame, strictly in order, writing each to
+        /// the accumulator as it's produced. No concurrency gate, no task
+        /// array — see the class remarks for why that machinery had nothing
+        /// left to overlap once RenderFrameAsync's ffmpeg subprocess was
+        /// replaced with synchronous in-process Skia work. Strict order is
+        /// still required for two reasons, same as before: the accumulator
+        /// is a headerless raw stream with no per-frame timestamps, and
+        /// every active SkSourceDecoder must see its frames requested in
+        /// increasing order (see SkSourceDecoder's own "sequentially
+        /// forward" contract).
         /// </summary>
         private static async Task RenderAllFramesAsync(
             Timeline timeline, int fps, int width, int height,
-            IFrameFilterChainBuilder chainBuilder,
-            Dictionary<Clip, OptimizedMediaBuilder.OptimizedMedia> optimizedMedia,
-            Dictionary<Clip, (int, int)> nativeSizes,
-            Dictionary<Clip, string> staticImages,
-            Dictionary<int, List<string>> deletionSchedule,
-            int totalFrames, int concurrency,
-            Stream accumulator, ConcurrentBag<string> tempFiles)
+            ConcurrentDictionary<Clip, (int, int)> nativeSizes,
+            SkClipContentSource contentSource,
+            Dictionary<int, List<Clip>> decoderReleaseSchedule,
+            int totalFrames, Stream accumulator)
         {
-            using var gate = new SemaphoreSlim(Math.Max(1, concurrency));
-            var frameTasks = new Task<(byte[] Buffer, int Length)>[totalFrames];
             var sw = Stopwatch.StartNew();
 
-            async Task<(byte[] Buffer, int Length)> RenderOneAsync(int frameIndex)
-            {
-                await gate.WaitAsync();
-                try
-                {
-                    //logged the moment this frame actually gets a gate slot and
-                    //begins building its graph — if a render appears stuck, this
-                    //line (or its absence) is what tells you whether it's stuck
-                    //BEFORE ffmpeg is even spawned (graph construction) or DURING
-                    //ffmpeg's own run (no further logs after this one)
-                    EditSharpConfig.Logger.LogVerbose(
-                        $"Starting frame {frameIndex + 1}/{totalFrames}...");
-
-                    FrameState state = FrameStateResolver.Resolve(
-                        timeline, frameIndex, fps, optimizedMedia, nativeSizes, staticImages);
-
-                    return await RenderFrameAsync(
-                        state, chainBuilder, width, height, fps, tempFiles);
-                }
-                finally
-                {
-                    gate.Release();
-                }
-            }
-
-            //every frame's task is launched up front — the gate above, not this
-            //loop, is what bounds how many are actually mid-render at once, so
-            //launching them all costs nothing but Task allocation for the ones
-            //still queued on the gate
-            for (int frameIndex = 0; frameIndex < totalFrames; frameIndex++)
-                frameTasks[frameIndex] = RenderOneAsync(frameIndex);
-
             for (int frameIndex = 0; frameIndex < totalFrames; frameIndex++)
             {
-                //awaited strictly in order. This is what the accumulator's
-                //no-timestamps format requires regardless, but it also means a
-                //fault on any frame surfaces the moment that frame's turn comes
-                //up — NOT buried until every one of totalFrames tasks has been
-                //launched and Task.WhenAll is finally reached, which is what an
-                //earlier version of this method did and which silently hid a
-                //frame 0 failure behind what looked like a hang
-                (byte[] buffer, int length) = await frameTasks[frameIndex];
+                FrameState state = FrameStateResolver.Resolve(timeline, frameIndex, fps, nativeSizes);
 
-                //frameTasks retaining a completed Task's Result (its buffer)
-                //for the whole render was a REAL bug, fixed by clearing this
-                //slot the moment it's consumed — but it turned out not to be
-                //the actual cause of the progressive slowdown. The real cause
-                //(confirmed via Process resource sampling — handles/threads/
-                //managed heap all flat, but GC gen0≈gen1≈gen2 climbing in
-                //lockstep, meaning EVERY collection was a full gen2 sweep) was
-                //that each frame's ~16.6MB buffer is a Large Object Heap
-                //allocation, and the LOH is only ever reclaimed as part of a
-                //gen2 collection — so a fresh LOH allocation on literally every
-                //frame forced a full heap scan every time, regardless of GC
-                //mode (confirmed: enabling Server GC didn't help either, since
-                //the trigger is the allocation pattern itself, not which GC
-                //flavor is handling it). RenderFrameAsync now rents this
-                //buffer from ArrayPool<byte>.Shared instead of allocating
-                //fresh via MemoryStream.ToArray() every frame — Return() right
-                //after use is what makes the pool actually reusable rather
-                //than degrading into the same one-fresh-allocation-per-frame
-                //pattern this was meant to fix.
-                frameTasks[frameIndex] = null!;
+                (byte[] buffer, int length) = SkFrameCompositor.RenderFrame(
+                    state, contentSource, width, height, fps);
 
                 try
                 {
@@ -229,94 +166,35 @@ namespace EditSharp.Render
                     ArrayPool<byte>.Shared.Return(buffer);
                 }
 
+                if (decoderReleaseSchedule.TryGetValue(frameIndex, out List<Clip>? finished))
+                {
+                    foreach (Clip clip in finished) contentSource.ReleaseDecoder(clip);
+                }
+
                 EditSharpConfig.Logger.LogVerbose(
                     $"Rendered frame {frameIndex + 1}/{totalFrames} " +
                     $"({sw.ElapsedMilliseconds}ms elapsed).");
-
-                if (deletionSchedule.TryGetValue(frameIndex, out List<string>? exhausted))
-                {
-                    foreach (string path in exhausted)
-                    {
-                        try { File.Delete(path); } catch { /* best-effort */ }
-                    }
-                }
-
-                //diagnostic: every 20 frames, sample the .NET process's own
-                //resource counters. This is aimed squarely at ruling in or
-                //out a specific, well-documented class of bug — repeated
-                //Process.Start()/Dispose() cycles can leak OS handles or
-                //cause managed-heap growth independent of anything the
-                //CHILD process does — which is exactly what a render that
-                //degrades identically on pure-procedural content (zero
-                //decode, zero file I/O, zero transform math) with nothing
-                //else varying would look like. If HandleCount or ThreadCount
-                //climbs in step with the slowdown, that's the leak. If GC
-                //gen2/LOH collection counts climb disproportionately (not
-                //just gen0, which is normal and constant), that's managed
-                //memory pressure building up somewhere still unaccounted
-                //for. Sampled here rather than in a background timer so the
-                //numbers line up exactly against the frame index they were
-                //taken at.
-                if (frameIndex % 20 == 0)
-                {
-                    try
-                    {
-                        using Process self = Process.GetCurrentProcess();
-                        self.Refresh();
-
-                        EditSharpConfig.Logger.LogVerbose(
-                            $"Resource sample @ frame {frameIndex + 1}: " +
-                            $"handles={self.HandleCount}, threads={self.Threads.Count}, " +
-                            $"managed heap={GC.GetTotalMemory(false) / (1024 * 1024)}MB, " +
-                            $"workingSet={self.WorkingSet64 / (1024 * 1024)}MB, " +
-                            $"GC(gen0/1/2)={GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)}");
-                    }
-                    catch
-                    {
-                        //diagnostic only — never worth failing a render over
-                    }
-                }
             }
         }
 
         /// <summary>
-        /// Picks the filter-chain construction strategy for Blueprint.
-        /// HardwareAccelerator. Only None (software, the stock CPU filter
-        /// chain) is implemented — the GPU/libplacebo chain is a paused,
-        /// separate effort (see the project notes) and is deliberately NOT
-        /// silently downgraded to software the way the old whole-window
-        /// pipeline downgrades an unavailable NVENC encoder: a render that
-        /// asked for hardware and got software instead, with no error, is
-        /// exactly the kind of silent behaviour change worth failing loudly on
-        /// instead.
-        /// </summary>
-        private static IFrameFilterChainBuilder SelectChainBuilder(HardwareAccelerator accelerator) =>
-            accelerator switch
-            {
-                HardwareAccelerator.None => new SoftwareFrameFilterChainBuilder(),
-                HardwareAccelerator.Nvenc => throw new NotImplementedException(
-                    "Frame-by-frame rendering with HardwareAccelerator.Nvenc (the GPU/libplacebo " +
-                    "filter chain) is not implemented yet. Use HardwareAccelerator.None."),
-                _ => throw new NotSupportedException($"Unknown HardwareAccelerator value: {accelerator}."),
-            };
-
-        /// <summary>
-        /// Everything about a clip that's constant across its whole life and
-        /// would otherwise be redone on every frame it's visible on: an Image
-        /// source's dimensions, and a TextClip's rasterized PNG (built exactly
-        /// ONCE here rather than once per frame — Content never changes mid-clip,
-        /// so re-rasterizing identical text for every visible frame would be
-        /// pure waste).
+        /// Everything about a clip that's constant across its whole life:
+        /// a video/image SourceClip's native pixel size (MediaProbe — the
+        /// SAME probe call now covers both, where the old code split video
+        /// sizing into OptimizedMediaBuilder's own probe and image sizing
+        /// into this method), and a TextClip's rasterized PNG (built
+        /// exactly ONCE — Content never changes mid-clip, so re-rasterizing
+        /// identical text on every frame it's visible would be pure waste).
         ///
-        /// SourceClip video is deliberately absent — its native size comes from
-        /// OptimizedMediaBuilder's own probe, and GeneratorClip/NoiseClip need
-        /// no entry at all since SoftwareFrameFilterChainBuilder sizes them to
-        /// the canvas directly.
+        /// GeneratorClip/NoiseClip need no entry at all — SkFrameCompositor
+        /// .DrawClip sizes them to the canvas directly (see FrameClip's own
+        /// remarks on why NativeWidth/Height == 0 is the correct signal for
+        /// those two, not a missing-data bug).
         /// </summary>
-        private static Task PrepareStaticContentAsync(
+        private static Task PrepareContentAsync(
             Timeline timeline, int canvasWidth, int canvasHeight,
-            Dictionary<Clip, (int, int)> nativeSizes,
-            Dictionary<Clip, string> staticImages,
+            ConcurrentDictionary<Clip, (int, int)> nativeSizes,
+            ConcurrentDictionary<Clip, string> staticImagePaths,
             ConcurrentBag<string> tempFiles)
         {
             var tasks = new List<Task>();
@@ -327,13 +205,17 @@ namespace EditSharp.Render
                 {
                     switch (clip)
                     {
-                        case SourceClip { Source.Type: SourceType.Image } imageClip:
-                            tasks.Add(PrepareImageAsync(clip, imageClip, nativeSizes, staticImages));
+                        case SourceClip { Source.Type: SourceType.Video } video:
+                            tasks.Add(ProbeVideoAsync(clip, video, nativeSizes));
+                            break;
+
+                        case SourceClip { Source.Type: SourceType.Image } image:
+                            tasks.Add(PrepareImageAsync(clip, image, nativeSizes, staticImagePaths));
                             break;
 
                         case TextClip text:
                             PrepareText(clip, text, canvasWidth, canvasHeight,
-                                nativeSizes, staticImages, tempFiles);
+                                nativeSizes, staticImagePaths, tempFiles);
                             break;
                     }
                 }
@@ -342,18 +224,31 @@ namespace EditSharp.Render
             return Task.WhenAll(tasks);
         }
 
+        private static async Task ProbeVideoAsync(
+            Clip clip, SourceClip video, ConcurrentDictionary<Clip, (int, int)> nativeSizes)
+        {
+            (int width, int height) = await MediaProbe.GetDimensionsAsync(video.Source.Path);
+            nativeSizes[clip] = (width, height);
+        }
+
         private static async Task PrepareImageAsync(
             Clip clip, SourceClip imageClip,
-            Dictionary<Clip, (int, int)> nativeSizes, Dictionary<Clip, string> staticImages)
+            ConcurrentDictionary<Clip, (int, int)> nativeSizes,
+            ConcurrentDictionary<Clip, string> staticImagePaths)
         {
             (int width, int height) = await MediaProbe.GetDimensionsAsync(imageClip.Source.Path);
             nativeSizes[clip] = (width, height);
-            staticImages[clip] = imageClip.Source.Path;
+
+            //no re-encode/copy needed anymore — SkClipContentSource decodes
+            //this path directly with SkiaSharp, so the original file itself
+            //is the "static image", not a temp copy of it
+            staticImagePaths[clip] = imageClip.Source.Path;
         }
 
         private static void PrepareText(
             Clip clip, TextClip text, int canvasWidth, int canvasHeight,
-            Dictionary<Clip, (int, int)> nativeSizes, Dictionary<Clip, string> staticImages,
+            ConcurrentDictionary<Clip, (int, int)> nativeSizes,
+            ConcurrentDictionary<Clip, string> staticImagePaths,
             ConcurrentBag<string> tempFiles)
         {
             string path = TextRasterizer.Rasterize(
@@ -361,240 +256,49 @@ namespace EditSharp.Render
 
             tempFiles.Add(path);
             nativeSizes[clip] = (width, height);
-            staticImages[clip] = path;
+            staticImagePaths[clip] = path;
         }
 
         /// <summary>
-        /// Renders one output frame: builds its filter graph and runs ffmpeg
-        /// with -frames:v 1 writing raw rgba64le to stdout, buffered in memory
-        /// and handed back to the caller rather than written straight to a
-        /// shared accumulator stream — RenderAllFramesAsync may have several of
-        /// these in flight at once, and a FileStream can't be written by
-        /// multiple callers concurrently. The caller is responsible for
-        /// flushing the bytes to the accumulator in frame order.
-        ///
-        /// The filter_complex is passed inline rather than through the
-        /// "-/filter_complex &lt;file&gt;" mechanism RunFfmpegAsync uses for the
-        /// whole-window pipeline. A per-frame graph is bounded by how many
-        /// clips can be simultaneously visible (at most a handful per channel,
-        /// two mid-transition), nothing like the size a whole timeline's graph
-        /// reaches — and avoiding a temp file per frame matters here, since
-        /// this runs once per output frame rather than once per render. If a
-        /// project ever produces per-frame graphs large enough to hit the OS
-        /// command-line limit, switch this call site to the same script-file
-        /// trick.
+        /// The frame index at which each video clip's decoder can be torn
+        /// down — the LAST frame that clip is visible on, computed once
+        /// from Clip.End rather than discovered incrementally. A clip's
+        /// decoder is opened lazily on its first GetContent call
+        /// (SkClipContentSource) and released here on its last.
         /// </summary>
-        /// <summary>
-        /// Renders one frame and returns its raw pixel bytes in a buffer
-        /// RENTED from ArrayPool&lt;byte&gt;.Shared, along with the exact number
-        /// of bytes actually used (buffer.Length may be larger — the pool
-        /// rounds up to its own bucket sizes). The caller MUST call
-        /// ArrayPool&lt;byte&gt;.Shared.Return(buffer) once done with it, on
-        /// every path including error/discard, or the pool degrades back
-        /// into fresh-allocation-per-frame.
-        ///
-        /// This used to accumulate into a MemoryStream and return
-        /// stream.ToArray() — a fresh, exactly-trimmed allocation every
-        /// single frame. At 1920x1080 gbrap16le that's ~16.6MB, comfortably
-        /// past .NET's 85KB Large Object Heap threshold, and the LOH is only
-        /// ever reclaimed as part of a full gen2 collection — so a fresh LOH
-        /// allocation on literally every frame forced a full heap scan every
-        /// time. Confirmed directly via Process resource sampling on a real
-        /// render (handles/threads/managed-heap-size all flat across the
-        /// render, but gen0/gen1/gen2 GC counts climbing in lockstep — i.e.
-        /// EVERY collection was promoted to a full gen2 sweep) and confirmed
-        /// NOT to be a GC-flavor issue (Server GC made no difference — the
-        /// allocation pattern itself is the trigger, not which GC handles
-        /// it). Renting the same handful of buffers across hundreds of
-        /// frames instead of allocating fresh every time removes the
-        /// trigger entirely.
-        ///
-        /// Reading directly into an exactly-sized buffer, rather than a
-        /// growable MemoryStream, is possible because raw video output at a
-        /// fixed resolution and pixel format has a fully deterministic byte
-        /// count (see PixelFormats.PrimaryBytesPerPixel) — the same
-        /// assumption FinalizeOutputAsync's accumulator read already relies
-        /// on. The trailing zero-byte-probe read is a safety check on that
-        /// assumption: if ffmpeg ever produces more than the computed size
-        /// (e.g. because the format's actual byte layout doesn't match what
-        /// PrimaryBytesPerPixel assumes), this fails loudly rather than
-        /// silently truncating a frame.
-        /// </summary>
-        private static async Task<(byte[] Buffer, int Length)> RenderFrameAsync(
-            FrameState state, IFrameFilterChainBuilder chainBuilder,
-            int width, int height, int fps,
-            ConcurrentBag<string> tempFiles)
+        private static Dictionary<int, List<Clip>> BuildDecoderReleaseSchedule(Timeline timeline, int fps)
         {
-            var stageSw = Stopwatch.StartNew();
+            var schedule = new Dictionary<int, List<Clip>>();
 
-            var graph = new InputGraph();
-            string finalLabel = chainBuilder.Build(state, graph, width, height, fps, tempFiles);
-
-            foreach (var input in graph.Inputs)
+            foreach (Channel channel in timeline.Channels)
             {
-                if (input.VerifyExists && !File.Exists(input.Path))
-                    throw new FileNotFoundException(
-                        $"Input file not found rendering frame {state.FrameIndex}: {input.Path}",
-                        input.Path);
-            }
-
-            long graphBuildMs = stageSw.ElapsedMilliseconds;
-            stageSw.Restart();
-
-            var args = new List<string> { "-y", "-v", "error" };
-
-            //THE fix for the inter-thread slice seams — see
-            //EditSharpConfig.FilterThreads. This call site is the one that
-            //actually mattered: it renders every output frame, so a seam
-            //introduced here lands in the accumulator and survives all the
-            //way into the delivered file. Added before any -i below, since
-            //these are global options.
-            args.AddRange(GraphUtilities.FilterThreadingArgs());
-
-            foreach (var input in graph.Inputs)
-            {
-                if (input.ExtraArgs != null) args.AddRange(input.ExtraArgs);
-                args.Add("-i");
-                args.Add(input.Path);
-            }
-
-            args.Add("-filter_complex");
-            args.Add(string.Join(";", graph.FilterLines));
-
-            args.Add("-map");
-            args.Add($"[{finalLabel}]");
-
-            args.Add("-frames:v");
-            args.Add("1");
-            args.Add("-f");
-            args.Add("rawvideo");
-            args.Add("-pix_fmt");
-            args.Add(PixelFormats.Primary);
-            args.Add("pipe:1");
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = EditSharpConfig.FfmpegPath,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            foreach (string arg in args) psi.ArgumentList.Add(arg);
-
-            using var process = new Process { StartInfo = psi };
-            var stderr = new StringBuilder();
-            process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
-
-            //timed separately from graph build above and from the read below
-            //so a slow frame can be attributed to one of three distinct causes:
-            //.NET building the args/graph, the OS actually getting the process
-            //running (process.Start() returning), or ffmpeg's own filter
-            //execution (everything from Start() to the read finishing)
-            var spawnSw = Stopwatch.StartNew();
-            process.Start();
-            long spawnMs = spawnSw.ElapsedMilliseconds;
-
-            process.BeginErrorReadLine();
-
-            //deterministic byte count for raw video at a fixed resolution and
-            //pixel format — see PixelFormats.PrimaryBytesPerPixel and this
-            //method's own remarks for why this replaces a growable
-            //MemoryStream.ToArray() per frame. buffer.Length may exceed
-            //expectedBytes (ArrayPool rounds up to its own bucket sizes);
-            //expectedBytes is the caller's contract for how much of it is
-            //actually valid.
-            int expectedBytes = width * height * PixelFormats.PrimaryBytesPerPixel;
-            byte[] buffer = ArrayPool<byte>.Shared.Rent(expectedBytes);
-
-            long runMs;
-            try
-            {
-                //drained concurrently with stderr rather than read after exit —
-                //the same deadlock risk MediaProbe's own comments describe: a
-                //full pipe buffer blocks the child if nothing is consuming the
-                //other one
-                var runSw = Stopwatch.StartNew();
-
-                Stream pipe = process.StandardOutput.BaseStream;
-                int totalRead = 0;
-                while (totalRead < expectedBytes)
+                foreach (Clip clip in channel.Clips.Values)
                 {
-                    int read = await pipe.ReadAsync(buffer.AsMemory(totalRead, expectedBytes - totalRead));
-                    if (read == 0)
-                    {
-                        await process.WaitForExitAsync();
-                        throw new InvalidOperationException(
-                            $"ffmpeg produced only {totalRead} of the expected {expectedBytes} " +
-                            $"bytes for frame {state.FrameIndex} before closing its output pipe " +
-                            $"(exit code {process.ExitCode}):\n{stderr}");
-                    }
-                    totalRead += read;
+                    if (clip is not SourceClip { Source.Type: SourceType.Video }) continue;
+
+                    int lastVisibleFrame = Math.Max(0, (int)Math.Ceiling(clip.End.TotalSeconds * fps) - 1);
+
+                    if (!schedule.TryGetValue(lastVisibleFrame, out List<Clip>? list))
+                        schedule[lastVisibleFrame] = list = [];
+
+                    list.Add(clip);
                 }
-
-                //one more read past the expected size: if this returns
-                //anything at all, PrimaryBytesPerPixel's assumption about
-                //this format's byte layout is wrong for this stream, and
-                //silently keeping only the first expectedBytes would produce
-                //a corrupted frame rather than a loud failure
-                Memory<byte> probe = new byte[1];
-                int extra = await pipe.ReadAsync(probe);
-                if (extra > 0)
-                {
-                    //ffmpeg is still writing and nothing will drain it further
-                    //once this throws — left alone it would sit blocked on a
-                    //full pipe forever rather than exiting. Best-effort: this
-                    //branch is only reachable if the byte-size assumption
-                    //above is actually wrong, so a failed kill isn't worth
-                    //failing over
-                    try { process.Kill(entireProcessTree: true); } catch { /* best-effort */ }
-
-                    throw new InvalidOperationException(
-                        $"ffmpeg produced MORE than the expected {expectedBytes} bytes for " +
-                        $"frame {state.FrameIndex} — PixelFormats.PrimaryBytesPerPixel's " +
-                        $"assumption (width*height*{PixelFormats.PrimaryBytesPerPixel}) doesn't " +
-                        $"match this stream's actual byte layout.");
-                }
-
-                await process.WaitForExitAsync();
-                runMs = runSw.ElapsedMilliseconds;
-            }
-            catch
-            {
-                ArrayPool<byte>.Shared.Return(buffer);
-                throw;
             }
 
-            if (process.ExitCode != 0)
-            {
-                ArrayPool<byte>.Shared.Return(buffer);
-                throw new InvalidOperationException(
-                    $"ffmpeg exited with code {process.ExitCode} rendering frame " +
-                    $"{state.FrameIndex}:\n{stderr}");
-            }
-
-            EditSharpConfig.Logger.LogVerbose(
-                $"Frame {state.FrameIndex + 1}: graph build {graphBuildMs}ms, " +
-                $"process spawn {spawnMs}ms, ffmpeg run {runMs}ms " +
-                $"({graph.Inputs.Count} input(s), {graph.FilterLines.Count} filter line(s)).");
-
-            return (buffer, expectedBytes);
+            return schedule;
         }
 
         /// <summary>
         /// Muxes the accumulated lossless video against the timeline's audio
-        /// and encodes to Blueprint's chosen codec — the one lossy step in the
-        /// whole pipeline, and only when the codec itself is lossy.
+        /// and encodes to Blueprint's chosen codec — the one lossy step in
+        /// the whole pipeline, and only when the codec itself is lossy.
         ///
-        /// Audio is built the same way it always has in this pipeline: a fresh
-        /// InputGraph, ClipContentBuilder per clip, AudioMixer.Compose — none of
-        /// that changed when the video side moved to frame-by-frame. Worth
-        /// knowing: ClipContentBuilder builds each
-        /// clip's VIDEO label too, even though only the audio one is used here
-        /// — those filter lines are simply never mapped to output, which
-        /// ffmpeg tolerates, but it does mean a wasted decode per video clip
-        /// during this pass. Not fixed here; would need an audio-only mode on
-        /// ClipContentBuilder to avoid.
+        /// Audio is built the same way it always has: a fresh InputGraph,
+        /// ClipContentBuilder per clip, AudioMixer.Compose — none of that
+        /// changed by this migration at all. The only thing item 13 touches
+        /// here is the VIDEO side's rawvideo input args: pix_fmt/byte-size
+        /// now describe SkOutputFormat's rgba8888 accumulator, not
+        /// PixelFormats.Primary's gbrap16le.
         /// </summary>
         private static async Task FinalizeOutputAsync(
             string accumulatorPath, int width, int height, int fps,
@@ -604,19 +308,10 @@ namespace EditSharp.Render
             var contents = new Dictionary<Clip, ClipContent>();
 
             //The accumulator occupies -i index 0 below, so it has to occupy
-            //index 0 in THIS graph too before any clip is built. InputGraph
-            //hands out indices in call order and ClipContentBuilder bakes them
-            //straight into its filter labels ([N:v]/[N:a]), so without this
-            //placeholder the first clip's source would take index 0 and every
-            //label it emits would resolve against the accumulator instead —
-            //which is a headerless rawvideo stream with a video track and no
-            //audio whatsoever, producing exactly "Stream specifier ':a' ...
-            //matches no streams" at bind time.
-            //
-            //verifyExists:false because the accumulator is re-registered in
-            //the -i list explicitly (with its own rawvideo/-s/-r args) rather
-            //than emitted from this collection; this entry exists purely to
-            //consume index 0 so the numbering lines up.
+            //index 0 in THIS graph too before any clip is built — see the
+            //original comment this is carried over from for the full
+            //reasoning (InputGraph hands out indices in call order and
+            //ClipContentBuilder bakes them straight into filter labels).
             _ = audioGraph.AddInput(accumulatorPath, verifyExists: false);
 
             foreach (Channel channel in blueprint.Timeline.Channels)
@@ -642,32 +337,20 @@ namespace EditSharp.Render
             await File.WriteAllTextAsync(scriptPath, filterComplex);
 
             var args = new List<string> { "-y", "-v", "error" };
-
-            //this pass runs the AUDIO filter graph (AudioMixer.Compose), so
-            //the video seams EditSharpConfig.FilterThreads describes can't
-            //arise here — the video side is a straight rawvideo passthrough.
-            //Pinned anyway for consistency: every invocation in this pipeline
-            //that carries a filter graph gets the same treatment, so there is
-            //no call site left where ffmpeg silently picks its own thread
-            //count and no one has reasoned about whether that's safe.
             args.AddRange(GraphUtilities.FilterThreadingArgs());
 
-            //input 0: the accumulated frames. Headerless raw data, so every
-            //dimension ffmpeg would normally read from a container header has
-            //to be told explicitly instead
+            //input 0: the accumulated frames. Headerless raw data at
+            //SkOutputFormat's rgba8888, straight alpha, packed with no row
+            //padding — exactly what SkFrameCompositor.ReadRgba8888 wrote
             args.AddRange(new[]
             {
                 "-f", "rawvideo",
-                "-pix_fmt", PixelFormats.Primary,
+                "-pix_fmt", SkOutputFormat.FfmpegPixelFormat,
                 "-s", $"{width}x{height}",
                 "-r", fps.ToString(CultureInfo.InvariantCulture),
                 "-i", accumulatorPath,
             });
 
-            //the audio graph's own inputs land at indices 1..N — index 0 is
-            //the placeholder reserved above for the accumulator, which was
-            //already emitted explicitly with its rawvideo args, so it's
-            //skipped here rather than added a second time
             foreach (var input in audioGraph.Inputs.Skip(1))
             {
                 if (input.ExtraArgs != null) args.AddRange(input.ExtraArgs);
@@ -754,23 +437,27 @@ namespace EditSharp.Render
             if (string.IsNullOrWhiteSpace(blueprint.OutputDirectory))
                 throw new ArgumentException("Blueprint.OutputDirectory must be a full output file path.");
 
-            // A transition that does not preserve alpha punches an opaque rectangle
-            // through everything beneath it for the length of the transition —
-            // FrameFilterChain.ApplyTransition drives the same xfade transition
-            // types this checks against, so the failure mode is identical to the
-            // old whole-window pipeline's. Harmless on the bottom channel, which is
-            // flattened onto black anyway.
+            //A transition that does not preserve alpha punches an opaque
+            //rectangle through everything beneath it for the length of the
+            //transition. Constants.PreservesAlpha(transition.Type) is gone
+            //along with the old TransitionType enum (item 8) — replaced with
+            //a direct type check, since FadeToColorTransition is now the
+            //ONLY kind that's alpha-unsafe by construction (it deliberately
+            //fills the whole canvas with a colour partway through). This is
+            //a reasoned-from-construction judgement, not a re-measurement
+            //the way the old AlphaUnsafeTransitions list was empirically
+            //built — flagged as such in the migration manifest.
             foreach (Channel channel in blueprint.Timeline.Channels.Skip(1))
             {
                 foreach ((Clip clip, Transition transition) in channel.Transitions)
                 {
-                    if (Constants.PreservesAlpha(transition.Type)) continue;
+                    if (transition is not FadeToColorTransition) continue;
 
                     throw new ArgumentException(
-                        $"Channel '{channel.Name}' uses transition {transition.Type}, which does not " +
-                        $"preserve transparency, so it would black out the channels beneath it for " +
-                        $"the length of the transition. Use one of the alpha-safe transitions, or " +
-                        $"move this channel to the bottom of the timeline.");
+                        $"Channel '{channel.Name}' uses a FadeToColorTransition, which does " +
+                        "not preserve transparency, so it would black out the channels " +
+                        "beneath it for the length of the transition. Use a different " +
+                        "transition, or move this channel to the bottom of the timeline.");
                 }
             }
         }

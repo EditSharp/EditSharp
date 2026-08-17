@@ -192,9 +192,21 @@ namespace EditSharp
     /// </summary>
     public interface IEditSharpLogger
     {
+        //standard log for information that is important to an end user
+        //(ex. "render complete in x seconds", "
         void Log(string message);
 
+        //log for debug information and information about each individual step of a process
+        //(ex. info on renders of individual frames)
         void LogVerbose(string message);
+
+        //log for when an issue occurs, but the issue is not fatal
+        //(ex. fallbacks during a GPU render)
+        void LogWarning(string message);
+
+        //log for when an unrecoverable issue occurs
+        //(ex. a throw happens during a render or ffmpeg crashes during a render)
+        void LogError(string message);
     }
 
     internal sealed class NullEditSharpLogger : IEditSharpLogger
@@ -203,5 +215,7 @@ namespace EditSharp
         private NullEditSharpLogger() { }
         public void Log(string message) { }
         public void LogVerbose(string message) { }
+        public void LogWarning(string message) { }
+        public void LogError(string message) { }
     }
 }

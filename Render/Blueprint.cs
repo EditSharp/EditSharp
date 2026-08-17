@@ -26,45 +26,41 @@ namespace EditSharp.Render
         public HardwareAccelerator HardwareAccelerator { get; set; } = HardwareAccelerator.None;
 
         //how many sources can have their optimized media built concurrently
+        //
+        //STILL USED as of the Skia migration's current state, but flagged:
+        //OptimizedMediaBuilder's own reason to exist for VIDEO sources is
+        //gone per item 11 (SkSourceDecoder pipes directly, no pre-render) —
+        //this property's relevance narrows to whatever OptimizedMediaBuilder
+        //work survives that item's full audit, not confirmed removed here.
         public int ExtractionConcurrency { get; set; } = 3;
 
-        //how many output frames can be rendered concurrently. Defaults to 1
-        //(fully sequential, matching the original behaviour) rather than
-        //processor count — each in-flight frame holds a full canvas-sized
-        //rgba64le frame in memory (e.g. ~130MB at 1920x1080) until it's this
-        //render's turn to flush, so RAM and disk I/O both scale with this
-        //directly. Raise it deliberately, watching both, rather than
-        //defaulting to something that scales with core count.
-        public int FrameRenderConcurrency { get; set; } = 1;
+        // FrameRenderConcurrency REMOVED — decided in conversation (Skia
+        // migration item 11): parallel OUTPUT frames are incompatible with
+        // SkSourceDecoder's one-ordered-pipe-per-source model, since a pipe
+        // has one current read position and two concurrent frame-renderers
+        // can't both be "the next reader" of the same source stream. The
+        // render is now committed to strictly sequential frame order.
+        // Real single-threaded Skia throughput is validated later, at
+        // checklist item 14 — this removal is not contingent on that
+        // measurement turning out favourably, per the explicit decision to
+        // commit now and validate after.
 
         //how many consecutive output frames are rendered by a SINGLE ffmpeg
         //process. 1 reproduces the original one-process-per-frame behaviour
         //exactly.
         //
-        //This exists because a measurable fixed cost is paid per ffmpeg
-        //INVOCATION that has nothing to do with how much work the frame
-        //itself needs — shared-library loading, codec/format/filter registry
-        //init, graph configuration. Measured on a minimal blueprint (one
-        //generator clip, ZERO file inputs, a three-line filter graph) at
-        //roughly 180ms per frame at 1080p, against a separately-measured
-        //process spawn cost of only 3-5ms — i.e. the bulk of it lands inside
-        //what a spawn-vs-run timing split attributes to "run", and is
-        //invisible to that split. Batching N frames into one process pays
-        //that cost once per batch instead of once per frame.
-        //
-        //RAM COST, which is the reason this is not defaulted high: an entire
-        //batch's frames are held in memory until the batch completes and its
-        //turn to flush comes up. At 1920x1080 gbrap16le (8 bytes/pixel) one
-        //frame is ~16.6MB, so peak usage is roughly
-        //    FrameBatchSize x FrameRenderConcurrency x 16.6MB
-        //A batch of 8 at concurrency 1 is ~133MB; the same batch at
-        //concurrency 4 is ~530MB. Raising BOTH multiplies, and swapping is
-        //far slower than any per-invocation cost this saves.
-        //
-        //Batches also multiply INPUT count: every frame in a batch still
-        //opens its own file inputs, so a batch of N over a blueprint with 2
-        //file-backed clips opens 2N inputs in one process. That is the part
-        //of per-frame cost this does NOT amortize.
+        //FLAGGED, NOT REMOVED THIS PASS: this property's whole rationale
+        //(amortizing a fixed per-INVOCATION ffmpeg cost across several
+        //frames) applies only to the old one-ffmpeg-process-per-frame
+        //render model. Once FrameRenderer's core loop is rewired to the
+        //Skia in-process compositor (the item-13 orchestration work, not
+        //done in this pass), there is no per-frame ffmpeg invocation left
+        //to amortize, and this property becomes as dead as
+        //FrameRenderConcurrency above. Left in place here because removing
+        //it correctly requires that same orchestration rewrite — deleting
+        //it in isolation now would just be guessing at what item 13 needs,
+        //not fixing an active correctness bug the way FrameRenderConcurrency
+        //was. Revisit at item 13, not before.
         public int FrameBatchSize { get; set; } = 4;
 
         //path to where output should be rendered
