@@ -49,7 +49,7 @@ namespace EditSharp.Render
     /// work rather than an awaited ffmpeg subprocess — there's nothing left
     /// to overlap. Removed outright here, not just left gated at 1.
     /// </summary>
-    public static class FrameRenderer
+    public static class Renderer
     {
         public static async Task RenderAsync(Blueprint blueprint)
         {
