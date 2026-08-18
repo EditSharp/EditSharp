@@ -20,6 +20,13 @@ namespace EditSharp.Render
     /// render loop, wiring items 3-12's Skia compositor into an actual
     /// end-to-end render for the first time.
     ///
+    /// RENAME NOTE: this class was FrameRenderer; renamed to Renderer for
+    /// end-user clarity (the file was already called Renderer.cs before the
+    /// class caught up). Doc comments elsewhere in the codebase that still
+    /// say "FrameRenderer" are historical references to this same type and
+    /// were not swept in this pass — flagged, not silently left as if
+    /// intentional.
+    ///
     /// Shape of a render, POST-rewrite:
     ///   1. Probe every video/image source's native size (MediaProbe) and
     ///      rasterize every TextClip's PNG (TextRasterizer) — everything
@@ -48,6 +55,13 @@ namespace EditSharp.Render
     /// (SkFrameCompositor.RenderFrame) is synchronous, in-process Skia
     /// work rather than an awaited ffmpeg subprocess — there's nothing left
     /// to overlap. Removed outright here, not just left gated at 1.
+    ///
+    /// PLAYBACK NOTE: PrepareContentAsync and BuildDecoderReleaseSchedule
+    /// moved out to RenderContentPreparation so EditSharp.Playback can share
+    /// them verbatim rather than re-deriving the same "what does every clip
+    /// need before frame 0" logic a second time. Everything else here is
+    /// still full-render-specific (the accumulator file, the mux/encode
+    /// finalize step) and has no playback equivalent.
     /// </summary>
     public static class Renderer
     {
@@ -93,7 +107,7 @@ namespace EditSharp.Render
             var decodePlans = new ConcurrentDictionary<Clip, DecodeHwAccelPlan>();
 
             var prepSw = Stopwatch.StartNew();
-            await PrepareContentAsync(
+            await RenderContentPreparation.PrepareContentAsync(
                 timeline, width, height, blueprint.HardwareAccelerator,
                 nativeSizes, staticImagePaths, decodePlans, tempFiles);
             EditSharpConfig.Logger.LogVerbose($"Content prepared in {prepSw.ElapsedMilliseconds}ms.");
@@ -104,7 +118,7 @@ namespace EditSharp.Render
             //identity instead of a media file path since there's no file to
             //delete anymore, only a subprocess to kill
             Dictionary<int, List<Clip>> decoderReleaseSchedule =
-                BuildDecoderReleaseSchedule(timeline, fps);
+                RenderContentPreparation.BuildDecoderReleaseSchedule(timeline, fps);
 
             int totalFrames = Math.Max(1, (int)Math.Ceiling(timeline.Duration.TotalSeconds * fps));
 
@@ -202,126 +216,6 @@ namespace EditSharp.Render
                     $"Rendered frame {frameIndex + 1}/{totalFrames} " +
                     $"({frameDeltaMs}ms this frame, {currentElapsedMs}ms elapsed).");
             }
-        }
-
-        /// <summary>
-        /// Everything about a clip that's constant across its whole life:
-        /// a video/image SourceClip's native pixel size (MediaProbe — the
-        /// SAME probe call now covers both, where the old code split video
-        /// sizing into OptimizedMediaBuilder's own probe and image sizing
-        /// into this method), and a TextClip's rasterized PNG (built
-        /// exactly ONCE — Content never changes mid-clip, so re-rasterizing
-        /// identical text on every frame it's visible would be pure waste).
-        ///
-        /// GeneratorClip/NoiseClip need no entry at all — SkFrameCompositor
-        /// .DrawClip sizes them to the canvas directly (see FrameClip's own
-        /// remarks on why NativeWidth/Height == 0 is the correct signal for
-        /// those two, not a missing-data bug).
-        /// </summary>
-        private static Task PrepareContentAsync(
-            Timeline timeline, int canvasWidth, int canvasHeight, HardwareAccelerator hwAccel,
-            ConcurrentDictionary<Clip, (int, int)> nativeSizes,
-            ConcurrentDictionary<Clip, string> staticImagePaths,
-            ConcurrentDictionary<Clip, DecodeHwAccelPlan> decodePlans,
-            ConcurrentBag<string> tempFiles)
-        {
-            var tasks = new List<Task>();
-
-            foreach (Channel channel in timeline.Channels)
-            {
-                foreach (Clip clip in channel.Clips.Values)
-                {
-                    switch (clip)
-                    {
-                        case SourceClip { Source.Type: SourceType.Video } video:
-                            tasks.Add(ProbeVideoAsync(clip, video, hwAccel, nativeSizes, decodePlans));
-                            break;
-
-                        case SourceClip { Source.Type: SourceType.Image } image:
-                            tasks.Add(PrepareImageAsync(clip, image, nativeSizes, staticImagePaths));
-                            break;
-
-                        case TextClip text:
-                            PrepareText(clip, text, canvasWidth, canvasHeight,
-                                nativeSizes, staticImagePaths, tempFiles);
-                            break;
-                    }
-                }
-            }
-
-            return Task.WhenAll(tasks);
-        }
-
-        private static async Task ProbeVideoAsync(
-            Clip clip, SourceClip video, HardwareAccelerator hwAccel,
-            ConcurrentDictionary<Clip, (int, int)> nativeSizes,
-            ConcurrentDictionary<Clip, DecodeHwAccelPlan> decodePlans)
-        {
-            (int width, int height) = await MediaProbe.GetDimensionsAsync(video.Source.Path);
-            nativeSizes[clip] = (width, height);
-
-            // Resolved once, up front, alongside the size probe this was
-            // already paying an async round-trip for — not re-resolved per
-            // frame or per decoder open (see SkSourceDecoder.Start's own
-            // remarks on why the result is just passed straight through).
-            decodePlans[clip] = await FfmpegRunner.GetDecodePlanAsync(video.Source.Path, hwAccel);
-        }
-
-        private static async Task PrepareImageAsync(
-            Clip clip, SourceClip imageClip,
-            ConcurrentDictionary<Clip, (int, int)> nativeSizes,
-            ConcurrentDictionary<Clip, string> staticImagePaths)
-        {
-            (int width, int height) = await MediaProbe.GetDimensionsAsync(imageClip.Source.Path);
-            nativeSizes[clip] = (width, height);
-
-            //no re-encode/copy needed anymore — SkClipContentSource decodes
-            //this path directly with SkiaSharp, so the original file itself
-            //is the "static image", not a temp copy of it
-            staticImagePaths[clip] = imageClip.Source.Path;
-        }
-
-        private static void PrepareText(
-            Clip clip, TextClip text, int canvasWidth, int canvasHeight,
-            ConcurrentDictionary<Clip, (int, int)> nativeSizes,
-            ConcurrentDictionary<Clip, string> staticImagePaths,
-            ConcurrentBag<string> tempFiles)
-        {
-            string path = TextRasterizer.Rasterize(
-                text, canvasWidth, canvasHeight, out int width, out int height);
-
-            tempFiles.Add(path);
-            nativeSizes[clip] = (width, height);
-            staticImagePaths[clip] = path;
-        }
-
-        /// <summary>
-        /// The frame index at which each video clip's decoder can be torn
-        /// down — the LAST frame that clip is visible on, computed once
-        /// from Clip.End rather than discovered incrementally. A clip's
-        /// decoder is opened lazily on its first GetContent call
-        /// (SkClipContentSource) and released here on its last.
-        /// </summary>
-        private static Dictionary<int, List<Clip>> BuildDecoderReleaseSchedule(Timeline timeline, int fps)
-        {
-            var schedule = new Dictionary<int, List<Clip>>();
-
-            foreach (Channel channel in timeline.Channels)
-            {
-                foreach (Clip clip in channel.Clips.Values)
-                {
-                    if (clip is not SourceClip { Source.Type: SourceType.Video }) continue;
-
-                    int lastVisibleFrame = Math.Max(0, (int)Math.Ceiling(clip.End.TotalSeconds * fps) - 1);
-
-                    if (!schedule.TryGetValue(lastVisibleFrame, out List<Clip>? list))
-                        schedule[lastVisibleFrame] = list = [];
-
-                    list.Add(clip);
-                }
-            }
-
-            return schedule;
         }
 
         /// <summary>

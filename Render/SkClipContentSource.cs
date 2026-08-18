@@ -13,13 +13,13 @@ namespace EditSharp.Render
     /// many frames, since FrameStateResolver.Resolve is (deliberately)
     /// fully stateless per frame and has nowhere to hold one.
     ///
-    /// One instance per render. Owns:
+    /// One instance per render (or per playback session). Owns:
     ///   - one SkSourceDecoder per active video SourceClip, opened lazily on
     ///     that clip's FIRST visible frame and disposed by the caller via
     ///     ReleaseDecoder once the clip's visible window ends (see
-    ///     FrameRenderer's decoder-release schedule — same shape as the old
-    ///     OptimizedMediaBuilder deletion schedule, just keyed on Clip
-    ///     identity instead of a file path).
+    ///     RenderContentPreparation.BuildDecoderReleaseSchedule — same shape
+    ///     as the old OptimizedMediaBuilder deletion schedule, just keyed on
+    ///     Clip identity instead of a file path).
     ///   - one cached SKImage per Image SourceClip / TextClip, decoded once
     ///     and reused for every frame it's visible on (mirrors the old
     ///     "static image, read once" path exactly, just via SkiaSharp's own
@@ -34,6 +34,19 @@ namespace EditSharp.Render
     /// strictly increasing frame order, matching SkSourceDecoder.NextFrame's
     /// own contract — this class does not itself enforce that, it just
     /// forwards to the decoder.
+    ///
+    /// PLAYBACK ADDITION (seekOffsets): a full render always opens a video
+    /// clip's decoder at exactly that clip's own trim start, because
+    /// rendering always begins at timeline t=0 — a clip is never already
+    /// "in progress" when its decoder first opens. Playback breaks that
+    /// assumption: starting playback at an arbitrary Position can land
+    /// inside a clip's visible window, and the decoder for that clip needs
+    /// to seek to (clip's own trim start + however far into the clip
+    /// Position already is), not just the trim start. seekOffsets carries
+    /// that additional per-clip offset, keyed the same way nativeSizes
+    /// already is. Defaults to null/empty, which reproduces the original
+    /// full-render behaviour exactly — Renderer's own construction of this
+    /// class is unchanged.
     /// </summary>
     internal sealed class SkClipContentSource : IDisposable
     {
@@ -41,6 +54,7 @@ namespace EditSharp.Render
         private readonly IReadOnlyDictionary<Clip, (int Width, int Height)> _nativeSizes;
         private readonly IReadOnlyDictionary<Clip, string> _staticImagePaths;
         private readonly IReadOnlyDictionary<Clip, DecodeHwAccelPlan> _decodePlans;
+        private readonly IReadOnlyDictionary<Clip, TimeSpan> _seekOffsets;
 
         private readonly Dictionary<Clip, SkSourceDecoder> _videoDecoders = new();
         private readonly Dictionary<Clip, SKImage> _staticContent = new();
@@ -49,12 +63,14 @@ namespace EditSharp.Render
             int fps,
             IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes,
             IReadOnlyDictionary<Clip, string> staticImagePaths,
-            IReadOnlyDictionary<Clip, DecodeHwAccelPlan> decodePlans)
+            IReadOnlyDictionary<Clip, DecodeHwAccelPlan> decodePlans,
+            IReadOnlyDictionary<Clip, TimeSpan>? seekOffsets = null)
         {
             _fps = fps;
             _nativeSizes = nativeSizes;
             _staticImagePaths = staticImagePaths;
             _decodePlans = decodePlans;
+            _seekOffsets = seekOffsets ?? new Dictionary<Clip, TimeSpan>();
         }
 
         /// <summary>
@@ -110,13 +126,20 @@ namespace EditSharp.Render
             if (nativeWidth <= 0 || nativeHeight <= 0)
                 throw new InvalidOperationException(
                     "No native size registered for a video clip — MediaProbe must " +
-                    "run (see FrameRenderer.PrepareContentAsync) before rendering.");
+                    "run (see RenderContentPreparation.PrepareContentAsync) before rendering.");
 
             //Source.Start already carries any head-trim advance (see
             //SourceClip.OnTrimmedFromStart) — this IS the one-time seek
             //SkSourceDecoder's own remarks describe, paid once at stream
-            //setup rather than once per frame
+            //setup rather than once per frame. seekOffsets adds however far
+            //INTO the clip's visible window playback is already starting —
+            //zero for a full render (or a playback session starting at
+            //Position zero), which reproduces the original behaviour
+            //exactly.
             double startSeconds = (source.Source.Start ?? TimeSpan.Zero).TotalSeconds;
+
+            if (_seekOffsets.TryGetValue(clip, out TimeSpan extra))
+                startSeconds += extra.TotalSeconds;
 
             //Decode target: the SAME max-scale-across-the-clip's-own-keyframe-
             //range content size ClipVideoChain/SkiaClipCompositorSketch.Composite
@@ -161,7 +184,7 @@ namespace EditSharp.Render
             if (!_staticImagePaths.TryGetValue(clip, out string? path))
                 throw new InvalidOperationException(
                     $"No static image path registered for a {clip.GetType().Name} — " +
-                    "FrameRenderer.PrepareContentAsync must run before rendering.");
+                    "RenderContentPreparation.PrepareContentAsync must run before rendering.");
 
             using SKData data = SKData.Create(path)
                 ?? throw new InvalidOperationException($"Could not read '{path}'.");
@@ -175,10 +198,10 @@ namespace EditSharp.Render
 
         /// <summary>
         /// Terminates and forgets a clip's video decoder once its visible
-        /// window is over (see FrameRenderer's decoder-release schedule).
-        /// A no-op for any clip that never had one — safe to call
-        /// unconditionally rather than requiring the caller to know which
-        /// clips are video.
+        /// window is over (see RenderContentPreparation's decoder-release
+        /// schedule). A no-op for any clip that never had one — safe to
+        /// call unconditionally rather than requiring the caller to know
+        /// which clips are video.
         /// </summary>
         public void ReleaseDecoder(Clip clip)
         {

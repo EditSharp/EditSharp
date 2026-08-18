@@ -20,8 +20,4 @@
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Folder Include="Playback\" />
-  </ItemGroup>
-
 </Project>
