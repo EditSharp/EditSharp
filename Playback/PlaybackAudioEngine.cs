@@ -71,6 +71,18 @@ namespace EditSharp.Playback
         // large enough not to make a syscall per handful of samples.
         private const int ChunkBytes = BytesPerSecond / 10 - (BytesPerSecond / 10 % BytesPerFrame);
 
+        // How much content should always remain buffered-but-unconsumed in
+        // the CONSUMER's buffer at minimum — a standing cushion, not a
+        // "shave a few ms off" margin. This has to be meaningfully larger
+        // than ChunkBytes' own duration (~100ms) to do anything at all:
+        // an earlier version of this subtracted a small margin from a
+        // target that already included one chunk's duration, which nearly
+        // canceled out and delivered right at the underrun boundary
+        // instead of meaningfully before it — a real arithmetic bug, not
+        // just an undersized value. Deliberately a fixed internal
+        // constant, not a public knob — see remarks at its use site.
+        private static readonly TimeSpan DeliveryCushion = TimeSpan.FromMilliseconds(300);
+
         private Process? _process;
         private Task? _pumpTask;
         private readonly ConcurrentBag<string> _tempFiles = new();
@@ -225,11 +237,26 @@ namespace EditSharp.Playback
 
                 bytesDelivered += read;
 
+                //Corrected pacing model: maintain a STANDING CUSHION of
+                //buffered-but-unconsumed content, not "deliver exactly on
+                //schedule." targetElapsed - actualElapsed is how much
+                //content is currently sitting in the consumer's buffer
+                //ahead of what real-time playback has actually consumed
+                //(assuming their output device started draining at the
+                //same moment our clock started, which PlaybackStarted is
+                //designed to line up). Only wait long enough to bring that
+                //lead back down to DeliveryCushion — never all the way to
+                //zero. This is what actually prevents WasapiOut (or any
+                //continuously-draining consumer) from running dry on a
+                //Task.Delay landing a few ms late: there's real slack left
+                //when the next chunk arrives, not none.
                 TimeSpan targetElapsed = TimeSpan.FromSeconds(bytesDelivered / (double)BytesPerSecond);
                 TimeSpan actualElapsed = clock.Elapsed;
-                if (targetElapsed > actualElapsed)
+                TimeSpan bufferedAhead = targetElapsed - actualElapsed;
+
+                if (bufferedAhead > DeliveryCushion)
                 {
-                    try { await Task.Delay(targetElapsed - actualElapsed, token); }
+                    try { await Task.Delay(bufferedAhead - DeliveryCushion, token); }
                     catch (OperationCanceledException) { break; }
                 }
 
