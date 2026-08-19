@@ -107,6 +107,15 @@ namespace EditSharp.Playback
         //silently clamped. Values != 1 currently play video only — gap 2.
         public float Speed = 1f;
 
+        //optional hold, applied after video/audio setup finishes but
+        //before either starts delivering anything, letting a real audio
+        //output device build backlog before playback becomes visible or
+        //audible. See PlaybackStartGate's own remarks — this alone doesn't
+        //fix a consumer that starts its output device immediately
+        //regardless of backlog; the consumer still has to defer that
+        //itself. Defaults to zero (no hold, prior behavior unchanged).
+        public TimeSpan PreRoll = TimeSpan.Zero;
+
         //how far along the playback is through the timeline — READ ONLY
         //from outside deliberately, see class remarks
         public TimeSpan Position { get; private set; } = TimeSpan.Zero;
@@ -192,7 +201,7 @@ namespace EditSharp.Playback
                 //audio's pacing clock both start at the SAME real moment —
                 //see PlaybackStartGate's remarks for why this, specifically,
                 //was the desync bug's mechanism.
-                var startGate = new PlaybackStartGate(audioParticipates ? 2 : 1);
+                var startGate = new PlaybackStartGate(audioParticipates ? 2 : 1, PreRoll);
 
                 _videoTask = Task.Run(() => VideoLoopAsync(token, startGate, pauseGate), token);
 

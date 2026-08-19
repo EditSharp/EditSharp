@@ -21,36 +21,88 @@ namespace EditSharp.Playback
     /// ongoing "clock drift" — two Stopwatch instances read the same
     /// underlying hardware counter and don't meaningfully diverge from each
     /// other over a session. It's specifically this startup asymmetry.)
+    ///
+    /// PRE-ROLL: an optional additional hold, applied AFTER every
+    /// participant is ready, before releasing anyone. Exists for a second,
+    /// related problem the gate alone doesn't solve — a real playback
+    /// consumer (an actual audio output device) typically needs its own
+    /// backlog buffered before it can start outputting without underrun,
+    /// and has no equivalent concept for video. Without a shared hold,
+    /// video would start being visibly displayed the instant the gate
+    /// opens while a well-behaved consumer is still deliberately holding
+    /// audio output back to build backlog — reintroducing a startup
+    /// video-ahead-of-audio gap, just for a legitimate reason this time
+    /// instead of a bug. Pre-roll gives a consumer a defined window to do
+    /// that buffering in, with BOTH streams held back identically during
+    /// it. IMPORTANT: this alone does not fix an audio consumer that starts
+    /// its output device immediately regardless of backlog — the consumer
+    /// still has to actually use the window (defer starting output until
+    /// real backlog exists, e.g. until it's received its first few
+    /// AudioSample chunks) for pre-roll to help. Defaults to zero — no
+    /// change to prior behavior unless explicitly set.
     /// </summary>
     internal sealed class PlaybackStartGate
     {
         private readonly int _participantCount;
+        private readonly TimeSpan _preRoll;
         private int _readyCount;
         private readonly TaskCompletionSource<bool> _gate =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public PlaybackStartGate(int participantCount)
+        public PlaybackStartGate(int participantCount, TimeSpan preRoll = default)
         {
             if (participantCount <= 0)
                 throw new ArgumentOutOfRangeException(nameof(participantCount));
 
+            if (preRoll < TimeSpan.Zero)
+                throw new ArgumentOutOfRangeException(nameof(preRoll));
+
             _participantCount = participantCount;
+            _preRoll = preRoll;
         }
 
         /// <summary>
         /// Called once a participant (the video loop, the audio pump loop)
         /// has finished its own setup and is ready to start its pacing
-        /// clock. Returns once EVERY participant has reached this point —
-        /// the caller's very next line should be Stopwatch.StartNew(),
-        /// with nothing else in between that could reintroduce a real-time
-        /// gap.
+        /// clock. Returns once EVERY participant has reached this point AND
+        /// (if configured) the pre-roll hold has elapsed — the caller's
+        /// very next line should be Stopwatch.StartNew(), with nothing else
+        /// in between that could reintroduce a real-time gap.
         /// </summary>
         public async Task ReadyAndWaitAsync(CancellationToken token)
         {
             if (Interlocked.Increment(ref _readyCount) >= _participantCount)
-                _gate.TrySetResult(true);
+            {
+                if (_preRoll > TimeSpan.Zero)
+                {
+                    //Fire-and-forget is deliberate: whichever participant
+                    //happens to be last to arrive here shouldn't itself be
+                    //the one sitting in Task.Delay — every participant
+                    //(including this one) resumes together from the SAME
+                    //_gate.Task completing below, not from this call
+                    //returning.
+                    _ = ReleaseAfterPreRollAsync(token);
+                }
+                else
+                {
+                    _gate.TrySetResult(true);
+                }
+            }
 
             await _gate.Task.WaitAsync(token);
+        }
+
+        private async Task ReleaseAfterPreRollAsync(CancellationToken token)
+        {
+            try
+            {
+                await Task.Delay(_preRoll, token);
+                _gate.TrySetResult(true);
+            }
+            catch (OperationCanceledException)
+            {
+                _gate.TrySetCanceled(token);
+            }
         }
 
         /// <summary>
