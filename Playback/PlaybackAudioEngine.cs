@@ -33,6 +33,15 @@ namespace EditSharp.Playback
     ///     see Playback's own remarks for why resampling PCM to arbitrary
     ///     speeds without also touching pitch is a separate piece of work,
     ///     not attempted here.
+    ///
+    /// SYNCHRONIZED STARTUP / PAUSE: see PlaybackStartGate and
+    /// PlaybackPauseGate's own remarks. This engine's ffmpeg process starts
+    /// producing PCM into its stdout pipe as soon as it's spawned — before
+    /// the delivery loop below has necessarily started pacing, and even
+    /// while paused. That's fine by design in both cases: the OS pipe
+    /// buffer absorbs a bounded amount of backlog, and once it fills,
+    /// ffmpeg's own writes simply BLOCK — its decode pipeline self-throttles
+    /// with no signaling needed from us.
     /// </summary>
     internal sealed class PlaybackAudioEngine : IDisposable
     {
@@ -52,69 +61,82 @@ namespace EditSharp.Playback
 
         public async Task StartAsync(
             Timeline timeline, int fps, int canvasWidth, int canvasHeight,
-            TimeSpan startPosition, Action<AudioSampleEventArgs> onSample,
-            CancellationToken token)
+            TimeSpan startPosition, PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
+            Action<AudioSampleEventArgs> onSample, CancellationToken token)
         {
-            var graph = new InputGraph();
-            var contents = new Dictionary<Clip, ClipContent>();
-
-            foreach (Channel channel in timeline.Channels)
+            try
             {
-                foreach (Clip clip in channel.Clips.Values)
+                var graph = new InputGraph();
+                var contents = new Dictionary<Clip, ClipContent>();
+
+                foreach (Channel channel in timeline.Channels)
                 {
-                    if (contents.ContainsKey(clip)) continue;
+                    foreach (Clip clip in channel.Clips.Values)
+                    {
+                        if (contents.ContainsKey(clip)) continue;
 
-                    contents[clip] = await ClipContentBuilder.BuildAsync(
-                        clip, graph, canvasWidth, canvasHeight, fps, _tempFiles, audioOnly: true);
+                        contents[clip] = await ClipContentBuilder.BuildAsync(
+                            clip, graph, canvasWidth, canvasHeight, fps, _tempFiles, audioOnly: true);
+                    }
                 }
+
+                string audioLabel = AudioMixer.Compose(timeline, contents, graph);
+
+                string filterComplex = string.Join(";", graph.FilterLines);
+                string scriptPath = GraphUtilities.GetVideoTempFilePath($"playback_audiofilter_{Guid.NewGuid():N}.txt");
+                await File.WriteAllTextAsync(scriptPath, filterComplex, token);
+                _tempFiles.Add(scriptPath);
+
+                var args = new List<string> { "-y", "-v", "error" };
+                args.AddRange(GraphUtilities.FilterThreadingArgs());
+
+                foreach (var input in graph.Inputs)
+                {
+                    if (input.ExtraArgs != null) args.AddRange(input.ExtraArgs);
+                    args.Add("-i");
+                    args.Add(input.Path);
+                }
+
+                args.Add("-/filter_complex");
+                args.Add(scriptPath);
+                args.Add("-map");
+                args.Add($"[{audioLabel}]");
+                args.Add("-f");
+                args.Add("s16le");
+                args.Add("-ar");
+                args.Add(SampleRate.ToString());
+                args.Add("-ac");
+                args.Add(ChannelCount.ToString());
+                args.Add("pipe:1");
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = EditSharpConfig.FfmpegPath,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                foreach (string arg in args) psi.ArgumentList.Add(arg);
+
+                _process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                _process.Start();
+            }
+            catch (Exception ex)
+            {
+                //Video's ReadyAndWaitAsync would otherwise hang forever
+                //waiting for an audio participant that's never coming — see
+                //PlaybackStartGate's own remarks.
+                startGate.Fault(ex);
+                throw;
             }
 
-            string audioLabel = AudioMixer.Compose(timeline, contents, graph);
-
-            string filterComplex = string.Join(";", graph.FilterLines);
-            string scriptPath = GraphUtilities.GetVideoTempFilePath($"playback_audiofilter_{Guid.NewGuid():N}.txt");
-            await File.WriteAllTextAsync(scriptPath, filterComplex, token);
-            _tempFiles.Add(scriptPath);
-
-            var args = new List<string> { "-y", "-v", "error" };
-            args.AddRange(GraphUtilities.FilterThreadingArgs());
-
-            foreach (var input in graph.Inputs)
-            {
-                if (input.ExtraArgs != null) args.AddRange(input.ExtraArgs);
-                args.Add("-i");
-                args.Add(input.Path);
-            }
-
-            args.Add("-/filter_complex");
-            args.Add(scriptPath);
-            args.Add("-map");
-            args.Add($"[{audioLabel}]");
-            args.Add("-f");
-            args.Add("s16le");
-            args.Add("-ar");
-            args.Add(SampleRate.ToString());
-            args.Add("-ac");
-            args.Add(ChannelCount.ToString());
-            args.Add("pipe:1");
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = EditSharpConfig.FfmpegPath,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            foreach (string arg in args) psi.ArgumentList.Add(arg);
-
-            _process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-            _process.Start();
-
-            _pumpTask = Task.Run(() => PumpAsync(startPosition, onSample, token), token);
+            _pumpTask = Task.Run(() => PumpAsync(startPosition, startGate, pauseGate, onSample, token), token);
         }
 
-        private async Task PumpAsync(TimeSpan startPosition, Action<AudioSampleEventArgs> onSample, CancellationToken token)
+        private async Task PumpAsync(
+            TimeSpan startPosition, PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
+            Action<AudioSampleEventArgs> onSample, CancellationToken token)
         {
             if (_process == null) return;
 
@@ -123,7 +145,9 @@ namespace EditSharp.Playback
 
             // Discard audio before startPosition as fast as the pipe will
             // give it up — no pacing here, this is "seek by skipping,"
-            // flagged above as the known-inefficient path.
+            // flagged above as the known-inefficient path. Deliberately NOT
+            // gated on startGate — this is real seek-related work, not
+            // setup, and shouldn't be held back waiting for video.
             long bytesToSkip = (long)(startPosition.TotalSeconds * BytesPerSecond);
             bytesToSkip -= bytesToSkip % BytesPerFrame;
 
@@ -135,11 +159,29 @@ namespace EditSharp.Playback
                 bytesToSkip -= read;
             }
 
+            //Skip phase (if any) is done — wait for video to also be ready
+            //before starting the clock. Same rule as the video side: nothing
+            //real between this and Stopwatch.StartNew().
+            try { await startGate.ReadyAndWaitAsync(token); }
+            catch (OperationCanceledException) { return; }
+
             var clock = Stopwatch.StartNew();
+            EditSharpConfig.Logger.LogVerbose("Audio pacing clock started.");
             long bytesDelivered = 0;
 
             while (!token.IsCancellationRequested)
             {
+                //Pause check BEFORE reading the next chunk — nothing new
+                //gets pulled off the pipe while paused (see class remarks
+                //on why that's enough to self-throttle ffmpeg too).
+                if (pauseGate.IsPaused)
+                {
+                    clock.Stop();
+                    try { await pauseGate.WaitIfPausedAsync(token); }
+                    catch (OperationCanceledException) { break; }
+                    clock.Start();
+                }
+
                 int read = await stdout.ReadAsync(buffer.AsMemory(0, buffer.Length), token);
                 if (read <= 0) break; // process EOF — timeline audio exhausted
 

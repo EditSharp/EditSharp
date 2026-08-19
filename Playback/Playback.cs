@@ -23,23 +23,40 @@ namespace EditSharp.Playback
     /// before frame 0," and item 8/11's construction-site lesson was
     /// specifically about what duplicating that kind of logic costs.
     ///
-    /// CONFIG: takes a Blueprint rather than a bare Timeline, deliberately —
-    /// resolution/framerate/hardware accelerator are exactly the same
-    /// concept for playback as for a full render, so Playback doesn't carry
-    /// its own duplicate copies of them (an earlier pass here added
-    /// Width/Height/Fps/HardwareAccelerator fields directly on Playback;
-    /// corrected to reuse Blueprint instead). Blueprint.OutputDirectory,
-    /// VideoCodec, and AudioCodec are unused by playback but still required
-    /// to construct one, since Blueprint doesn't currently distinguish
-    /// "render target config" from "output file config" — flagged as an
-    /// awkward-but-accepted consequence of reuse, not fixed here.
+    /// CONFIG: Timeline + RenderSettings, not a Blueprint — an end consumer
+    /// shouldn't have to construct a full render blueprint (with an unused
+    /// OutputDirectory) just to play a timeline back. RenderSettings is
+    /// shared with Renderer so the two don't carry duplicate, potentially
+    /// drifting copies of resolution/framerate/hardware-accelerator config.
     ///
     /// Position IS DELIBERATELY READ-ONLY FROM OUTSIDE. It exists for a
     /// consumer to ask "where is playback actually at right now," not as an
     /// input — a public setter would mean the video loop has to keep
     /// re-checking whether something external changed it out from under a
     /// running session. Starting from a nonzero position is a PARAMETER TO
-    /// Play(), not a pre-set on Position — see Play(TimeSpan?) below.
+    /// Play(), not a pre-set on Position — Seek's use case is fully covered
+    /// by Play(TimeSpan?) and was removed as a separate method
+    /// deliberately, not by accident.
+    ///
+    /// SYNCHRONIZED STARTUP (PlaybackStartGate): the video loop and the
+    /// audio engine each need real setup time before either can start
+    /// pacing itself, and that setup is asymmetric (video's is heavier —
+    /// see PlaybackStartGate's own remarks). Both loops now finish their
+    /// own setup, signal the gate, and only THEN start their respective
+    /// Stopwatch — this is the fix for an observed video/audio desync
+    /// (video visibly overtaking audio, timeline ending early) that traced
+    /// back to the two loops' pacing clocks starting at different real
+    /// wall-clock moments.
+    ///
+    /// PAUSE VS STOP (PlaybackPauseGate): genuinely different operations.
+    /// Pause() halts both loops in place via a resettable gate they check
+    /// every iteration — decoders, the GpuContext/SkSurfacePool, and
+    /// PlaybackAudioEngine's ffmpeg process all stay alive, ready to
+    /// Resume() immediately. Stop() tears the whole session down via
+    /// cancellation and is for when you're actually done — e.g. swapping
+    /// Timeline out from under a session, which Pause() specifically does
+    /// NOT support (everything paused stays keyed to the Timeline that was
+    /// playing when Pause() was called).
     ///
     /// KNOWN GAPS — tracked, not hidden, and re-prioritized per direct
     /// feedback (highest priority first):
@@ -64,16 +81,24 @@ namespace EditSharp.Playback
     ///      only changes delivery cadence, which doesn't save real work at
     ///      high speeds. Needs a decode strategy that can actually skip
     ///      source frames, not just display them faster.
+    ///   5. PlaybackMode is currently DECORATIVE — declared, defaults to
+    ///      SyncToAudio, but nothing reads it yet. Actual behavior today
+    ///      (synchronized-at-startup independent clocks, delay if behind,
+    ///      never skip to catch up) is closest to EveryFrame regardless of
+    ///      what the field is set to. Wiring real SyncToAudio (video pacing
+    ///      off audio's actual delivered position rather than its own
+    ///      Stopwatch at all) and FrameDropping (skip rather than delay
+    ///      when behind) is future work.
     /// </summary>
     public class Playback : IDisposable
     {
-        //blueprint describing what to play back and how — see class remarks
-        //for why this replaced a bare Timeline plus duplicate config fields
+        //timeline + settings describing what to play back and how
         public required Timeline Timeline;
 
         public required RenderSettings RenderSettings;
-        
+
         //determines what aspect controls the pace of playback
+        //NOTE: not yet wired to any actual behavior — see class remarks, gap 5
         public PlaybackMode PlaybackMode = PlaybackMode.SyncToAudio;
 
         //speed at which to play back the timeline
@@ -86,8 +111,11 @@ namespace EditSharp.Playback
         //from outside deliberately, see class remarks
         public TimeSpan Position { get; private set; } = TimeSpan.Zero;
 
-        //publicly accessible check if playback is in progress
+        //publicly accessible check if a session is active (playing OR paused)
         public bool IsPlaying => _isPlaying;
+
+        //publicly accessible check if the active session is currently paused
+        public bool IsPaused => _pauseGate?.IsPaused ?? false;
 
         public event EventHandler<AudioSampleEventArgs>? AudioSample;
 
@@ -119,13 +147,14 @@ namespace EditSharp.Playback
         private CancellationTokenSource? _cts;
         private Task? _videoTask;
         private PlaybackAudioEngine? _audioEngine;
+        private PlaybackPauseGate? _pauseGate;
 
         /// <summary>
         /// Starts playback. startPosition, when given, is where playback
         /// BEGINS — a one-time parameter to this call, not a pre-set on
-        /// Position (Position only ever reflects where the engine actually
-        /// is, updated internally as frames are delivered). Omit it to
-        /// resume from wherever Position last stopped.
+        /// Position. Omit it to resume from wherever Position last stopped.
+        /// No-op if a session is already active (playing OR paused) — call
+        /// Resume() to come back from a pause, not Play() again.
         /// </summary>
         public void Play(TimeSpan? startPosition = null)
         {
@@ -139,7 +168,7 @@ namespace EditSharp.Playback
                         "— see Playback's class remarks, gap 1.");
 
                 if (Timeline.Channels.Count == 0)
-                    throw new ArgumentException("Blueprint.Timeline must contain at least one Channel.");
+                    throw new ArgumentException("Timeline must contain at least one Channel.");
 
                 TimeSpan resolvedStart = startPosition ?? Position;
 
@@ -153,18 +182,30 @@ namespace EditSharp.Playback
                 _cts = new CancellationTokenSource();
                 CancellationToken token = _cts.Token;
 
-                _videoTask = Task.Run(() => VideoLoopAsync(token), token);
+                var pauseGate = new PlaybackPauseGate();
+                _pauseGate = pauseGate;
 
                 //audio v1: real-time only, see class remarks, gap 2
-                if (Math.Abs(Speed - 1f) < 0.0001f)
+                bool audioParticipates = Math.Abs(Speed - 1f) < 0.0001f;
+
+                //One shared gate so video's pacing clock and (if present)
+                //audio's pacing clock both start at the SAME real moment —
+                //see PlaybackStartGate's remarks for why this, specifically,
+                //was the desync bug's mechanism.
+                var startGate = new PlaybackStartGate(audioParticipates ? 2 : 1);
+
+                _videoTask = Task.Run(() => VideoLoopAsync(token, startGate, pauseGate), token);
+
+                if (audioParticipates)
                 {
                     var audioEngine = new PlaybackAudioEngine();
                     _audioEngine = audioEngine;
 
                     _ = audioEngine
                         .StartAsync(
-                            Timeline, RenderSettings.Framerate, (int)RenderSettings.Resolution.X, (int)RenderSettings.Resolution.Y,
-                            Position, args => OnAudioSample(args), token)
+                            Timeline, RenderSettings.Framerate,
+                            (int)RenderSettings.Resolution.X, (int)RenderSettings.Resolution.Y,
+                            Position, startGate, pauseGate, args => OnAudioSample(args), token)
                         .ContinueWith(t =>
                         {
                             if (t.IsFaulted)
@@ -181,6 +222,49 @@ namespace EditSharp.Playback
             }
         }
 
+        /// <summary>
+        /// Halts playback IN PLACE — decoders, the GPU context/surface
+        /// pool, and PlaybackAudioEngine's ffmpeg process all stay open,
+        /// ready to continue immediately via Resume(). Not the same
+        /// operation as Stop() — see class remarks. No-op if not currently
+        /// playing.
+        /// </summary>
+        public void Pause()
+        {
+            lock (_stateLock)
+            {
+                if (!_isPlaying || _pauseGate == null) return;
+                _pauseGate.Pause();
+            }
+
+            EditSharpConfig.Logger.LogVerbose("Playback paused.");
+        }
+
+        /// <summary>
+        /// Resumes a session previously halted by Pause(). No-op if not
+        /// currently playing or not currently paused.
+        /// </summary>
+        public void Resume()
+        {
+            lock (_stateLock)
+            {
+                if (!_isPlaying || _pauseGate == null) return;
+                _pauseGate.Resume();
+            }
+
+            EditSharpConfig.Logger.LogVerbose("Playback resumed.");
+        }
+
+        /// <summary>
+        /// Fully tears the session down — cancels both loops, disposes the
+        /// audio engine (which kills its ffmpeg process), and lets
+        /// VideoLoopAsync's own finally block dispose its decoders/GPU
+        /// context/surface pool. Use this when actually done with the
+        /// session, e.g. before swapping Timeline out for a different one.
+        /// For a temporary halt you intend to Resume() from, use Pause()
+        /// instead — it's meaningfully cheaper (no decoder/process
+        /// teardown-and-reopen) and that's the whole reason it exists.
+        /// </summary>
         public void Stop()
         {
             CancellationTokenSource? cts;
@@ -191,8 +275,12 @@ namespace EditSharp.Playback
                 _isPlaying = false;
                 cts = _cts;
                 _cts = null;
+                _pauseGate = null;
             }
 
+            //Cancelling unblocks a paused loop too — WaitIfPausedAsync
+            //awaits the SAME token, so Stop() while paused doesn't need any
+            //special-casing to also call Resume() first.
             cts?.Cancel();
 
             try { _videoTask?.GetAwaiter().GetResult(); }
@@ -205,7 +293,7 @@ namespace EditSharp.Playback
             _videoTask = null;
         }
 
-        private async Task VideoLoopAsync(CancellationToken token)
+        private async Task VideoLoopAsync(CancellationToken token, PlaybackStartGate startGate, PlaybackPauseGate pauseGate)
         {
             int width = (int)RenderSettings.Resolution.X;
             int height = (int)RenderSettings.Resolution.Y;
@@ -238,11 +326,30 @@ namespace EditSharp.Playback
                 int startFrame = (int)(startPosition.TotalSeconds * fps);
                 int totalFrames = Math.Max(1, (int)Math.Ceiling(Timeline.Duration.TotalSeconds * fps));
 
+                //Setup's done — wait for audio (if any) to also be ready
+                //before starting the clock. Nothing between this line and
+                //Stopwatch.StartNew() should do real work; that gap is
+                //exactly what this gate exists to eliminate.
+                await startGate.ReadyAndWaitAsync(token);
                 var clock = Stopwatch.StartNew();
+                EditSharpConfig.Logger.LogVerbose("Video pacing clock started.");
 
                 for (int frameIndex = startFrame; frameIndex < totalFrames; frameIndex++)
                 {
                     if (token.IsCancellationRequested) return;
+
+                    //Pause check BEFORE rendering the next frame — nothing
+                    //new gets produced while paused. Stopwatch.Stop()/
+                    //Start() resumes elapsed-time accounting exactly where
+                    //it left off rather than resetting, so the pacing math
+                    //below needs no other change to account for a pause.
+                    if (pauseGate.IsPaused)
+                    {
+                        clock.Stop();
+                        try { await pauseGate.WaitIfPausedAsync(token); }
+                        catch (OperationCanceledException) { return; }
+                        clock.Start();
+                    }
 
                     FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps, nativeSizes);
 
