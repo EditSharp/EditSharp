@@ -42,6 +42,22 @@ namespace EditSharp.Playback
     /// buffer absorbs a bounded amount of backlog, and once it fills,
     /// ffmpeg's own writes simply BLOCK — its decode pipeline self-throttles
     /// with no signaling needed from us.
+    ///
+    /// AUDIO LEAD BURST (Playback.AudioLeadTime): before the synchronized
+    /// start, this engine can deliver up to AudioLeadTime worth of chunks
+    /// completely UNPACED — no Task.Delay, as fast as the pipe gives it up
+    /// — so the consumer's own buffer (e.g. NAudio's BufferedWaveProvider)
+    /// has real backlog before its output device starts pulling. This does
+    /// NOT create a content-position offset from video: the burst chunks
+    /// sit unplayed in the consumer's buffer until the consumer starts its
+    /// device (on PlaybackStarted), and bytesDelivered simply carries
+    /// through from the burst into the paced loop below with the SAME
+    /// Stopwatch starting fresh right after the burst — so the very first
+    /// post-burst pacing check naturally computes a large "ahead of
+    /// schedule" delay equal to AudioLeadTime, which is exactly the real
+    /// time the consumer's device needs to drain that backlog before
+    /// wanting more. No separate offset math needed anywhere for this to
+    /// come out correct.
     /// </summary>
     internal sealed class PlaybackAudioEngine : IDisposable
     {
@@ -61,7 +77,8 @@ namespace EditSharp.Playback
 
         public async Task StartAsync(
             Timeline timeline, int fps, int canvasWidth, int canvasHeight,
-            TimeSpan startPosition, PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
+            TimeSpan startPosition, TimeSpan audioLeadTime,
+            PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
             Action<AudioSampleEventArgs> onSample, CancellationToken token)
         {
             try
@@ -131,11 +148,12 @@ namespace EditSharp.Playback
                 throw;
             }
 
-            _pumpTask = Task.Run(() => PumpAsync(startPosition, startGate, pauseGate, onSample, token), token);
+            _pumpTask = Task.Run(() => PumpAsync(startPosition, audioLeadTime, startGate, pauseGate, onSample, token), token);
         }
 
         private async Task PumpAsync(
-            TimeSpan startPosition, PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
+            TimeSpan startPosition, TimeSpan audioLeadTime,
+            PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
             Action<AudioSampleEventArgs> onSample, CancellationToken token)
         {
             if (_process == null) return;
@@ -159,15 +177,35 @@ namespace EditSharp.Playback
                 bytesToSkip -= read;
             }
 
-            //Skip phase (if any) is done — wait for video to also be ready
-            //before starting the clock. Same rule as the video side: nothing
-            //real between this and Stopwatch.StartNew().
+            long bytesDelivered = 0;
+
+            // AUDIO LEAD BURST — see class remarks. Unpaced on purpose: no
+            // Task.Delay here at all, just read-and-deliver as fast as the
+            // pipe allows, until AudioLeadTime worth has gone out.
+            long leadBytes = (long)(audioLeadTime.TotalSeconds * BytesPerSecond);
+            leadBytes -= leadBytes % BytesPerFrame;
+
+            while (bytesDelivered < leadBytes && !token.IsCancellationRequested)
+            {
+                int toRead = (int)Math.Min(buffer.Length, leadBytes - bytesDelivered);
+                int read = await stdout.ReadAsync(buffer.AsMemory(0, toRead), token);
+                if (read <= 0) break; // timeline shorter than the requested lead
+
+                bytesDelivered += read;
+                TimeSpan burstPosition = startPosition + TimeSpan.FromSeconds(bytesDelivered / (double)BytesPerSecond);
+                onSample(new AudioSampleEventArgs(buffer, read, SampleRate, ChannelCount, burstPosition));
+            }
+
+            //Lead burst (if any) is delivered — now wait for video to also
+            //be ready, exactly like before, and start the REAL pacing
+            //clock. bytesDelivered already reflects the burst, so the very
+            //first post-burst pacing check below computes the correct
+            //catch-up delay automatically — see class remarks.
             try { await startGate.ReadyAndWaitAsync(token); }
             catch (OperationCanceledException) { return; }
 
             var clock = Stopwatch.StartNew();
             EditSharpConfig.Logger.LogVerbose("Audio pacing clock started.");
-            long bytesDelivered = 0;
 
             while (!token.IsCancellationRequested)
             {

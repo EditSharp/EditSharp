@@ -38,15 +38,18 @@ namespace EditSharp.Playback
     /// by Play(TimeSpan?) and was removed as a separate method
     /// deliberately, not by accident.
     ///
-    /// SYNCHRONIZED STARTUP (PlaybackStartGate): the video loop and the
-    /// audio engine each need real setup time before either can start
-    /// pacing itself, and that setup is asymmetric (video's is heavier —
-    /// see PlaybackStartGate's own remarks). Both loops now finish their
-    /// own setup, signal the gate, and only THEN start their respective
-    /// Stopwatch — this is the fix for an observed video/audio desync
+    /// SYNCHRONIZED STARTUP (PlaybackStartGate + AudioLeadTime): the video
+    /// loop and the audio engine each need real setup time before either
+    /// can start pacing itself, and that setup is asymmetric (video's is
+    /// heavier — see PlaybackStartGate's own remarks). Both loops finish
+    /// their own setup, signal the gate, and only THEN start their
+    /// respective Stopwatch — this closed an observed video/audio desync
     /// (video visibly overtaking audio, timeline ending early) that traced
     /// back to the two loops' pacing clocks starting at different real
-    /// wall-clock moments.
+    /// wall-clock moments. AudioLeadTime, separately, lets audio deliver a
+    /// burst of backlog to the consumer BEFORE that synchronized start —
+    /// see PlaybackAudioEngine's own remarks for why that's safe and
+    /// doesn't reintroduce a content-position offset.
     ///
     /// PAUSE VS STOP (PlaybackPauseGate): genuinely different operations.
     /// Pause() halts both loops in place via a resettable gate they check
@@ -107,14 +110,14 @@ namespace EditSharp.Playback
         //silently clamped. Values != 1 currently play video only — gap 2.
         public float Speed = 1f;
 
-        //optional hold, applied after video/audio setup finishes but
-        //before either starts delivering anything, letting a real audio
-        //output device build backlog before playback becomes visible or
-        //audible. See PlaybackStartGate's own remarks — this alone doesn't
-        //fix a consumer that starts its output device immediately
-        //regardless of backlog; the consumer still has to defer that
-        //itself. Defaults to zero (no hold, prior behavior unchanged).
-        public TimeSpan PreRoll = TimeSpan.Zero;
+        //how much audio to deliver to the consumer AHEAD of when playback
+        //actually starts, so an audio output device (WasapiOut, etc.) can
+        //be primed with real backlog before it starts pulling — instead of
+        //starting cold. See PlaybackAudioEngine's burst-delivery remarks
+        //for the mechanism. Only affects sessions where audio participates
+        //(Speed == 1); ignored otherwise. Defaults to zero (no lead, prior
+        //behavior unchanged).
+        public TimeSpan AudioLeadTime = TimeSpan.Zero;
 
         //how far along the playback is through the timeline — READ ONLY
         //from outside deliberately, see class remarks
@@ -140,6 +143,20 @@ namespace EditSharp.Playback
         protected virtual void OnVideoFrame(VideoFrameEventArgs e)
         {
             VideoFrame?.Invoke(this, e);
+        }
+
+        public event EventHandler? PlaybackStarted;
+
+        //raised exactly once per session, at the real moment video's clock
+        //starts (i.e. once setup AND, if audio participates, its lead
+        //burst are both done). This is the consumer's cue that NOW is when
+        //an audio output device should actually start pulling — e.g. call
+        //WasapiOut.Play() from this handler instead of counting samples.
+        //May fire from a background thread — marshal to the UI thread
+        //yourself if touching UI from a handler.
+        protected virtual void OnPlaybackStarted(EventArgs e)
+        {
+            PlaybackStarted?.Invoke(this, e);
         }
 
         public event EventHandler? EndReached;
@@ -198,10 +215,13 @@ namespace EditSharp.Playback
                 bool audioParticipates = Math.Abs(Speed - 1f) < 0.0001f;
 
                 //One shared gate so video's pacing clock and (if present)
-                //audio's pacing clock both start at the SAME real moment —
-                //see PlaybackStartGate's remarks for why this, specifically,
-                //was the desync bug's mechanism.
-                var startGate = new PlaybackStartGate(audioParticipates ? 2 : 1, PreRoll);
+                //audio's pacing clock both start at the SAME real moment.
+                //"Ready" for audio now means "setup AND lead burst done" —
+                //see PlaybackAudioEngine. onReleased fires PlaybackStarted
+                //exactly once, right as the gate opens.
+                var startGate = new PlaybackStartGate(
+                    audioParticipates ? 2 : 1,
+                    onReleased: () => OnPlaybackStarted(EventArgs.Empty));
 
                 _videoTask = Task.Run(() => VideoLoopAsync(token, startGate, pauseGate), token);
 
@@ -214,7 +234,7 @@ namespace EditSharp.Playback
                         .StartAsync(
                             Timeline, RenderSettings.Framerate,
                             (int)RenderSettings.Resolution.X, (int)RenderSettings.Resolution.Y,
-                            Position, startGate, pauseGate, args => OnAudioSample(args), token)
+                            Position, AudioLeadTime, startGate, pauseGate, args => OnAudioSample(args), token)
                         .ContinueWith(t =>
                         {
                             if (t.IsFaulted)
