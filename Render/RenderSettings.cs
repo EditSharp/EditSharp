@@ -17,6 +17,9 @@ public struct RenderSettings
         //what encoding to render audio with
         public AudioCodec AudioCodec { get; set; } = AudioCodec.AAC;
 
+         //whether to use gpu acceleration and what kind
+        public HardwareAccelerator HardwareAccelerator { get; set; } = HardwareAccelerator.GPU;
+
         public RenderSettings() { }
 
     }

@@ -69,7 +69,9 @@ namespace EditSharp.Playback
     {
         //blueprint describing what to play back and how — see class remarks
         //for why this replaced a bare Timeline plus duplicate config fields
-        public required Blueprint Blueprint;
+        public required Timeline Timeline;
+
+        public required RenderSettings RenderSettings;
         
         //determines what aspect controls the pace of playback
         public PlaybackMode PlaybackMode = PlaybackMode.SyncToAudio;
@@ -83,6 +85,9 @@ namespace EditSharp.Playback
         //how far along the playback is through the timeline — READ ONLY
         //from outside deliberately, see class remarks
         public TimeSpan Position { get; private set; } = TimeSpan.Zero;
+
+        //publicly accessible check if playback is in progress
+        public bool IsPlaying => _isPlaying;
 
         public event EventHandler<AudioSampleEventArgs>? AudioSample;
 
@@ -128,21 +133,19 @@ namespace EditSharp.Playback
             {
                 if (_isPlaying) return;
 
-                Timeline timeline = Blueprint.Timeline;
-
                 if (Speed <= 0f)
                     throw new NotSupportedException(
                         "Playback.Speed <= 0 (reverse or stopped-via-speed) is not supported yet " +
                         "— see Playback's class remarks, gap 1.");
 
-                if (timeline.Channels.Count == 0)
+                if (Timeline.Channels.Count == 0)
                     throw new ArgumentException("Blueprint.Timeline must contain at least one Channel.");
 
                 TimeSpan resolvedStart = startPosition ?? Position;
 
-                if (resolvedStart < TimeSpan.Zero || resolvedStart > timeline.Duration)
+                if (resolvedStart < TimeSpan.Zero || resolvedStart > Timeline.Duration)
                     throw new ArgumentOutOfRangeException(nameof(startPosition),
-                        $"startPosition must be within [0, {timeline.Duration}].");
+                        $"startPosition must be within [0, {Timeline.Duration}].");
 
                 Position = resolvedStart;
 
@@ -160,7 +163,7 @@ namespace EditSharp.Playback
 
                     _ = audioEngine
                         .StartAsync(
-                            timeline, Blueprint.Framerate, Blueprint.Resolution.Item1, Blueprint.Resolution.Item2,
+                            Timeline, RenderSettings.Framerate, (int)RenderSettings.Resolution.X, (int)RenderSettings.Resolution.Y,
                             Position, args => OnAudioSample(args), token)
                         .ContinueWith(t =>
                         {
@@ -204,10 +207,9 @@ namespace EditSharp.Playback
 
         private async Task VideoLoopAsync(CancellationToken token)
         {
-            Timeline timeline = Blueprint.Timeline;
-            int width = Blueprint.Resolution.Item1;
-            int height = Blueprint.Resolution.Item2;
-            int fps = Blueprint.Framerate;
+            int width = (int)RenderSettings.Resolution.X;
+            int height = (int)RenderSettings.Resolution.Y;
+            int fps = RenderSettings.Framerate;
 
             var tempFiles = new ConcurrentBag<string>();
             var nativeSizes = new ConcurrentDictionary<Clip, (int, int)>();
@@ -217,24 +219,24 @@ namespace EditSharp.Playback
             try
             {
                 await RenderContentPreparation.PrepareContentAsync(
-                    timeline, width, height, Blueprint.HardwareAccelerator,
+                    Timeline, width, height, RenderSettings.HardwareAccelerator,
                     nativeSizes, staticImagePaths, decodePlans, tempFiles);
 
                 TimeSpan startPosition = Position;
-                Dictionary<Clip, TimeSpan> seekOffsets = ComputeSeekOffsets(timeline, startPosition);
+                Dictionary<Clip, TimeSpan> seekOffsets = ComputeSeekOffsets(Timeline, startPosition);
 
                 Dictionary<int, List<Clip>> decoderReleaseSchedule =
-                    RenderContentPreparation.BuildDecoderReleaseSchedule(timeline, fps);
+                    RenderContentPreparation.BuildDecoderReleaseSchedule(Timeline, fps);
 
                 using var contentSource = new SkClipContentSource(
                     fps, nativeSizes, staticImagePaths, decodePlans, seekOffsets);
 
-                using GpuContext gpuContext = GpuContext.Create(Blueprint.HardwareAccelerator);
+                using GpuContext gpuContext = GpuContext.Create(RenderSettings.HardwareAccelerator);
                 using var surfacePool = new SkSurfacePool(
-                    gpuContext.GRContext, width, height, timeline.Channels.Count);
+                    gpuContext.GRContext, width, height, Timeline.Channels.Count);
 
                 int startFrame = (int)(startPosition.TotalSeconds * fps);
-                int totalFrames = Math.Max(1, (int)Math.Ceiling(timeline.Duration.TotalSeconds * fps));
+                int totalFrames = Math.Max(1, (int)Math.Ceiling(Timeline.Duration.TotalSeconds * fps));
 
                 var clock = Stopwatch.StartNew();
 
@@ -242,7 +244,7 @@ namespace EditSharp.Playback
                 {
                     if (token.IsCancellationRequested) return;
 
-                    FrameState state = FrameStateResolver.Resolve(timeline, frameIndex, fps, nativeSizes);
+                    FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps, nativeSizes);
 
                     (byte[] buffer, int length) = SkFrameCompositor.RenderFrame(
                         state, contentSource, width, height, fps, surfacePool);
