@@ -91,9 +91,9 @@ namespace EditSharp.Render
         private static async Task RenderCoreAsync(Blueprint blueprint, ConcurrentBag<string> tempFiles)
         {
             Timeline timeline = blueprint.Timeline;
-            int width = blueprint.Resolution.Item1;
-            int height = blueprint.Resolution.Item2;
-            int fps = blueprint.Framerate;
+            int width = (int)blueprint.RenderSettings.Resolution.X;
+            int height = (int)blueprint.RenderSettings.Resolution.Y;
+            int fps = blueprint.RenderSettings.Framerate;
 
             //ConcurrentDictionary rather than plain Dictionary: PrepareContentAsync
             //below runs one task per clip needing probing/rasterizing, all
@@ -108,7 +108,7 @@ namespace EditSharp.Render
 
             var prepSw = Stopwatch.StartNew();
             await RenderContentPreparation.PrepareContentAsync(
-                timeline, width, height, blueprint.HardwareAccelerator,
+                timeline, width, height, blueprint.RenderSettings.HardwareAccelerator,
                 nativeSizes, staticImagePaths, decodePlans, tempFiles);
             EditSharpConfig.Logger.LogVerbose($"Content prepared in {prepSw.ElapsedMilliseconds}ms.");
 
@@ -140,7 +140,7 @@ namespace EditSharp.Render
             // contents are only valid while that context is). Seeded with one
             // canvas-sized surface per channel — see SkSurfacePool's own
             // remarks for why that count, specifically.
-            using GpuContext gpuContext = GpuContext.Create(blueprint.HardwareAccelerator);
+            using GpuContext gpuContext = GpuContext.Create(blueprint.RenderSettings.HardwareAccelerator);
             using var surfacePool = new SkSurfacePool(
                 gpuContext.GRContext, width, height, timeline.Channels.Count);
 
@@ -257,10 +257,10 @@ namespace EditSharp.Render
 
             string audioLabel = AudioMixer.Compose(blueprint.Timeline, contents, audioGraph);
 
-            bool isGif = blueprint.VideoCodec == VideoCodec.GIF;
+            bool isGif = blueprint.RenderSettings.VideoCodec == VideoCodec.GIF;
             (string videoEncoderName, List<string> videoQualityArgs) =
                 await FfmpegRunner.GetVideoEncoderSettingsAsync(
-                    blueprint.VideoCodec, blueprint.HardwareAccelerator);
+                    blueprint.RenderSettings.VideoCodec, blueprint.RenderSettings.HardwareAccelerator);
 
             string filterComplex = string.Join(";", audioGraph.FilterLines);
             string scriptPath = GraphUtilities.GetVideoTempFilePath($"audiofilter_{Guid.NewGuid():N}.txt");
@@ -311,7 +311,7 @@ namespace EditSharp.Render
                 args.Add(videoEncoderName);
                 args.AddRange(videoQualityArgs);
 
-                string audioCodecName = Constants.AudioCodecNames[blueprint.AudioCodec];
+                string audioCodecName = Constants.AudioCodecNames[blueprint.RenderSettings.AudioCodec];
                 args.Add("-c:a");
                 args.Add(audioCodecName);
                 args.Add("-b:a");
@@ -358,10 +358,10 @@ namespace EditSharp.Render
             if (blueprint.Timeline.Channels.All(c => c.Clips.Count == 0))
                 throw new ArgumentException("Blueprint.Timeline contains no clips on any channel.");
 
-            if (blueprint.Resolution.Item1 <= 0 || blueprint.Resolution.Item2 <= 0)
+            if ((int)blueprint.RenderSettings.Resolution.X <= 0 || (int)blueprint.RenderSettings.Resolution.Y <= 0)
                 throw new ArgumentException("Blueprint.Resolution must have positive width and height.");
 
-            if (blueprint.Framerate <= 0)
+            if (blueprint.RenderSettings.Framerate <= 0)
                 throw new ArgumentException("Blueprint.Framerate must be positive.");
 
             if (string.IsNullOrWhiteSpace(blueprint.OutputDirectory))

@@ -4,10 +4,13 @@ namespace EditSharp.Playback;
 
 public enum PlaybackMode
 {
-    //ensure every frame is played, delaying audio if needed
+    //ensure every frame is played 
+    //delays audio to hit target
     EveryFrame,
-    //ensure target frame rate is hit, skipping audio/video if needed
+    //ensure target frame rate is hit
+    //skips audio/video to hit target
     FrameDropping,
-    //ensure frame rate matches the pace of audio, delaying frame delivery if needed
+    //ensure frame rate matches the pace of audio
+    //delays/skips frames to hit target
     SyncToAudio
 }
