@@ -40,17 +40,31 @@ namespace EditSharp.Playback
     /// a session is active, and a locally-held last-known value otherwise —
     /// see the property itself.
     ///
-    /// SYNCHRONIZED STARTUP (PlaybackStartGate + AudioLeadTime): the video
-    /// loop and the audio engine each need real setup time before either
-    /// can start pacing itself, and that setup is asymmetric (video's is
-    /// heavier — see PlaybackStartGate's own remarks). Both loops finish
-    /// their own setup, signal the gate, and only THEN start pacing — this
-    /// closed an observed video/audio desync that traced back to the two
-    /// loops' pacing clocks starting at different real wall-clock moments.
-    /// AudioLeadTime, separately, lets audio deliver a burst of backlog to
-    /// the consumer BEFORE that synchronized start — see
-    /// PlaybackAudioEngine's own remarks for why that's safe and doesn't
-    /// reintroduce a content-position offset.
+    /// SYNCHRONIZED STARTUP (PlaybackStartGate): the video loop and the
+    /// audio engine each need real setup time before either can start
+    /// pacing itself, and that setup is asymmetric (video's is heavier —
+    /// see PlaybackStartGate's own remarks). Both loops finish their own
+    /// setup, signal the gate, and only THEN start pacing — this closed an
+    /// observed video/audio desync that traced back to the two loops'
+    /// pacing clocks starting at different real wall-clock moments.
+    ///
+    /// AUDIO DELIVERY IS "PLAY THIS NOW," DELIBERATELY NOT PRE-BUFFERED —
+    /// an earlier version of this had an AudioLeadTime field that let
+    /// audio deliver a burst of backlog to the consumer ahead of the
+    /// synchronized start, so an output device could be primed before
+    /// pulling. Removed. Two reasons: (1) the underrun problem it was
+    /// built to solve turned out to be entirely a buffer-corruption bug
+    /// elsewhere (fixed separately, confirmed by testing with ZERO
+    /// pre-buffering afterward), not a genuine backlog need; (2) it's
+    /// fundamentally incompatible with EveryFrame mode. A real output
+    /// device drains its buffer on its OWN free-running clock once
+    /// started — pre-buffering ahead of time controls how much backlog
+    /// exists, but can't make audio WAIT to become audible in sync with an
+    /// irregular video renderer, because the device isn't listening to our
+    /// pacing decisions once it's running. Delivering exactly when due,
+    /// with no lookahead, means delivery timing directly IS audible
+    /// timing — which is what following a leader (or being one) actually
+    /// requires.
     ///
     /// PLAYBACKMODE / LEADER-FOLLOWER (PlaybackReferenceClock): exactly one
     /// of video/audio is the LEADER for a given session — it paces itself
@@ -140,15 +154,6 @@ namespace EditSharp.Playback
         //silently clamped. Values != 1 currently play video only — gap 2.
         public float Speed = 1f;
 
-        //how much audio to deliver to the consumer AHEAD of when playback
-        //actually starts, so an audio output device (WasapiOut, etc.) can
-        //be primed with real backlog before it starts pulling — instead of
-        //starting cold. See PlaybackAudioEngine's burst-delivery remarks
-        //for the mechanism. Only affects sessions where audio participates
-        //(Speed == 1); ignored otherwise. Defaults to zero (no lead, prior
-        //behavior unchanged).
-        public TimeSpan AudioLeadTime = TimeSpan.Zero;
-
         //how far along the playback is through the timeline — READ ONLY
         //from outside deliberately, see class remarks. Reads live from the
         //active session's PlaybackReferenceClock while one exists;
@@ -237,6 +242,10 @@ namespace EditSharp.Playback
                 if (_isPlaying && startPosition == null)
                 {
                     _pauseGate?.Resume();
+                    //Un-freezes PlaybackReferenceClock's extrapolation —
+                    //see its own remarks on why it needs to be explicitly
+                    //paused/resumed, not just left to the pause gate alone.
+                    _referenceClock?.ResumeWallClock();
                     return;
                 }
             }
@@ -316,7 +325,7 @@ namespace EditSharp.Playback
                         .StartAsync(
                             Timeline, RenderSettings.Framerate,
                             (int)RenderSettings.Resolution.X, (int)RenderSettings.Resolution.Y,
-                            resolvedStart, AudioLeadTime, startGate, pauseGate,
+                            resolvedStart, startGate, pauseGate,
                             referenceClock, audioFollows, args => OnAudioSample(args), token)
                         .ContinueWith(t =>
                         {
@@ -347,6 +356,11 @@ namespace EditSharp.Playback
             {
                 if (!_isPlaying || _pauseGate == null) return;
                 _pauseGate.Pause();
+                //See PlaybackReferenceClock's remarks — without this,
+                //its extrapolation would keep advancing Position through
+                //the whole pause window and jump forward incorrectly the
+                //instant it resumes.
+                _referenceClock?.PauseWallClock();
             }
 
             EditSharpConfig.Logger.LogVerbose("Playback paused.");
@@ -521,11 +535,28 @@ namespace EditSharp.Playback
                             continue;
                         }
 
-                        if (followsReferenceClock && referenceClock.Position < framePosition)
+                        if (followsReferenceClock)
                         {
-                            try { await Task.Delay(PlaybackReferenceClock.PollInterval, token); }
-                            catch (OperationCanceledException) { return; }
-                            continue;
+                            TimeSpan gap = framePosition - referenceClock.Position;
+
+                            if (gap > TimeSpan.Zero)
+                            {
+                                //Compute the ACTUAL expected wait rather
+                                //than polling in small fixed increments —
+                                //see PlaybackReferenceClock's own remarks
+                                //on why this, not a shorter PollInterval,
+                                //is the real fix for follower jitter.
+                                //Clamped to at least PollInterval so a
+                                //wildly-off estimate (leader just paused,
+                                //e.g.) still gets re-checked promptly
+                                //rather than sleeping through it.
+                                TimeSpan wait = gap > PlaybackReferenceClock.PollInterval
+                                    ? gap : PlaybackReferenceClock.PollInterval;
+
+                                try { await Task.Delay(wait, token); }
+                                catch (OperationCanceledException) { return; }
+                                continue; // re-check — the estimate could've been off
+                            }
                         }
 
                         break;

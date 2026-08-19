@@ -43,45 +43,40 @@ namespace EditSharp.Playback
     /// ffmpeg's own writes simply BLOCK — its decode pipeline self-throttles
     /// with no signaling needed from us.
     ///
-    /// AUDIO LEAD BURST (Playback.AudioLeadTime): before the synchronized
-    /// start, this engine can deliver up to AudioLeadTime worth of chunks
-    /// completely UNPACED — no Task.Delay, as fast as the pipe gives it up
-    /// — so the consumer's own buffer (e.g. NAudio's BufferedWaveProvider)
-    /// has real backlog before its output device starts pulling. This does
-    /// NOT create a content-position offset from video: the burst chunks
-    /// sit unplayed in the consumer's buffer until the consumer starts its
-    /// device (on PlaybackStarted), and bytesDelivered simply carries
-    /// through from the burst into the paced loop below with the SAME
-    /// Stopwatch starting fresh right after the burst — so the very first
-    /// post-burst pacing check naturally computes a large "ahead of
-    /// schedule" delay equal to AudioLeadTime, which is exactly the real
-    /// time the consumer's device needs to drain that backlog before
-    /// wanting more. No separate offset math needed anywhere for this to
-    /// come out correct. Happens regardless of leader/follower role, below
-    /// — priming the output device is orthogonal to which stream paces
-    /// which.
+    /// DELIVERY IS "PLAY THIS NOW" — NO LOOKAHEAD, DELIBERATELY. An earlier
+    /// version of this delivered an unpaced AudioLeadTime burst before the
+    /// synchronized start, plus a standing DeliveryCushion at steady state,
+    /// so the consumer's output device would have backlog before pulling.
+    /// Removed both — see Playback's own remarks for the full reasoning.
+    /// Short version: the underrun problem that motivated them turned out
+    /// to be an unrelated buffer-corruption bug (fixed separately, and
+    /// confirmed by testing with zero pre-buffering afterward), and
+    /// pre-buffering ahead of time is fundamentally incompatible with
+    /// EveryFrame mode — a real output device drains on its own clock once
+    /// started, so handing it backlog early doesn't let us control WHEN
+    /// audio becomes audible, only how much backlog exists. Delivering
+    /// exactly when due means delivery timing directly IS audible timing.
     ///
     /// LEADER / FOLLOWER (PlaybackReferenceClock): in SyncToAudio mode,
-    /// this engine is the LEADER — behavior below is completely unchanged
-    /// from before PlaybackMode was wired: own Stopwatch, own
-    /// DeliveryCushion-based pacing. In EveryFrame mode, it's the FOLLOWER
-    /// instead — no local Stopwatch; paces against Playback's shared
-    /// reference clock (written by video) with the SAME DeliveryCushion
-    /// concept, just measured against the leader's reported position
-    /// rather than our own Elapsed. See Playback's own remarks for the
-    /// full mode mapping.
+    /// this engine is the LEADER — own Stopwatch, delivers each chunk
+    /// exactly when its own real-time schedule says it's due. In
+    /// EveryFrame mode, it's the FOLLOWER instead — no local Stopwatch;
+    /// paces against Playback's shared reference clock (written by video),
+    /// same "deliver exactly when due" principle, just measured against
+    /// the leader's reported position rather than our own Elapsed. See
+    /// Playback's own remarks for the full mode mapping.
     ///
     /// WHAT THE LEADER REPORTS, PRECISELY: startPosition + clock.Elapsed —
-    /// real elapsed time since our own pacing clock started — NOT
-    /// startPosition + targetElapsed (the content position of the chunk
-    /// we're about to hand off). Those two are consistently offset by
-    /// ~DeliveryCushion, by design: we deliver chunks ahead of when
-    /// they're actually needed, on purpose, to keep the consumer's output
-    /// device from underrunning. Reporting the handed-off position instead
-    /// of the real-elapsed one would make a follower (video, in
-    /// EveryFrame) pace itself ~DeliveryCushion ahead of what's actually
-    /// audible — a real bug an earlier version of this had, not a
-    /// hypothetical one.
+    /// real elapsed time since our own pacing clock started. With no
+    /// lookahead cushion anymore, this is now equal (not just close) to
+    /// `position` (startPosition + targetElapsed, the content position of
+    /// the chunk we're delivering) at the moment of delivery — the two
+    /// diverging by a cushion amount was specifically a symptom of the
+    /// pre-buffering design this reverts. Still computed via clock.Elapsed
+    /// rather than targetElapsed here, on principle: it's the more direct
+    /// measure of "what's actually true right now" and doesn't silently
+    /// reintroduce a gap if a cushion ever comes back for some other
+    /// reason later.
     /// </summary>
     internal sealed class PlaybackAudioEngine : IDisposable
     {
@@ -95,26 +90,13 @@ namespace EditSharp.Playback
         // large enough not to make a syscall per handful of samples.
         private const int ChunkBytes = BytesPerSecond / 10 - (BytesPerSecond / 10 % BytesPerFrame);
 
-        // How much content should always remain buffered-but-unconsumed in
-        // the CONSUMER's buffer at minimum — a standing cushion, not a
-        // "shave a few ms off" margin. This has to be meaningfully larger
-        // than ChunkBytes' own duration (~100ms) to do anything at all — an
-        // earlier version subtracted a small margin from a target that
-        // already included one chunk's duration, which nearly canceled out
-        // and delivered right at the underrun boundary instead of
-        // meaningfully before it. Applies identically whether we're
-        // measuring against our own Stopwatch (leader) or the reference
-        // clock (follower) — same concept either way. Deliberately a fixed
-        // internal constant, not a public knob.
-        private static readonly TimeSpan DeliveryCushion = TimeSpan.FromMilliseconds(300);
-
         private Process? _process;
         private Task? _pumpTask;
         private readonly ConcurrentBag<string> _tempFiles = new();
 
         public async Task StartAsync(
             Timeline timeline, int fps, int canvasWidth, int canvasHeight,
-            TimeSpan startPosition, TimeSpan audioLeadTime,
+            TimeSpan startPosition,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
             PlaybackReferenceClock referenceClock, bool followsReferenceClock,
             Action<AudioSampleEventArgs> onSample, CancellationToken token)
@@ -187,12 +169,12 @@ namespace EditSharp.Playback
             }
 
             _pumpTask = Task.Run(
-                () => PumpAsync(startPosition, audioLeadTime, startGate, pauseGate, referenceClock, followsReferenceClock, onSample, token),
+                () => PumpAsync(startPosition, startGate, pauseGate, referenceClock, followsReferenceClock, onSample, token),
                 token);
         }
 
         private async Task PumpAsync(
-            TimeSpan startPosition, TimeSpan audioLeadTime,
+            TimeSpan startPosition,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
             PlaybackReferenceClock referenceClock, bool followsReferenceClock,
             Action<AudioSampleEventArgs> onSample, CancellationToken token)
@@ -220,29 +202,9 @@ namespace EditSharp.Playback
 
             long bytesDelivered = 0;
 
-            // AUDIO LEAD BURST — see class remarks. Unpaced on purpose: no
-            // Task.Delay here at all, just read-and-deliver as fast as the
-            // pipe allows, until AudioLeadTime worth has gone out. Happens
-            // regardless of leader/follower role.
-            long leadBytes = (long)(audioLeadTime.TotalSeconds * BytesPerSecond);
-            leadBytes -= leadBytes % BytesPerFrame;
-
-            while (bytesDelivered < leadBytes && !token.IsCancellationRequested)
-            {
-                int toRead = (int)Math.Min(buffer.Length, leadBytes - bytesDelivered);
-                int read = await stdout.ReadAsync(buffer.AsMemory(0, toRead), token);
-                if (read <= 0) break; // timeline shorter than the requested lead
-
-                bytesDelivered += read;
-                TimeSpan burstPosition = startPosition + TimeSpan.FromSeconds(bytesDelivered / (double)BytesPerSecond);
-                onSample(new AudioSampleEventArgs(buffer, read, SampleRate, ChannelCount, burstPosition));
-            }
-
-            //Lead burst (if any) is delivered — now wait for video to also
-            //be ready, exactly like before, and start pacing for real.
-            //bytesDelivered already reflects the burst, so (when leading)
-            //the very first post-burst pacing check below computes the
-            //correct catch-up delay automatically — see class remarks.
+            //Setup (and skip, if any) is done — wait for video to also be
+            //ready before starting the clock. Nothing between this line and
+            //Stopwatch.StartNew() should do real work.
             try { await startGate.ReadyAndWaitAsync(token); }
             catch (OperationCanceledException) { return; }
 
@@ -292,27 +254,35 @@ namespace EditSharp.Playback
 
                     if (followsReferenceClock)
                     {
-                        //FOLLOWER: same standing-cushion concept as the
-                        //leader case, just measured against the leader's
-                        //reported position instead of our own Elapsed.
-                        if (referenceClock.Position < position - DeliveryCushion)
+                        //FOLLOWER: deliver exactly when the leader reaches
+                        //this chunk's due time — no lookahead. Computes the
+                        //actual expected wait rather than polling in fixed
+                        //increments — see PlaybackReferenceClock's remarks.
+                        TimeSpan gap = position - referenceClock.Position;
+
+                        if (gap > TimeSpan.Zero)
                         {
-                            try { await Task.Delay(PlaybackReferenceClock.PollInterval, token); }
+                            TimeSpan wait = gap > PlaybackReferenceClock.PollInterval
+                                ? gap : PlaybackReferenceClock.PollInterval;
+
+                            try { await Task.Delay(wait, token); }
                             catch (OperationCanceledException) { return; }
                             continue;
                         }
                     }
                     else
                     {
-                        //LEADER: maintain a STANDING CUSHION of buffered-
-                        //but-unconsumed content — see class remarks for why
-                        //this isn't "deliver exactly on schedule."
+                        //LEADER: deliver exactly when due against our own
+                        //Stopwatch — no standing cushion. Self-correcting
+                        //by construction: if one delay overshoots, the next
+                        //chunk's targetElapsed-vs-actualElapsed comparison
+                        //automatically computes a shorter (or zero) wait to
+                        //compensate, so error doesn't accumulate.
                         TimeSpan actualElapsed = clock!.Elapsed;
-                        TimeSpan bufferedAhead = targetElapsed - actualElapsed;
 
-                        if (bufferedAhead > DeliveryCushion)
+                        if (targetElapsed > actualElapsed)
                         {
-                            try { await Task.Delay(bufferedAhead - DeliveryCushion, token); }
+                            try { await Task.Delay(targetElapsed - actualElapsed, token); }
                             catch (OperationCanceledException) { return; }
                             continue;
                         }
@@ -321,21 +291,7 @@ namespace EditSharp.Playback
                     break;
                 }
 
-                if (!followsReferenceClock)
-                {
-                    //Report REAL elapsed time since the leader's own clock
-                    //started (startPosition + clock.Elapsed), NOT `position`
-                    //(startPosition + targetElapsed, i.e. content already
-                    //HANDED to the consumer's buffer). Those two are
-                    //consistently offset by ~DeliveryCushion, by design —
-                    //we deliver chunks ahead of when they're needed, on
-                    //purpose, to prevent underrun. A follower reading the
-                    //handed-off position instead of the real-time position
-                    //ends up pacing itself ~DeliveryCushion ahead of what's
-                    //actually audible — exactly the "audio drags behind
-                    //video" symptom this replaces.
-                    referenceClock.Report(startPosition + clock!.Elapsed);
-                }
+                if (!followsReferenceClock) referenceClock.Report(startPosition + clock!.Elapsed);
 
                 onSample(new AudioSampleEventArgs(buffer, read, SampleRate, ChannelCount, position));
             }
