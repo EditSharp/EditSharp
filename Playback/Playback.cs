@@ -70,6 +70,9 @@ namespace EditSharp.Playback
         //blueprint describing what to play back and how — see class remarks
         //for why this replaced a bare Timeline plus duplicate config fields
         public required Blueprint Blueprint;
+        
+        //determines what aspect controls the pace of playback
+        public PlaybackMode PlaybackMode = PlaybackMode.SyncToAudio;
 
         //speed at which to play back the timeline
         //NOTE: only positive values are currently supported — see class

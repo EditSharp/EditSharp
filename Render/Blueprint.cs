@@ -1,6 +1,7 @@
 using EditSharp.Components;
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Text;
 
 namespace EditSharp.Render
