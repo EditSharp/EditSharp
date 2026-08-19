@@ -145,6 +145,15 @@ namespace EditSharp.Playback
             VideoFrame?.Invoke(this, e);
         }
 
+        public event EventHandler? EndReached;
+
+        //raised when the end of the timeline is reached
+        //(reverse playback / "beginning reached" isn't supported yet — see class remarks)
+        protected virtual void OnEndReached(EventArgs e)
+        {
+            EndReached?.Invoke(this, e);
+        }
+
         public event EventHandler? PlaybackStarted;
 
         //raised exactly once per session, at the real moment video's clock
@@ -157,15 +166,6 @@ namespace EditSharp.Playback
         protected virtual void OnPlaybackStarted(EventArgs e)
         {
             PlaybackStarted?.Invoke(this, e);
-        }
-
-        public event EventHandler? EndReached;
-
-        //raised when the end of the timeline is reached
-        //(reverse playback / "beginning reached" isn't supported yet — see class remarks)
-        protected virtual void OnEndReached(EventArgs e)
-        {
-            EndReached?.Invoke(this, e);
         }
 
         private readonly object _stateLock = new();
@@ -355,15 +355,63 @@ namespace EditSharp.Playback
                 int startFrame = (int)(startPosition.TotalSeconds * fps);
                 int totalFrames = Math.Max(1, (int)Math.Ceiling(Timeline.Duration.TotalSeconds * fps));
 
-                //Setup's done — wait for audio (if any) to also be ready
-                //before starting the clock. Nothing between this line and
-                //Stopwatch.StartNew() should do real work; that gap is
-                //exactly what this gate exists to eliminate.
+                //WARM-UP: render the actual first frame NOW, before
+                //signaling ready — this is what pays the one-time GPU
+                //pipeline-state / hardware decoder session cost (observed:
+                //multiple seconds for a session's first rendered frame, a
+                //few ms for every frame after). Paying it here, during
+                //setup, means it's absorbed before PlaybackStarted fires
+                //rather than showing up as a multi-second stall right after
+                //the consumer's been told "now."
+                //
+                //This CANNOT be a separate, discarded test frame —
+                //SkSourceDecoder.NextFrame() is strictly sequential and
+                //one-shot per its own contract; decoding a throwaway frame
+                //0 and discarding it would leave the NEXT NextFrame() call
+                //returning decoder frame 1's content for what's supposed to
+                //be frame 0, a real off-by-one correctness bug. So this
+                //render below IS the actual first frame — its bytes are
+                //held and delivered as-is once the gate opens, not
+                //re-rendered.
+                //
+                //KNOWN GAP: this only warms up whatever's visible AT
+                //startFrame. A clip that first becomes visible later in the
+                //timeline still pays its own decoder-open cold-start cost
+                //the first time ITS decoder opens, mid-session — a smaller,
+                //separate hitch this doesn't address. Not fixed here.
+                FrameState warmupState = FrameStateResolver.Resolve(Timeline, startFrame, fps, nativeSizes);
+                (byte[] warmupBuffer, int warmupLength) = SkFrameCompositor.RenderFrame(
+                    warmupState, contentSource, width, height, fps, surfacePool);
+                EditSharpConfig.Logger.LogVerbose("Video warm-up frame rendered.");
+
+                //Setup (including warm-up) is done — wait for audio (if
+                //any) to also be ready before starting the clock. Nothing
+                //between this line and Stopwatch.StartNew() should do real
+                //work; that gap is exactly what this gate exists to
+                //eliminate.
                 await startGate.ReadyAndWaitAsync(token);
                 var clock = Stopwatch.StartNew();
                 EditSharpConfig.Logger.LogVerbose("Video pacing clock started.");
 
-                for (int frameIndex = startFrame; frameIndex < totalFrames; frameIndex++)
+                //Deliver the already-rendered warm-up frame immediately —
+                //targetElapsed for startFrame is 0, and there's no render
+                //cost left to pay, so this goes out with no delay.
+                Position = startPosition;
+                try
+                {
+                    OnVideoFrame(new VideoFrameEventArgs(warmupBuffer, warmupLength, width, height, Position));
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(warmupBuffer);
+                }
+
+                if (decoderReleaseSchedule.TryGetValue(startFrame, out List<Clip>? finishedAtStart))
+                {
+                    foreach (Clip clip in finishedAtStart) contentSource.ReleaseDecoder(clip);
+                }
+
+                for (int frameIndex = startFrame + 1; frameIndex < totalFrames; frameIndex++)
                 {
                     if (token.IsCancellationRequested) return;
 
