@@ -23,6 +23,14 @@ namespace EditSharp.Render
             [VideoCodec.AV1] = "libaom-av1",
             [VideoCodec.GIF] = "gif",
             [VideoCodec.FFV1] = "ffv1",
+
+            // Both added for OptimizedMediaCache — see that class's own
+            // remarks for why these two specifically, and Codecs.cs for why
+            // each is CPU-only with no hardware encoder entry in
+            // HardwareCodecNames below (neither has ever had one, on any
+            // vendor).
+            [VideoCodec.DNxHR] = "dnxhd", // handles modern DNxHR profiles too, not just legacy DNxHD
+            [VideoCodec.ProRes] = "prores_ks", // the modern, better-quality ProRes encoder, not the older "prores"
         };
 
         // Hardware encoder candidates per codec, in TRY-FIRST-TO-LAST priority
@@ -32,16 +40,10 @@ namespace EditSharp.Render
         // is a preference order, not an assumption any specific one exists.
         // GIF has no hardware equivalent at all — it always encodes on the
         // CPU regardless of HardwareAccelerator, since there's no such thing
-        // as a hardware GIF encoder.
-        //
-        // NOT VERIFIED against this project's actual installed ffmpeg build
-        // — h264_nvenc/hevc_nvenc are known-good from the pre-existing
-        // NvencCodecNames table this replaces, but av1_amf/h264_qsv/etc.
-        // names are written from general ffmpeg encoder-naming convention,
-        // not confirmed here. GetVideoEncoderSettingsAsync's own trial-encode
-        // probe is exactly the safety net for that — an unavailable or
-        // misnamed encoder just fails its probe and falls through to the
-        // next candidate, same as any other legitimately-unsupported one.
+        // as a hardware GIF encoder. DNxHR/ProRes are the same way, for the
+        // same underlying reason (no vendor has ever exposed a hardware
+        // codec block for either) — deliberately absent from this table
+        // rather than an oversight; see OptimizedMediaCache's class remarks.
         public static readonly Dictionary<VideoCodec, string[]> HardwareCodecNames = new()
         {
             [VideoCodec.H264] = ["h264_nvenc", "h264_amf", "h264_qsv"],
@@ -70,6 +72,12 @@ namespace EditSharp.Render
         // working — same lesson FfmpegRunner's own encode-side quality-arg
         // bug already taught once this pass (a probe that doesn't exercise
         // the REAL pipeline can pass while the real pipeline still breaks).
+        //
+        // NOTE: none of these candidates ever apply to OptimizedMediaCache's
+        // own output (DNxHR/ProRes) — that decode is always forced to
+        // DecodeHwAccelPlan.Software regardless of this table, since no
+        // candidate here (or anywhere else) has a hardware decode path for
+        // either codec. See RenderContentPreparation.ProbeVideoAsync.
         public static readonly (string Candidate, string? HwaccelOutputFormat, string? ScaleFilter)[]
             DecodeHwAccelCandidates =
         [

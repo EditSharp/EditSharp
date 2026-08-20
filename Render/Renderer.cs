@@ -34,7 +34,10 @@ namespace EditSharp.Render
     ///      up front exactly as before. NO OptimizedMediaBuilder step
     ///      anymore — that pre-render pass existed to give independent
     ///      per-frame ffmpeg processes fast random-access seeks (items 10,
-    ///      11), and there is no such process left to serve.
+    ///      11), and there is no such process left to serve. (A DIFFERENT,
+    ///      persistent optimized-media cache — OptimizedMediaCache — was
+    ///      added later, opportunistically, for a different reason: see
+    ///      RenderContentPreparation.ProbeVideoAsync's own remarks.)
     ///   2. Render every output frame SEQUENTIALLY (no concurrency gate —
     ///      see below) directly against an in-process SKCanvas
     ///      (SkFrameCompositor), appending each frame's raw RGBA8888 bytes
@@ -106,10 +109,19 @@ namespace EditSharp.Render
             var staticImagePaths = new ConcurrentDictionary<Clip, string>();
             var decodePlans = new ConcurrentDictionary<Clip, DecodeHwAccelPlan>();
 
+            //which file each video clip's decoder actually opens — its own
+            //Source.Path by default, or a persistent OptimizedMediaCache
+            //entry when RenderContentPreparation.ProbeVideoAsync found a
+            //big-enough one for that source's content. See that method's
+            //own remarks; this is a pure opportunistic speed-up; a render
+            //against a completely uncached project behaves identically to
+            //before this dictionary existed.
+            var decodeSourcePaths = new ConcurrentDictionary<Clip, string>();
+
             var prepSw = Stopwatch.StartNew();
             await RenderContentPreparation.PrepareContentAsync(
                 timeline, width, height, blueprint.RenderSettings.HardwareAccelerator,
-                nativeSizes, staticImagePaths, decodePlans, tempFiles);
+                nativeSizes, staticImagePaths, decodePlans, decodeSourcePaths, tempFiles);
             EditSharpConfig.Logger.LogVerbose($"Content prepared in {prepSw.ElapsedMilliseconds}ms.");
 
             //when a video clip's decoder can be torn down — computed once,
@@ -130,7 +142,7 @@ namespace EditSharp.Render
                 "(sequential, in-process Skia compositor).");
 
             using var contentSource = new SkClipContentSource(
-                fps, nativeSizes, staticImagePaths, decodePlans);
+                fps, nativeSizes, staticImagePaths, decodePlans, decodeSourcePaths: decodeSourcePaths);
 
             // One GRContext (or null -> software raster) for the whole render
             // session, and one surface pool sitting on top of it — both live

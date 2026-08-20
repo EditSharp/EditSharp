@@ -1,4 +1,5 @@
 using System;
+using EditSharp.Render;
 
 namespace EditSharp
 {
@@ -35,6 +36,80 @@ namespace EditSharp
         {
             get => _tempDirectory;
             set => _tempDirectory = value ?? throw new ArgumentNullException(nameof(value));
+        }
+
+        private static string _optimizedMediaDirectory = Path.Combine(AppContext.BaseDirectory, "OptimizedMedia");
+
+        /// <summary>
+        /// Root directory OptimizedMediaCache reads and writes its
+        /// persistent, content-addressed optimized media into — the
+        /// DNxHR/ProRes proxies (plus their .meta.json companions and the
+        /// hash-index.json sidecar MediaHasher maintains) that back fast
+        /// seeking during playback and, opportunistically, rendering.
+        ///
+        /// DEFAULT MATCHES TempDirectory'S OWN CONVENTION, DECIDED IN
+        /// CONVERSATION: AppContext.BaseDirectory (next to the host app's
+        /// own executable), not the OS temp path or app-data — this is
+        /// UNLIKE TempDirectory in one important way, though: this
+        /// directory's contents are meant to PERSIST across app runs
+        /// (that's the entire point of a content-addressed cache an NLE
+        /// can reopen a project against later — see OptimizedMediaCache's
+        /// own class remarks), so nothing in this pipeline ever deletes
+        /// from here the way Renderer/Playback sweep their own tempFiles
+        /// bags. A consumer that wants this cache cleared is expected to
+        /// delete the directory itself (or point this at a fresh one).
+        ///
+        /// Created lazily on first write, same as TempDirectory — nothing
+        /// needs to exist here ahead of time.
+        /// </summary>
+        public static string OptimizedMediaDirectory
+        {
+            get => _optimizedMediaDirectory;
+            set => _optimizedMediaDirectory = value ?? throw new ArgumentNullException(nameof(value));
+        }
+
+        /// <summary>
+        /// Which codec OptimizedMediaCache builds persistent optimized media
+        /// with — DNxHR or ProRes, decided in conversation to be
+        /// configurable rather than fixed to one. Defaults to
+        /// VideoCodec.DNxHR: an open format with no licensing friction,
+        /// where ffmpeg's encoder support is equally solid cross-platform —
+        /// see VideoCodec.DNxHR's own remarks for the fuller reasoning.
+        ///
+        /// CHANGING THIS MID-PROJECT DOES NOT INVALIDATE EXISTING CACHE
+        /// ENTRIES built under the previous codec — they simply stop being
+        /// matched by TryLoadExistingAsync (which checks the configured
+        /// codec against each entry's own recorded one) and are
+        /// transparently rebuilt, at the SAME hash-addressed path, the next
+        /// time something asks for that source's optimized media. See
+        /// OptimizedMediaCache.TryLoadExistingAsync's own remarks on why
+        /// DNxHR and ProRes sharing the ".mov" extension is deliberate, not
+        /// a collision to avoid.
+        /// </summary>
+        public static VideoCodec OptimizedMediaCodec { get; set; } = VideoCodec.DNxHR;
+
+        private static int _optimizedMediaMaxDimension = 3840;
+
+        /// <summary>
+        /// The cap OptimizedMediaCache builds a source's optimized media
+        /// at, on its longest axis — native resolution if the source is
+        /// already at or under this, otherwise downscaled (aspect
+        /// preserved, never upscaled) to fit it. Defaults to 3840 (a 4K
+        /// cap) — decided in conversation as "one canonical resolution per
+        /// source, capped at a configurable max" rather than multiple
+        /// quality tiers; see OptimizedMediaCache's class remarks for the
+        /// full reasoning, including what happens when a clip actually
+        /// needs MORE resolution than this cap provides (falls back to the
+        /// true original source rather than upscaling from the proxy — see
+        /// RenderContentPreparation.ProbeVideoAsync).
+        /// </summary>
+        public static int OptimizedMediaMaxDimension
+        {
+            get => _optimizedMediaMaxDimension;
+            set => _optimizedMediaMaxDimension = value > 0
+                ? value
+                : throw new ArgumentOutOfRangeException(
+                    nameof(value), "OptimizedMediaMaxDimension must be positive.");
         }
 
         /// <summary>

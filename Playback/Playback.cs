@@ -109,6 +109,22 @@ namespace EditSharp.Playback
     /// simply stops advancing), but the follower checks the pause gate
     /// directly as well, rather than relying on that side effect alone.
     ///
+    /// OPTIMIZED-MEDIA CACHE (OptimizedMediaCache, EditSharp.Render): a
+    /// video clip's decoder here may open against a persistent, content-
+    /// addressed DNxHR/ProRes proxy instead of the clip's true original
+    /// source file, whenever RenderContentPreparation.ProbeVideoAsync finds
+    /// one already built and big enough — see that method's own remarks.
+    /// This is what makes a SEEK (see Play(startPosition), gap 3, and
+    /// ComputeSeekOffsets below) cheap even against source codecs that are
+    /// otherwise expensive to seek into: DNxHR/ProRes are all-intra, so
+    /// opening a decoder at an arbitrary offset costs the same as opening
+    /// one at zero. Nothing here TRIGGERS a build on a cache miss —
+    /// Playback only ever reads whatever a consumer app has already warmed
+    /// via OptimizedMediaCache.PrewarmAsync (typically called at import
+    /// time), so an uncached source plays back exactly as it always has,
+    /// with no behavior change and no build competing with this session's
+    /// own decode for CPU.
+    ///
     /// KNOWN GAPS — tracked, not hidden, and re-prioritized per direct
     /// feedback (highest priority first):
     ///   1. SPEED &lt;= 0 (reverse playback) is NOT supported yet, but IS
@@ -425,11 +441,20 @@ namespace EditSharp.Playback
             var staticImagePaths = new ConcurrentDictionary<Clip, string>();
             var decodePlans = new ConcurrentDictionary<Clip, DecodeHwAccelPlan>();
 
+            //which file each video clip's decoder actually opens — see this
+            //class's own remarks on OptimizedMediaCache, and
+            //RenderContentPreparation.ProbeVideoAsync for how this gets
+            //populated. Purely opportunistic: an entry here only ever
+            //appears when a persistent cache hit was found and was big
+            //enough for this clip; otherwise SkClipContentSource falls back
+            //to the clip's own Source.Path exactly as it always has.
+            var decodeSourcePaths = new ConcurrentDictionary<Clip, string>();
+
             try
             {
                 await RenderContentPreparation.PrepareContentAsync(
                     Timeline, width, height, RenderSettings.HardwareAccelerator,
-                    nativeSizes, staticImagePaths, decodePlans, tempFiles);
+                    nativeSizes, staticImagePaths, decodePlans, decodeSourcePaths, tempFiles);
 
                 Dictionary<Clip, TimeSpan> seekOffsets = ComputeSeekOffsets(Timeline, startPosition);
 
@@ -437,7 +462,7 @@ namespace EditSharp.Playback
                     RenderContentPreparation.BuildDecoderReleaseSchedule(Timeline, fps);
 
                 using var contentSource = new SkClipContentSource(
-                    fps, nativeSizes, staticImagePaths, decodePlans, seekOffsets);
+                    fps, nativeSizes, staticImagePaths, decodePlans, seekOffsets, decodeSourcePaths);
 
                 using GpuContext gpuContext = GpuContext.Create(RenderSettings.HardwareAccelerator);
                 using var surfacePool = new SkSurfacePool(

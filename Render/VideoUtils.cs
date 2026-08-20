@@ -14,9 +14,12 @@ namespace EditSharp.Render
     /// with an optional resize — meant to be reusable both by EditSharp's own
     /// pipeline and by a consumer doing an ordinary video task that has nothing
     /// to do with the timeline renderer. Deliberately kept free of pipeline-
-    /// specific filter-graph knowledge: baking a clip's effects into a re-encode
-    /// (as OptimizedMediaBuilder does) lives in OptimizedMediaEffectsBaker
-    /// instead, not here — see that class for why.
+    /// specific filter-graph knowledge — a caller with clip/effect-specific
+    /// needs (e.g. OptimizedMediaCache's own encode, which needs its own
+    /// -profile:v handling) builds its own ffmpeg args using the shared
+    /// lookups here (PixelFormatFor, ContainerExtensionFor, ProfileArgsFor,
+    /// Constants.VideoCodecNames) rather than this file growing pipeline-
+    /// specific branches of its own.
     /// </summary>
     public static class VideoUtils
     {
@@ -92,13 +95,14 @@ namespace EditSharp.Render
         /// <summary>
         /// Re-encodes a source's video stream to a different codec via a single
         /// ffmpeg process — decode input, encode output, an optional resize,
-        /// no audio. Built originally for OptimizedMediaBuilder: producing a
-        /// lossless, frame-exact-seekable intermediate ahead of a frame-by-frame
-        /// render, so per-frame compositor processes never have to decode the
-        /// ORIGINAL source (with its own codec, GOP structure, and frame rate)
-        /// themselves — but this is a general-purpose helper, not something
-        /// specific to that pipeline; any caller re-encoding a video source to a
-        /// different codec, with an optional resize, can use it the same way.
+        /// no audio. A general-purpose helper, not specific to any one part of
+        /// the pipeline; any caller re-encoding a video source to a different
+        /// codec, with an optional resize, can use it. (OptimizedMediaCache
+        /// does NOT use this method directly — it needs a -profile:v argument
+        /// this method has no parameter for, so it builds its own equivalent
+        /// ffmpeg invocation instead, sharing PixelFormatFor/
+        /// ContainerExtensionFor/ProfileArgsFor with this method rather than
+        /// duplicating those lookups.)
         ///
         /// Unlike AddTrimmedInput's use in MuxAudioVideoAsync, the input seek
         /// here IS frame-accurate. -ss before -i only lands on the nearest
@@ -117,10 +121,11 @@ namespace EditSharp.Render
         /// never-upscaling target; this method just applies whatever box it's
         /// handed.
         ///
-        /// Baking effects into a re-encode (as OptimizedMediaBuilder does for a
-        /// clip's PreTransform effects) is deliberately NOT a feature of this
-        /// method — see OptimizedMediaEffectsBaker, which owns that filter
-        /// graph instead, so this stays a small building block rather than
+        /// Baking a clip's effects into a re-encode is deliberately NOT a
+        /// feature of this method — nothing in the current pipeline needs
+        /// that (SkClipVideoChain/ClipEffects apply a clip's effects live,
+        /// per frame, against whatever this method or OptimizedMediaCache
+        /// hands back), so this stays a small building block rather than
         /// growing pipeline-specific knowledge.
         /// </summary>
         public static async Task<string> ReencodeVideoAsync(
@@ -239,13 +244,53 @@ namespace EditSharp.Render
         /// with no forced pixel format, in which case ffmpeg negotiates one on
         /// its own.
         ///
-        /// internal rather than private: OptimizedMediaEffectsBaker builds its
-        /// own encode args for the same codec and needs the identical answer.
+        /// DNxHR/ProRes ENTRIES ADDED FOR OptimizedMediaCache — yuv422p
+        /// (8-bit 4:2:2) for DNxHR HQ, yuv422p10le (10-bit 4:2:2) for ProRes
+        /// HQ, matching each format's own conventional "HQ-tier" pixel
+        /// format. NOT build-verified against a real ffmpeg binary in this
+        /// sandbox (no ffmpeg toolchain here) — same honesty flag this
+        /// project already applies elsewhere (see GpuContext, FfmpegRunner's
+        /// QSV/AMF quality args) for anything written from documented
+        /// convention rather than a confirmed real encode. These are
+        /// extremely standard, well-documented values, but the first real
+        /// build against them is the actual verification.
+        ///
+        /// internal rather than private: OptimizedMediaCache builds its own
+        /// encode args for its own codec choice and needs the identical
+        /// answer, rather than this pipeline having two independent (and
+        /// potentially drifting) definitions of what pixel format a given
+        /// codec is built at.
         /// </summary>
         internal static string? PixelFormatFor(VideoCodec codec) => codec switch
         {
             VideoCodec.FFV1 => PixelFormats.Primary,
+            VideoCodec.DNxHR => "yuv422p",
+            VideoCodec.ProRes => "yuv422p10le",
             _ => null,
+        };
+
+        /// <summary>
+        /// The `-profile:v` argument(s) a codec needs to land on a specific
+        /// quality tier, or an empty array for a codec with no profile
+        /// concept (or where ffmpeg's own default is what's wanted). Added
+        /// for OptimizedMediaCache: dnxhd's encoder needs an explicit
+        /// dnxhr_* profile to target modern DNxHR (as opposed to legacy
+        /// fixed-bitrate DNxHD) at all, and prores_ks's numeric profiles
+        /// span a large quality/size range (0=proxy through 5=4444xq) with
+        /// no useful default to fall back on.
+        ///
+        /// Both chosen at the "HQ" quality tier — 4:2:2, not 4:4:4 — as the
+        /// general-purpose default for a playback/render proxy; NOT exposed
+        /// as its own EditSharpConfig knob in this pass (kept to codec
+        /// choice + a resolution cap, per the two knobs actually decided in
+        /// conversation) — a real need for a different tier is a small,
+        /// contained follow-up here, not a redesign.
+        /// </summary>
+        internal static string[] ProfileArgsFor(VideoCodec codec) => codec switch
+        {
+            VideoCodec.DNxHR => ["-profile:v", "dnxhr_hq"],
+            VideoCodec.ProRes => ["-profile:v", "3"], // prores_ks: 3 = "hq"
+            _ => [],
         };
 
         /// <summary>
@@ -274,6 +319,12 @@ namespace EditSharp.Render
         /// Costs a little container overhead (more, smaller clusters means
         /// more per-cluster header bytes) — negligible next to what it saves
         /// on every one of hundreds of per-frame seeks.
+        ///
+        /// DNxHR/ProRes need NO equivalent tuning — see OptimizedMediaCache.
+        /// EncodeAsync's own remarks: mov/mp4's sample tables are built
+        /// per-sample regardless of GOP size, and both codecs are all-intra,
+        /// so a -ss seek into either is already frame-accurate with nothing
+        /// extra to configure at encode time.
         /// </summary>
         internal static string[] MuxerTuningArgsFor(VideoCodec codec) => codec switch
         {
@@ -288,13 +339,65 @@ namespace EditSharp.Render
         /// no GOP-distance cost, which is the entire point of building this
         /// intermediate in the first place.
         ///
-        /// internal rather than private: OptimizedMediaEffectsBaker needs the
-        /// identical container choice for the same codec.
+        /// DNxHR and ProRes BOTH use "mov" — the standard container for
+        /// either on any platform, and ffmpeg happily muxes dnxhd into mov
+        /// (not just the more Avid-specific MXF). Sharing one extension
+        /// between the two matters to OptimizedMediaCache specifically: it's
+        /// what lets switching EditSharpConfig.OptimizedMediaCodec reuse the
+        /// exact same hash-addressed filename for a rebuilt entry rather
+        /// than leaving an orphaned file from the previously configured
+        /// codec behind — see that class's TryLoadExistingAsync, which
+        /// relies on this collision (and disambiguates it via the meta
+        /// file's own Codec field) rather than avoiding it.
+        ///
+        /// internal rather than private: OptimizedMediaCache needs the
+        /// identical container choice for the same codec, for the same
+        /// single-source-of-truth reason as PixelFormatFor above.
         /// </summary>
         internal static string ContainerExtensionFor(VideoCodec codec) => codec switch
         {
             VideoCodec.FFV1 => "mkv",
             VideoCodec.GIF => "gif",
+            VideoCodec.DNxHR => "mov",
+            VideoCodec.ProRes => "mov",
+            _ => "mp4",
+        };
+
+        /// <summary>
+        /// The ffmpeg MUXER name (`-f` argument) for a codec's container —
+        /// NOT always the same string as its file extension
+        /// (ContainerExtensionFor), which is why this exists as its own
+        /// lookup rather than callers just passing the extension to `-f`
+        /// directly (mkv's muxer is named "matroska", not "mkv").
+        ///
+        /// ADDED TO FIX A REAL BUG: OptimizedMediaCache used to rely on
+        /// ffmpeg SNIFFING the output muxer from its output path's file
+        /// extension (the ordinary, usually-fine ffmpeg behavior when no
+        /// `-f` is given) — which broke the moment its temp-file naming put
+        /// anything after that extension ("...hash.mov.tmp-GUID"), since
+        /// ffmpeg had no ".tmp-GUID" muxer to sniff and failed outright
+        /// ("Unable to choose an output format", exit -22). Passing `-f`
+        /// explicitly means the actual output PATH's shape is irrelevant to
+        /// muxer selection — this is now the single source of truth for
+        /// "what format is this codec's container", the way
+        /// ContainerExtensionFor already is for "what's its file extension".
+        ///
+        /// internal rather than private: OptimizedMediaCache calls this
+        /// directly. ReencodeVideoAsync above does NOT (it still relies on
+        /// extension sniffing) since its own output paths are always
+        /// freshly generated via GraphUtilities.GetVideoTempFilePath with no
+        /// further suffix ever appended afterward — nothing has reintroduced
+        /// that specific bug shape for it. A future caller doing the same
+        /// kind of temp-then-rename dance OptimizedMediaCache.BuildAsync
+        /// does should use this too, rather than assume extension sniffing
+        /// is safe by default.
+        /// </summary>
+        internal static string ContainerFormatNameFor(VideoCodec codec) => codec switch
+        {
+            VideoCodec.FFV1 => "matroska",
+            VideoCodec.GIF => "gif",
+            VideoCodec.DNxHR => "mov",
+            VideoCodec.ProRes => "mov",
             _ => "mp4",
         };
 
@@ -319,8 +422,9 @@ namespace EditSharp.Render
         /// input through an InputGraph's own ExtraArgs (rather than appending
         /// straight to an args list) can use the identical trimming rule.
         ///
-        /// internal rather than private: OptimizedMediaEffectsBaker needs the
-        /// same trimming rule for the InputGraph-based input it registers.
+        /// internal rather than private: other pipeline-internal ffmpeg-arg
+        /// builders elsewhere in this assembly need the same trimming rule
+        /// for an InputGraph-based input they register.
         /// </summary>
         internal static string[] TrimArgsFor(Source source)
         {

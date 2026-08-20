@@ -47,6 +47,16 @@ namespace EditSharp.Render
     /// already is. Defaults to null/empty, which reproduces the original
     /// full-render behaviour exactly — Renderer's own construction of this
     /// class is unchanged.
+    ///
+    /// OPTIMIZED-MEDIA ADDITION (decodeSourcePaths): which FILE a video
+    /// clip's decoder actually opens — the clip's own Source.Path by
+    /// default, or a persistent OptimizedMediaCache entry for that same
+    /// content when RenderContentPreparation.ProbeVideoAsync found one big
+    /// enough. seekOffsets/Source.Start math is UNCHANGED either way — see
+    /// GetOrOpenDecoder — because the cache always encodes a source's FULL
+    /// duration on the same timebase as the original (see
+    /// OptimizedMediaCache.EncodeAsync's own remarks), so "seconds from
+    /// file start" means the identical thing against either file.
     /// </summary>
     internal sealed class SkClipContentSource : IDisposable
     {
@@ -55,6 +65,7 @@ namespace EditSharp.Render
         private readonly IReadOnlyDictionary<Clip, string> _staticImagePaths;
         private readonly IReadOnlyDictionary<Clip, DecodeHwAccelPlan> _decodePlans;
         private readonly IReadOnlyDictionary<Clip, TimeSpan> _seekOffsets;
+        private readonly IReadOnlyDictionary<Clip, string> _decodeSourcePaths;
 
         private readonly Dictionary<Clip, SkSourceDecoder> _videoDecoders = new();
         private readonly Dictionary<Clip, SKImage> _staticContent = new();
@@ -64,13 +75,15 @@ namespace EditSharp.Render
             IReadOnlyDictionary<Clip, (int Width, int Height)> nativeSizes,
             IReadOnlyDictionary<Clip, string> staticImagePaths,
             IReadOnlyDictionary<Clip, DecodeHwAccelPlan> decodePlans,
-            IReadOnlyDictionary<Clip, TimeSpan>? seekOffsets = null)
+            IReadOnlyDictionary<Clip, TimeSpan>? seekOffsets = null,
+            IReadOnlyDictionary<Clip, string>? decodeSourcePaths = null)
         {
             _fps = fps;
             _nativeSizes = nativeSizes;
             _staticImagePaths = staticImagePaths;
             _decodePlans = decodePlans;
             _seekOffsets = seekOffsets ?? new Dictionary<Clip, TimeSpan>();
+            _decodeSourcePaths = decodeSourcePaths ?? new Dictionary<Clip, string>();
         }
 
         /// <summary>
@@ -135,7 +148,9 @@ namespace EditSharp.Render
             //INTO the clip's visible window playback is already starting —
             //zero for a full render (or a playback session starting at
             //Position zero), which reproduces the original behaviour
-            //exactly.
+            //exactly. This math is IDENTICAL whether the file actually
+            //opened below is the original source or an OptimizedMediaCache
+            //entry — see this class's own remarks on why.
             double startSeconds = (source.Source.Start ?? TimeSpan.Zero).TotalSeconds;
 
             if (_seekOffsets.TryGetValue(clip, out TimeSpan extra))
@@ -158,7 +173,13 @@ namespace EditSharp.Render
             //Capped independently per axis (not a single uniform cap) since
             //MaxScale itself is independent per axis (non-uniform scale is a
             //real, supported case) — matches how ComputeContentSize already
-            //treats width/height as independent.
+            //treats width/height as independent. NOTE: this is computed from
+            //the ORIGINAL source's nativeWidth/nativeHeight regardless of
+            //which file is actually decoded (see decodeSourcePath below) —
+            //correct because an OptimizedMediaCache entry always preserves
+            //the original's exact aspect ratio, and RenderContentPreparation.
+            //ProbeVideoAsync already verified the cache entry is at least
+            //this big before ever redirecting to it.
             (int desiredWidth, int desiredHeight) = TransformExpressions.ComputeContentSize(
                 clip, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
 
@@ -169,8 +190,17 @@ namespace EditSharp.Render
                 ? resolvedPlan
                 : DecodeHwAccelPlan.Software;
 
+            //defaults to the clip's own original source path when
+            //RenderContentPreparation found no suitable cache entry (or
+            //wasn't given the chance to look, e.g. a caller constructing
+            //this class directly without going through PrepareContentAsync)
+            //— reproduces the pre-cache behaviour exactly in that case
+            string decodeSourcePath = _decodeSourcePaths.TryGetValue(clip, out string? overridden)
+                ? overridden
+                : source.Source.Path;
+
             SkSourceDecoder decoder = SkSourceDecoder.Start(
-                source.Source.Path, startSeconds, _fps, decodeWidth, decodeHeight, plan);
+                decodeSourcePath, startSeconds, _fps, decodeWidth, decodeHeight, plan);
 
             _videoDecoders[clip] = decoder;
             return decoder;

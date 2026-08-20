@@ -11,6 +11,29 @@ namespace EditSharp.Render
         AV1,
         GIF,
         FFV1,
+
+        /// <summary>
+        /// Avid DNxHR — one of two codecs OptimizedMediaCache can build its
+        /// persistent optimized media with (see EditSharpConfig.
+        /// OptimizedMediaCodec), and the DEFAULT of the two: an open format
+        /// with no licensing friction, and ffmpeg's "dnxhd" encoder handles
+        /// it natively and cross-platform. All-intra, which is the entire
+        /// point for this use — see OptimizedMediaCache's class remarks.
+        /// CPU encode/decode only; no vendor has a hardware codec block for
+        /// this format — decided in conversation, see OptimizedMediaCache's
+        /// remarks on Vulkan Video's actual codec coverage (H.264/HEVC/AV1
+        /// only, nothing else, on any vendor).
+        /// </summary>
+        DNxHR,
+
+        /// <summary>
+        /// Apple ProRes — the other codec OptimizedMediaCache can build
+        /// optimized media with. Common in pro NLE ecosystems; ffmpeg's
+        /// "prores_ks" encoder (not the older, lower-quality "prores") is
+        /// what this project uses for it. Same all-intra, CPU-only
+        /// reasoning as DNxHR — see its own remarks.
+        /// </summary>
+        ProRes,
     }
 
     public enum AudioCodec
