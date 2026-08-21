@@ -64,13 +64,12 @@ namespace EditSharp.Render
     /// property optimized media has always traded disk space and a
     /// one-time encode for.
     ///
-    /// CONTENT-ADDRESSED, KEYED BY MediaHasher'S FULL-FILE HASH — not by
-    /// path. A source that gets renamed, moved to a different drive, or
-    /// duplicated under a second name still resolves to the exact same
-    /// cache entry, which is what makes this genuinely useful for an
-    /// NLE-type consumer reopening the same project (possibly with its
-    /// media relinked) across app runs, rather than only within one
-    /// render's lifetime.
+    /// CONTENT-ADDRESSED, KEYED BY MediaHasher'S HASH — not by path. A
+    /// source that gets renamed, moved to a different drive, or duplicated
+    /// under a second name still resolves to the exact same cache entry,
+    /// which is what makes this genuinely useful for an NLE-type consumer
+    /// reopening the same project (possibly with its media relinked)
+    /// across app runs, rather than only within one render's lifetime.
     ///
     /// ONE CANONICAL RESOLUTION PER SOURCE — DECIDED IN CONVERSATION: a
     /// source's optimized media is built once, at (native resolution,
@@ -105,6 +104,33 @@ namespace EditSharp.Render
     /// PrewarmAsync — typically right after import, exactly matching "an
     /// app can begin optimized media generation as soon as a file is
     /// imported" from the original conversation.
+    ///
+    /// TWO LAYERS OF IN-PROCESS MEMOIZATION, BOTH ADDED AFTER DIRECT
+    /// FEEDBACK THAT REPEAT LOOKUPS FOR THE SAME UNCHANGED SOURCE WERE
+    /// STILL COSTING REAL TIME (a single test video observed hitting
+    /// TryGetAsync six times in one session, each paying real hash/disk
+    /// cost rather than being free after the first):
+    ///
+    ///   1. SourceResolutionCache — keyed on the ORIGINAL source's own
+    ///      (normalized path, length, LastWriteTimeUtc), the exact same
+    ///      identity MediaHasher already uses to decide whether a file
+    ///      needs rehashing at all. A confirmed resolution for that exact
+    ///      file skips BOTH the hash computation AND the meta.json read —
+    ///      the fastest possible repeat lookup, and the one that actually
+    ///      matters for a Playback session, since every call site
+    ///      (RefreshScrubbingSupportAsync, a Play() session's own
+    ///      PrepareContentAsync, a scrub session's base setup) independently
+    ///      calls TryGetAsync for the same source without knowing whether
+    ///      another call site already resolved it moments earlier.
+    ///   2. ResolvedEntries — keyed on (content hash, codec), the fallback
+    ///      for when the source's own file identity isn't known ahead of
+    ///      time (or SourceResolutionCache was bypassed) but its content
+    ///      hash already is.
+    ///
+    /// Both memoize only POSITIVE hits, never misses — a miss can
+    /// legitimately turn into a hit later (a build completes, a prewarm
+    /// finishes), and caching that would need its own invalidation story
+    /// neither of these carries.
     /// </summary>
     public static class OptimizedMediaCache
     {
@@ -134,6 +160,21 @@ namespace EditSharp.Render
         // Cleared the moment a LATER attempt for the same hash succeeds.
         private static readonly ConcurrentDictionary<string, Exception> LastFailure = new();
 
+        // See the class remarks' memoization section, layer 2 — a
+        // confirmed-good (hash, codec) -> entry mapping, cached forever for
+        // this process's lifetime once first resolved.
+        private static readonly ConcurrentDictionary<(string Hash, VideoCodec Codec), OptimizedMediaEntry>
+            ResolvedEntries = new();
+
+        // See the class remarks' memoization section, layer 1 — a
+        // confirmed-good (original source path, length, mtime) -> entry
+        // mapping. This is the one that actually collapses repeat
+        // TryGetAsync calls for the SAME FILE down to a dictionary lookup,
+        // skipping MediaHasher.ComputeAsync entirely, not just the disk
+        // read layer 2 skips.
+        private static readonly ConcurrentDictionary<(string Path, long Length, long LastWriteTimeUtcTicks), OptimizedMediaEntry>
+            SourceResolutionCache = new();
+
         /// <summary>
         /// Returns ready-to-use optimized media for `sourcePath`, building
         /// it first if no cache entry exists yet — this BLOCKS the caller
@@ -147,10 +188,10 @@ namespace EditSharp.Render
         public static async Task<OptimizedMediaEntry> GetOrBuildAsync(
             string sourcePath, CancellationToken ct = default)
         {
-            string hash = await MediaHasher.ComputeAsync(sourcePath, ct);
-
-            OptimizedMediaEntry? existing = await TryLoadExistingAsync(hash);
+            OptimizedMediaEntry? existing = await TryGetAsync(sourcePath, ct);
             if (existing != null) return existing.Value;
+
+            string hash = await MediaHasher.ComputeAsync(sourcePath, ct);
 
             Task<OptimizedMediaEntry> build = InFlight.GetOrAdd(
                 hash, _ => BuildAndTrackAsync(sourcePath, hash));
@@ -194,17 +235,55 @@ namespace EditSharp.Render
         /// unexpected multi-second (or longer) encode blocking whatever
         /// asked.
         ///
-        /// Still pays MediaHasher's full-file-hash cost on a cold path (an
-        /// unchanged file with a prior in-process or on-disk sidecar hit
-        /// is effectively free — see MediaHasher's own remarks) — there is
-        /// no way to know whether cached optimized media exists for this
-        /// CONTENT without first knowing what that content hashes to.
+        /// Checks SourceResolutionCache FIRST, keyed on `sourcePath`'s own
+        /// current (length, LastWriteTimeUtc) — a hit there skips
+        /// MediaHasher entirely, not just the disk read (see the class
+        /// remarks' memoization section). Only a cache MISS at that layer
+        /// falls through to actually hashing the file and consulting
+        /// ResolvedEntries/disk.
         /// </summary>
         public static async Task<OptimizedMediaEntry?> TryGetAsync(
             string sourcePath, CancellationToken ct = default)
         {
+            var sw = Stopwatch.StartNew();
+
+            var info = new FileInfo(sourcePath);
+            if (info.Exists)
+            {
+                var sourceKey = (NormalizeSourcePath(sourcePath), info.Length, info.LastWriteTimeUtc.Ticks);
+
+                if (SourceResolutionCache.TryGetValue(sourceKey, out OptimizedMediaEntry memoized))
+                {
+                    EditSharpConfig.Logger.LogVerbose(
+                        $"OptimizedMediaCache.TryGetAsync('{sourcePath}'): source-identity cache hit, " +
+                        $"{sw.ElapsedMilliseconds}ms (no hash, no disk read).");
+                    return memoized;
+                }
+            }
+
             string hash = await MediaHasher.ComputeAsync(sourcePath, ct);
-            return await TryLoadExistingAsync(hash);
+            TimeSpan hashElapsed = sw.Elapsed;
+
+            OptimizedMediaEntry? result = await TryLoadExistingAsync(hash);
+
+            if (result != null && info.Exists)
+            {
+                var sourceKey = (NormalizeSourcePath(sourcePath), info.Length, info.LastWriteTimeUtc.Ticks);
+                SourceResolutionCache[sourceKey] = result.Value;
+            }
+
+            // TEMPORARY INSTRUMENTATION — added to directly measure how
+            // much of a Play()/ScrubToAsync session-prep call's time this
+            // cache lookup itself accounts for, after direct feedback that
+            // startup remained slower than the pre-cache baseline, and that
+            // the SAME source was being looked up several times in one
+            // session. Same "log at LogVerbose, remove once the question is
+            // answered" convention SkSourceDecoder.NextFrame already uses.
+            EditSharpConfig.Logger.LogVerbose(
+                $"OptimizedMediaCache.TryGetAsync('{sourcePath}'): hash {hashElapsed.TotalMilliseconds:F0}ms, " +
+                $"total {sw.ElapsedMilliseconds}ms ({(result != null ? "hit, now memoized" : "miss")}).");
+
+            return result;
         }
 
         /// <summary>
@@ -215,10 +294,10 @@ namespace EditSharp.Render
         public static async Task<OptimizedMediaStatus> GetStatusAsync(
             string sourcePath, CancellationToken ct = default)
         {
-            string hash = await MediaHasher.ComputeAsync(sourcePath, ct);
+            OptimizedMediaEntry? existing = await TryGetAsync(sourcePath, ct);
+            if (existing != null) return OptimizedMediaStatus.Ready;
 
-            if (await TryLoadExistingAsync(hash) != null)
-                return OptimizedMediaStatus.Ready;
+            string hash = await MediaHasher.ComputeAsync(sourcePath, ct);
 
             if (InFlight.TryGetValue(hash, out Task<OptimizedMediaEntry>? task))
                 return task.IsFaulted ? OptimizedMediaStatus.Failed : OptimizedMediaStatus.Building;
@@ -235,6 +314,12 @@ namespace EditSharp.Render
             {
                 OptimizedMediaEntry entry = await BuildAsync(sourcePath, hash);
                 LastFailure.TryRemove(hash, out _);
+                ResolvedEntries[(hash, entry.Codec)] = entry;
+
+                var info = new FileInfo(sourcePath);
+                if (info.Exists)
+                    SourceResolutionCache[(NormalizeSourcePath(sourcePath), info.Length, info.LastWriteTimeUtc.Ticks)] = entry;
+
                 return entry;
             }
             catch (Exception ex)
@@ -352,17 +437,25 @@ namespace EditSharp.Render
 
         /// <summary>
         /// Looks up an existing, already-built entry for `hash` on disk —
-        /// the read side of the cache, shared by every public method
-        /// above. Returns null for anything short of "both files present
-        /// and the meta parses cleanly and agrees with what's being asked
-        /// for" — a corrupt or stale entry is treated as a plain miss
-        /// (silently rebuildable via GetOrBuildAsync) rather than an error,
-        /// since nothing about a half-written or outdated cache entry
-        /// should ever be fatal to the caller that stumbled onto it.
+        /// the read side of the cache. Returns null for anything short of
+        /// "both files present and the meta parses cleanly and agrees with
+        /// what's being asked for" — a corrupt or stale entry is treated as
+        /// a plain miss (silently rebuildable via GetOrBuildAsync) rather
+        /// than an error, since nothing about a half-written or outdated
+        /// cache entry should ever be fatal to the caller that stumbled
+        /// onto it.
+        ///
+        /// A confirmed HIT is memoized into ResolvedEntries before
+        /// returning — see the class remarks' memoization section, layer
+        /// 2. A miss is deliberately NOT memoized here.
         /// </summary>
         private static async Task<OptimizedMediaEntry?> TryLoadExistingAsync(string hash)
         {
             VideoCodec codec = EditSharpConfig.OptimizedMediaCodec;
+
+            if (ResolvedEntries.TryGetValue((hash, codec), out OptimizedMediaEntry memoized))
+                return memoized;
+
             (string mediaPath, string metaPath, _) = PathsFor(hash, codec);
 
             if (!File.Exists(mediaPath) || !File.Exists(metaPath))
@@ -402,9 +495,12 @@ namespace EditSharp.Render
                 return null;
             }
 
-            return new OptimizedMediaEntry(
+            var entry = new OptimizedMediaEntry(
                 mediaPath, meta.Width, meta.Height,
                 meta.DurationSeconds ?? 0, meta.OriginalHasAudio, meta.Codec);
+
+            ResolvedEntries[(hash, codec)] = entry;
+            return entry;
         }
 
         /// <summary>
@@ -481,6 +577,13 @@ namespace EditSharp.Render
             catch { /* best-effort cleanup of a failed build's partial temp file */ }
         }
 
+        // Same case-normalization MediaHasher.NormalizePath uses (Windows
+        // paths are case-insensitive) — kept as an independent copy rather
+        // than exposed from MediaHasher, since the two caches' key shapes
+        // only coincidentally share this one piece, not because this class
+        // depends on MediaHasher's own internals.
+        private static string NormalizeSourcePath(string path) => Path.GetFullPath(path).ToLowerInvariant();
+
         /// <summary>
         /// The actual ffmpeg re-encode to `codec` at `width`x`height`. No
         /// -ss/-t trim of any kind — this always encodes the WHOLE source
@@ -506,6 +609,25 @@ namespace EditSharp.Render
         /// all-intra (every sample IS a sync sample), so a -ss seek into
         /// this file is already frame-accurate with no extra encode-time
         /// work required.
+        ///
+        /// +FASTSTART, ADDED AFTER DIRECT FEEDBACK THAT SCRUBBING WAS AS
+        /// SLOW AS A FRESH SESSION START: mov/mp4 muxers write the moov
+        /// atom (the file's own seek index — sample tables, durations,
+        /// stream layout) AFTER the media data by default, at the very END
+        /// of the file. Every fresh decoder open against this file has to
+        /// locate and read that atom before it can seek anywhere at all.
+        /// Without this flag that costs a real extra seek-and-read on the
+        /// END of the file on EVERY open, regardless of what position was
+        /// actually requested — directly undercutting the entire premise
+        /// that "opening at frame 40,000 costs the same as opening at
+        /// frame 0." -movflags +faststart makes ffmpeg do one extra cheap
+        /// remux pass at BUILD time to move the moov atom to the FRONT of
+        /// the file instead, so every later open pays a small fixed cost
+        /// instead of an end-of-file read. A build made before this fix
+        /// does not retroactively gain it — delete
+        /// EditSharpConfig.OptimizedMediaDirectory (or bump
+        /// CurrentSchemaVersion) to force a rebuild if this matters for an
+        /// already-populated cache.
         ///
         /// EXPLICIT -f, NOT LEFT TO EXTENSION SNIFFING: passed regardless
         /// of what outputPath looks like, so this never again depends on
@@ -546,8 +668,19 @@ namespace EditSharp.Render
             // FFV1 optimized media never carried audio either.
             args.Add("-an");
 
+            string containerFormat = VideoUtils.ContainerFormatNameFor(codec);
+
             args.Add("-f");
-            args.Add(VideoUtils.ContainerFormatNameFor(codec));
+            args.Add(containerFormat);
+
+            if (containerFormat is "mov" or "mp4")
+            {
+                // See this method's own remarks — moves the seek index to
+                // the front of the file so every later open (every scrub
+                // tick/reopen) is cheap, not just the first one.
+                args.Add("-movflags");
+                args.Add("+faststart");
+            }
 
             args.Add(outputPath);
 

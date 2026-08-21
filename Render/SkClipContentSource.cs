@@ -56,7 +56,11 @@ namespace EditSharp.Render
     /// GetOrOpenDecoder — because the cache always encodes a source's FULL
     /// duration on the same timebase as the original (see
     /// OptimizedMediaCache.EncodeAsync's own remarks), so "seconds from
-    /// file start" means the identical thing against either file.
+    /// file start" means the identical thing against either file. Also
+    /// decides SkSourceDecoder's `fastOpen` hint from the same redirection:
+    /// true only when the file actually being opened is a cache entry (a
+    /// file this codebase built and knows the exact shape of), never the
+    /// clip's own original source — see SkSourceDecoder's own remarks.
     /// </summary>
     internal sealed class SkClipContentSource : IDisposable
     {
@@ -199,8 +203,16 @@ namespace EditSharp.Render
                 ? overridden
                 : source.Source.Path;
 
+            //true only when the file actually being opened is an
+            //OptimizedMediaCache entry — a file this codebase built and
+            //knows the exact shape of (single all-intra video stream, no
+            //audio, +faststart) — never the clip's own original source,
+            //which may have a shape ffmpeg genuinely needs to analyze. See
+            //SkSourceDecoder's own remarks on what this actually skips.
+            bool fastOpen = decodeSourcePath != source.Source.Path;
+
             SkSourceDecoder decoder = SkSourceDecoder.Start(
-                decodeSourcePath, startSeconds, _fps, decodeWidth, decodeHeight, plan);
+                decodeSourcePath, startSeconds, _fps, decodeWidth, decodeHeight, plan, fastOpen);
 
             _videoDecoders[clip] = decoder;
             return decoder;

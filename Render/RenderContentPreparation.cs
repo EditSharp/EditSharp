@@ -26,6 +26,12 @@ namespace EditSharp.Render
     /// than in Renderer/Playback separately, is exactly the same
     /// "don't duplicate the same decision in two callers" reasoning this
     /// whole class already exists for.
+    ///
+    /// SCRUBBING SUPPORT, ADDED HERE: AllVideoSourcesHaveSufficientCachedMediaAsync
+    /// shares the exact same cache-sufficiency check ProbeVideoAsync uses
+    /// (factored into TryGetSufficientCachedMediaAsync below) so
+    /// Playback.SupportsScrubbing can never drift from what ProbeVideoAsync
+    /// would actually redirect a decoder to.
     /// </summary>
     internal static class RenderContentPreparation
     {
@@ -76,8 +82,8 @@ namespace EditSharp.Render
         ///     to the clip's own Source.Path; overridden to an
         ///     OptimizedMediaCache entry's Path when one exists AND has
         ///     enough resolution for this clip's own largest on-screen size
-        ///     (see the sufficiency check below). nativeSizes[clip] is
-        ///     UNCHANGED either way — it always reflects the true original
+        ///     (see TryGetSufficientCachedMediaAsync below). nativeSizes[clip]
+        ///     is UNCHANGED either way — it always reflects the true original
         ///     source's dimensions, since aspect-fit/placement math must
         ///     stay correct regardless of which file is actually decoded,
         ///     and the cache always preserves the original's aspect ratio
@@ -89,22 +95,6 @@ namespace EditSharp.Render
         ///     remarks), or the normal probed hwaccel plan against the
         ///     ORIGINAL source otherwise, exactly as before this cache
         ///     existed.
-        ///
-        /// OPPORTUNISTIC ONLY, NEVER TRIGGERS A BUILD: this calls
-        /// OptimizedMediaCache.TryGetAsync, never GetOrBuildAsync/
-        /// PrewarmAsync. Building competes for CPU/disk with the very
-        /// playback (or render) this call is trying to serve, which would
-        /// work against "keep things smooth" rather than for it. A consumer
-        /// app that wants a source's optimized media ready ahead of time —
-        /// e.g. right after import — calls OptimizedMediaCache.PrewarmAsync
-        /// itself; see that method's own remarks.
-        ///
-        /// A cache lookup failure (hashing I/O error, permissions, a
-        /// genuinely unreadable source) is caught and logged rather than
-        /// propagated — it must never take playback/render down on its own,
-        /// since decoding the original source directly (this method's
-        /// fallback in every failure case) is exactly what already
-        /// happened, unconditionally, before this cache existed at all.
         /// </summary>
         private static async Task ProbeVideoAsync(
             Clip clip, SourceClip video, int canvasWidth, int canvasHeight, HardwareAccelerator hwAccel,
@@ -115,55 +105,129 @@ namespace EditSharp.Render
             (int width, int height) = await MediaProbe.GetDimensionsAsync(video.Source.Path);
             nativeSizes[clip] = (width, height);
 
-            string decodeSourcePath = video.Source.Path;
+            string? cachedPath = await TryGetSufficientCachedMediaAsync(
+                clip, video.Source.Path, width, height, canvasWidth, canvasHeight);
 
-            try
-            {
-                OptimizedMediaEntry? cached = await OptimizedMediaCache.TryGetAsync(video.Source.Path);
-
-                if (cached is { } entry)
-                {
-                    (int requiredWidth, int requiredHeight) = TransformExpressions.ComputeContentSize(
-                        clip, width, height, canvasWidth, canvasHeight);
-
-                    //only redirect when the cached proxy has ENOUGH
-                    //resolution for this clip's own largest on-screen size
-                    //— a clip zoomed in past the cache's configured cap
-                    //still needs the true native file, or it would
-                    //visibly upscale from the smaller proxy instead. Both
-                    //axes independently, matching how MaxScale/
-                    //ComputeContentSize already treat width/height
-                    //independently (non-uniform scale is a real, supported
-                    //case)
-                    if (entry.Width >= requiredWidth && entry.Height >= requiredHeight)
-                    {
-                        decodeSourcePath = entry.Path;
-
-                        EditSharpConfig.Logger.LogVerbose(
-                            $"Using cached optimized media for '{video.Source.Path}' -> {entry.Path} " +
-                            $"({entry.Width}x{entry.Height}, {entry.Codec}).");
-                    }
-                    else
-                    {
-                        EditSharpConfig.Logger.LogVerbose(
-                            $"Cached optimized media for '{video.Source.Path}' is {entry.Width}x{entry.Height}, " +
-                            $"smaller than this clip needs ({requiredWidth}x{requiredHeight}) — decoding the " +
-                            "original source instead.");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                EditSharpConfig.Logger.LogWarning(
-                    $"OptimizedMediaCache lookup failed for '{video.Source.Path}', decoding the " +
-                    $"original source instead: {ex.Message}");
-            }
-
+            string decodeSourcePath = cachedPath ?? video.Source.Path;
             decodeSourcePaths[clip] = decodeSourcePath;
 
             decodePlans[clip] = decodeSourcePath == video.Source.Path
                 ? await FfmpegRunner.GetDecodePlanAsync(video.Source.Path, hwAccel)
                 : DecodeHwAccelPlan.Software;
+        }
+
+        /// <summary>
+        /// The shared cache-sufficiency check: looks up an OPPORTUNISTIC
+        /// (never-building — TryGetAsync only, same reasoning as
+        /// ProbeVideoAsync's own remarks used to state directly) cached
+        /// entry for `sourcePath`, and returns its Path only when it has
+        /// enough resolution for `clip`'s own largest on-screen size — a
+        /// clip zoomed in past the cache's configured cap still needs the
+        /// true native file, or it would visibly upscale from the smaller
+        /// proxy instead. Both axes independently, matching how
+        /// MaxScale/ComputeContentSize already treat width/height
+        /// independently (non-uniform scale is a real, supported case).
+        /// Returns null on a cache miss, an insufficient entry, or any
+        /// lookup failure (hashing I/O error, permissions, a genuinely
+        /// unreadable source) — callers fall back to the original source in
+        /// every one of those cases, exactly as before this cache existed.
+        /// </summary>
+        private static async Task<string?> TryGetSufficientCachedMediaAsync(
+            Clip clip, string sourcePath, int nativeWidth, int nativeHeight,
+            int canvasWidth, int canvasHeight)
+        {
+            try
+            {
+                OptimizedMediaEntry? cached = await OptimizedMediaCache.TryGetAsync(sourcePath);
+
+                if (cached is { } entry)
+                {
+                    (int requiredWidth, int requiredHeight) = TransformExpressions.ComputeContentSize(
+                        clip, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
+
+                    if (entry.Width >= requiredWidth && entry.Height >= requiredHeight)
+                    {
+                        EditSharpConfig.Logger.LogVerbose(
+                            $"Using cached optimized media for '{sourcePath}' -> {entry.Path} " +
+                            $"({entry.Width}x{entry.Height}, {entry.Codec}).");
+
+                        return entry.Path;
+                    }
+
+                    EditSharpConfig.Logger.LogVerbose(
+                        $"Cached optimized media for '{sourcePath}' is {entry.Width}x{entry.Height}, " +
+                        $"smaller than this clip needs ({requiredWidth}x{requiredHeight}) — decoding the " +
+                        "original source instead.");
+                }
+            }
+            catch (Exception ex)
+            {
+                EditSharpConfig.Logger.LogWarning(
+                    $"OptimizedMediaCache lookup failed for '{sourcePath}', decoding the " +
+                    $"original source instead: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// True when every video SourceClip in the timeline currently has a
+        /// persistent OptimizedMediaCache entry with enough resolution for
+        /// its own on-screen size — i.e. whether a Playback session
+        /// starting right now would have every decoder open against
+        /// all-intra optimized media rather than some original source.
+        /// This is what Playback.SupportsScrubbing (and
+        /// RefreshScrubbingSupportAsync) is computed from: arbitrary-
+        /// position scrubbing is only uniformly cheap when EVERY source it
+        /// might touch is all-intra — a single clip still on its original
+        /// (likely long-GOP) source would make scrubbing to some positions
+        /// expensive again, defeating the point of exposing this as one
+        /// simple boolean rather than a per-clip capability query.
+        ///
+        /// A timeline with no video clips at all is trivially true —
+        /// there's nothing that could make scrubbing expensive.
+        ///
+        /// OPPORTUNISTIC ONLY, same as ProbeVideoAsync: this never
+        /// triggers a build. A consumer that wants this to become true
+        /// calls OptimizedMediaCache.PrewarmAsync itself (typically at
+        /// import time) and can re-check afterward.
+        /// </summary>
+        public static async Task<bool> AllVideoSourcesHaveSufficientCachedMediaAsync(
+            Timeline timeline, int canvasWidth, int canvasHeight)
+        {
+            var checks = new List<Task<bool>>();
+
+            foreach (Channel channel in timeline.Channels)
+            {
+                foreach (Clip clip in channel.Clips.Values)
+                {
+                    if (clip is not SourceClip { Source.Type: SourceType.Video } video) continue;
+
+                    checks.Add(CheckOneAsync(clip, video, canvasWidth, canvasHeight));
+                }
+            }
+
+            if (checks.Count == 0) return true;
+
+            bool[] results = await Task.WhenAll(checks);
+
+            foreach (bool result in results)
+            {
+                if (!result) return false;
+            }
+
+            return true;
+
+            static async Task<bool> CheckOneAsync(
+                Clip clip, SourceClip video, int canvasWidth, int canvasHeight)
+            {
+                (int width, int height) = await MediaProbe.GetDimensionsAsync(video.Source.Path);
+
+                string? cachedPath = await TryGetSufficientCachedMediaAsync(
+                    clip, video.Source.Path, width, height, canvasWidth, canvasHeight);
+
+                return cachedPath != null;
+            }
         }
 
         private static async Task PrepareImageAsync(

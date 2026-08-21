@@ -54,6 +54,25 @@ namespace EditSharp.Render
     /// pass). Every frame now pays full native-resolution decode + full
     /// PreTransform effect cost live, where some of that was previously a
     /// one-time cost. Not a blocker, a real cost worth having on the radar.
+    ///
+    /// FAST-OPEN (fastOpen), ADDED AFTER DIRECT FEEDBACK THAT SCRUBBING WAS
+    /// AS SLOW AS A FRESH SESSION START: opening ANY ffmpeg decode process
+    /// pays avformat_find_stream_info's own default probing cost before it
+    /// can produce a single frame — by default ffmpeg reads/analyzes a
+    /// real chunk of the input to work out stream parameters it doesn't
+    /// yet know, regardless of how simple the file actually is. For a
+    /// clip's own original source that's the right default (camera/delivery
+    /// files can have unusual or variable-rate streams worth actually
+    /// analyzing). It is pure waste for a file THIS codebase built itself
+    /// via OptimizedMediaCache — single all-intra video stream, no audio,
+    /// known container, already probed once at build time — and it's paid
+    /// again on every fresh open, which for scrubbing means every single
+    /// ScrubToAsync tick (see that method's own remarks on why it can't
+    /// reuse one open decoder). `fastOpen` shrinks -probesize/-analyzeduration
+    /// down to the minimum for exactly that known-good case; see
+    /// SkClipContentSource.GetOrOpenDecoder for how it decides when to pass
+    /// this (true only when the file actually being opened is an
+    /// OptimizedMediaCache entry, never the clip's own original source).
     /// </summary>
     internal sealed class SkSourceDecoder : IDisposable
     {
@@ -85,6 +104,9 @@ namespace EditSharp.Render
         /// used to work. `plan` (see DecodeHwAccelPlan) resolves both the
         /// -hwaccel args AND which scale filter (GPU or CPU) builds the
         /// actual -vf string — defaults to DecodeHwAccelPlan.Software.
+        /// `fastOpen` shrinks ffmpeg's own stream-probing cost — see the
+        /// class remarks' FAST-OPEN section; only pass true for a file this
+        /// codebase built and controls the shape of.
         ///
         /// Output pixel format is rgba8888 — NOT PixelFormats.Primary
         /// (gbrap16le). That 16-bit choice was explicitly tied to the OLD
@@ -97,7 +119,7 @@ namespace EditSharp.Render
         /// </summary>
         public static SkSourceDecoder Start(
             string sourcePath, double sourceStartSeconds, int fps, int width, int height,
-            DecodeHwAccelPlan? plan = null)
+            DecodeHwAccelPlan? plan = null, bool fastOpen = false)
         {
             plan ??= DecodeHwAccelPlan.Software;
             string filter = plan.BuildFilterGraph(fps, width, height);
@@ -109,6 +131,22 @@ namespace EditSharp.Render
 
             args.AddRange(GraphUtilities.FilterThreadingArgs());
             args.AddRange(plan.HwAccelArgs);
+
+            if (fastOpen)
+            {
+                // See the class remarks' FAST-OPEN section. 32 KiB is
+                // enough for ffmpeg to see this file's own moov atom
+                // (already moved to the front by OptimizedMediaCache's
+                // +faststart — see its EncodeAsync remarks) and a handful
+                // of sample entries; analyzeduration 0 tells it to rely on
+                // probesize alone rather than also reading a slice of
+                // actual stream duration to cross-check timing, which is
+                // exactly the extra read this is trying to skip.
+                args.Add("-probesize");
+                args.Add("32k");
+                args.Add("-analyzeduration");
+                args.Add("0");
+            }
 
             if (sourceStartSeconds > 0)
             {
@@ -136,8 +174,22 @@ namespace EditSharp.Render
             };
             foreach (string arg in args) psi.ArgumentList.Add(arg);
 
+            var sw = Stopwatch.StartNew();
             var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             process.Start();
+
+            // TEMPORARY INSTRUMENTATION — process spawn time alone (before
+            // any frame has been read), split out from NextFrame's own
+            // cumulative pipe-read timing, specifically to answer "is
+            // ScrubToAsync's per-tick cost dominated by spawning ffmpeg
+            // itself, or by everything after (stream probing, seek, first
+            // decode)" — added after direct feedback that scrubbing was as
+            // slow as a fresh session start. Remove once fastOpen/+faststart
+            // are confirmed sufficient or a further fix replaces this.
+            EditSharpConfig.Logger.LogVerbose(
+                $"SkSourceDecoder.Start('{sourcePath}', fastOpen={fastOpen}): process spawned in " +
+                $"{sw.ElapsedMilliseconds}ms (stream probing/seek/first-frame cost is NOT included — " +
+                "see NextFrame's own timing for that).");
 
             // Deliberately NOT reading stderr asynchronously the way
             // NoiseRenderer/OptimizedMediaBuilder do for a short-lived

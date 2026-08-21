@@ -125,6 +125,47 @@ namespace EditSharp.Playback
     /// with no behavior change and no build competing with this session's
     /// own decode for CPU.
     ///
+    /// SCRUBBING (SupportsScrubbing / RefreshScrubbingSupportAsync /
+    /// ScrubToAsync / EndScrubbing): a second, separate playback surface
+    /// for "render me one frame at this arbitrary position, right now,"
+    /// distinct from Play(startPosition)'s "start a real paced session
+    /// there." Only meaningfully cheap when EVERY video source involved is
+    /// already on all-intra optimized media — a source still on its
+    /// original, likely long-GOP, delivery codec can be expensive to open
+    /// at an arbitrary offset, which is exactly what scrubbing does
+    /// repeatedly. SupportsScrubbing exposes that precondition as a single
+    /// read-only bool rather than making every consumer re-derive it
+    /// per-clip; it's computed via
+    /// RenderContentPreparation.AllVideoSourcesHaveSufficientCachedMediaAsync,
+    /// the same cache-sufficiency logic ProbeVideoAsync uses, so it can
+    /// never disagree with what a real session would actually do.
+    ///
+    /// FORWARD-STEPPING, NOT REOPEN-PER-TICK — REWORKED AFTER DIRECT
+    /// MEASUREMENT that a fresh decoder open, even against +faststart
+    /// optimized media with reduced probing (see SkSourceDecoder's
+    /// fastOpen), still costs on the order of ~0.1-0.3s — a real, mostly
+    /// fixed cost (process spawn, codec/filter init) that a per-tick
+    /// reopen design pays on EVERY scrub call, defeating "arbitrary seek
+    /// is as cheap as sequential decode" for anything that scrubs more
+    /// than once. The actual cheap operation all-intra media buys is
+    /// SEQUENTIAL FORWARD decode from an already-open decoder — that's the
+    /// property this class now spends: a scrub session keeps ONE
+    /// persistent SkClipContentSource alive (see _scrubContentSource)
+    /// across calls, and ScrubToAsync steps it FORWARD frame-by-frame
+    /// (discarding intermediate frames, keeping only the target) rather
+    /// than reopening, for any forward move within
+    /// ScrubForwardStepBudgetFrames of the last delivered position. Only a
+    /// genuine jump — backward, or a large forward jump — pays the reopen
+    /// cost, and pays it exactly once for that jump, not once per
+    /// subsequent frame. A scrub bar being dragged (the overwhelmingly
+    /// common real interaction) is a long run of small forward steps, so
+    /// this is the case that actually matters.
+    ///
+    /// A scrub session otherwise reuses expensive one-time setup
+    /// (GpuContext, SkSurfacePool, the content-prep dictionaries from one
+    /// PrepareContentAsync call) across every ScrubToAsync call until
+    /// EndScrubbing/Dispose — see EnsureScrubSessionBaseAsync.
+    ///
     /// KNOWN GAPS — tracked, not hidden, and re-prioritized per direct
     /// feedback (highest priority first):
     ///   1. SPEED &lt;= 0 (reverse playback) is NOT supported yet, but IS
@@ -133,6 +174,8 @@ namespace EditSharp.Playback
     ///      contract; reverse playback needs either a buffered scrub window
     ///      or a decoder design that supports it directly. Play() throws
     ///      rather than silently producing wrong output in the meantime.
+    ///      NOTE: ScrubToAsync's forward-stepping does NOT help here — a
+    ///      backward scrub still pays a full reopen, same as before.
     ///   2. ARBITRARY SPEED (audio tracking Speed != 1) is a MUST-HAVE, not
     ///      deferred-maybe. v1 only streams audio PCM in real time and
     ///      skips it entirely otherwise (logged, not silent) — needs real
@@ -152,6 +195,13 @@ namespace EditSharp.Playback
     ///      yet do anything FrameDropping-specific beyond what
     ///      leader/follower already provides — it needs gap 4 to become
     ///      meaningfully different from today's default.
+    ///   6. SCRUBBING — CLOSED this pass for the all-optimized-media,
+    ///      forward-or-small-jump case (see the SCRUBBING/FORWARD-STEPPING
+    ///      remarks above). A timeline with even one video source not yet
+    ///      cached simply reports SupportsScrubbing == false. A backward
+    ///      scrub or a jump larger than ScrubForwardStepBudgetFrames still
+    ///      pays a full reopen — genuinely can't be avoided without a
+    ///      buffered/multi-decoder design this pass doesn't build.
     /// </summary>
     public class Playback : IDisposable
     {
@@ -184,6 +234,15 @@ namespace EditSharp.Playback
         //publicly accessible check if the active session is currently paused
         public bool IsPaused => _pauseGate?.IsPaused ?? false;
 
+        //READ ONLY — whether every video source in Timeline currently has
+        //enough cached optimized media for ScrubToAsync to be uniformly
+        //cheap. See the class remarks' SCRUBBING section for the full
+        //reasoning. Kept up to date automatically at the start of every
+        //Play() session; call RefreshScrubbingSupportAsync yourself to
+        //check (or re-check, e.g. after a background prewarm completes)
+        //before ever calling Play() or ScrubToAsync.
+        public bool SupportsScrubbing { get; private set; }
+
         public event EventHandler<AudioSampleEventArgs>? AudioSample;
 
         //raised with a new chunk of mixed PCM audio, in real time (Speed == 1 only)
@@ -195,6 +254,7 @@ namespace EditSharp.Playback
         public event EventHandler<VideoFrameEventArgs>? VideoFrame;
 
         //raised with a new video frame's pixels when it is ready for playback
+        //(also raised by ScrubToAsync — see its own remarks)
         protected virtual void OnVideoFrame(VideoFrameEventArgs e)
         {
             VideoFrame?.Invoke(this, e);
@@ -229,6 +289,55 @@ namespace EditSharp.Playback
         private Task? _videoTask;
         private PlaybackAudioEngine? _audioEngine;
         private PlaybackPauseGate? _pauseGate;
+
+        //How many frames a forward ScrubToAsync step is willing to walk
+        //through sequentially (decoding and discarding each intermediate
+        //one) before it's cheaper to just pay a fresh reopen's cold-start
+        //cost instead — see the class remarks' FORWARD-STEPPING section.
+        //Chosen by reasoning about the numbers actually measured (a cold
+        //reopen against optimized media costs on the order of ~0.1-0.3s
+        //even after +faststart/fastOpen — see SkSourceDecoder's own
+        //remarks), not tuned against a real benchmark of this exact
+        //stepping path — flagged the same way this codebase flags its own
+        //other reasoned-not-measured constants (see MediaHasher.
+        //SampleCount). Deliberately small: per-frame decode that's cheap
+        //in STEADY STATE can still add up past a cold reopen's fixed cost
+        //if stepped too far, and a scrub bar dragged quickly is exactly
+        //the case that would hit that ceiling first.
+        private const int ScrubForwardStepBudgetFrames = 15;
+
+        //SCRUB SESSION STATE — lazily created by EnsureScrubSessionBaseAsync,
+        //reused across many ScrubToAsync calls, torn down by EndScrubbing/
+        //Dispose. Deliberately entirely separate from the Play()/_isPlaying
+        //session state above: scrubbing is meant to be usable WHILE paused
+        //(indeed only while not actively playing — see ScrubToAsync), and
+        //keying it off the same fields Play() uses would mean every scrub
+        //tick fights Play()'s own state machine for no reason.
+        private readonly SemaphoreSlim _scrubGate = new(1, 1);
+        private GpuContext? _scrubGpuContext;
+        private SkSurfacePool? _scrubSurfacePool;
+        private ConcurrentDictionary<Clip, (int, int)>? _scrubNativeSizes;
+        private ConcurrentDictionary<Clip, string>? _scrubStaticImagePaths;
+        private ConcurrentDictionary<Clip, DecodeHwAccelPlan>? _scrubDecodePlans;
+        private ConcurrentDictionary<Clip, string>? _scrubDecodeSourcePaths;
+        private ConcurrentBag<string>? _scrubTempFiles;
+        private Dictionary<int, List<Clip>>? _scrubDecoderReleaseSchedule;
+
+        //PERSISTENT DECODER STATE — see the class remarks' FORWARD-STEPPING
+        //section for why this exists. _scrubContentSource stays open and
+        //positioned across calls; _scrubLastFrameIndex is the frame index
+        //its decoders currently sit AT (i.e. the last frame actually
+        //decoded and delivered); _scrubLastDeliveredBuffer/Length is a
+        //standalone COPY (not the pooled render buffer, which gets
+        //returned to ArrayPool immediately after delivery) so a repeat
+        //ScrubToAsync call for the exact same position can redeliver
+        //without touching any decoder — SkSourceDecoder.NextFrame() is
+        //one-shot per call, so re-requesting the current frame would
+        //otherwise silently decode past it.
+        private SkClipContentSource? _scrubContentSource;
+        private int? _scrubLastFrameIndex;
+        private byte[]? _scrubLastDeliveredBuffer;
+        private int _scrubLastDeliveredLength;
 
         /// <summary>
         /// Starts, resumes, or seeks-and-plays — one entry point covering
@@ -427,6 +536,270 @@ namespace EditSharp.Playback
             _videoTask = null;
         }
 
+        /// <summary>
+        /// Checks (or re-checks) SupportsScrubbing WITHOUT requiring an
+        /// active or prior Play() session — e.g. right after import, or
+        /// after a consumer's own background OptimizedMediaCache.PrewarmAsync
+        /// calls finish. Safe to call at any time, including while playing.
+        /// Play() also recomputes this itself at the start of every
+        /// session, so calling this beforehand is purely so a consumer can
+        /// decide whether to offer scrubbing UI before ever pressing play.
+        /// </summary>
+        public async Task<bool> RefreshScrubbingSupportAsync(CancellationToken ct = default)
+        {
+            bool supported = await RenderContentPreparation.AllVideoSourcesHaveSufficientCachedMediaAsync(
+                Timeline, (int)RenderSettings.Resolution.X, (int)RenderSettings.Resolution.Y);
+
+            ct.ThrowIfCancellationRequested();
+
+            SupportsScrubbing = supported;
+            return supported;
+        }
+
+        /// <summary>
+        /// Renders and delivers exactly one frame at `position`, via the
+        /// existing VideoFrame event — the scrubbing entry point. See the
+        /// class remarks' SCRUBBING/FORWARD-STEPPING sections for the full
+        /// design.
+        ///
+        /// Requires SupportsScrubbing (throws InvalidOperationException
+        /// otherwise — call RefreshScrubbingSupportAsync first if unsure,
+        /// or prewarm the missing sources). Requires that a session isn't
+        /// actively PLAYING right now — Pause() first, or never Play() at
+        /// all this session — since an actively-pacing video loop and a
+        /// scrub tick would otherwise both try to deliver frames/manage
+        /// _lastKnownPosition at the same time with no coordination between
+        /// them. Scrubbing while genuinely paused is fine and expected —
+        /// that's the primary intended use (drag a scrub bar while
+        /// paused, then Play() again from wherever the user let go).
+        ///
+        /// COST MODEL, so a consumer can reason about it: a REPEAT call at
+        /// the exact same position is free (redelivers a cached frame, no
+        /// decode). A call within ScrubForwardStepBudgetFrames FORWARD of
+        /// the last delivered position steps the already-open decoder(s)
+        /// forward — cheap, steady-state per-frame decode cost, no process
+        /// spawn. A call BACKWARD of the last position, or a forward jump
+        /// larger than that budget, pays a full decoder reopen — the same
+        /// ~0.1-0.3s cold-start cost Play() itself pays, just for this one
+        /// clip's decoder(s) rather than a whole session's.
+        /// </summary>
+        public async Task ScrubToAsync(TimeSpan position, CancellationToken ct = default)
+        {
+            if (!SupportsScrubbing)
+                throw new InvalidOperationException(
+                    "ScrubToAsync requires SupportsScrubbing — not every video source in Timeline " +
+                    "currently has sufficient cached optimized media. Prewarm the missing sources " +
+                    "via OptimizedMediaCache.PrewarmAsync and call RefreshScrubbingSupportAsync again.");
+
+            lock (_stateLock)
+            {
+                if (_isPlaying && !(_pauseGate?.IsPaused ?? false))
+                    throw new InvalidOperationException(
+                        "ScrubToAsync cannot be used while actively playing — Pause() first.");
+            }
+
+            if (position < TimeSpan.Zero || position > Timeline.Duration)
+                throw new ArgumentOutOfRangeException(nameof(position),
+                    $"position must be within [0, {Timeline.Duration}].");
+
+            int width = (int)RenderSettings.Resolution.X;
+            int height = (int)RenderSettings.Resolution.Y;
+            int fps = RenderSettings.Framerate;
+
+            await _scrubGate.WaitAsync(ct);
+            try
+            {
+                await EnsureScrubSessionBaseAsync(width, height, ct);
+
+                int targetFrameIndex = (int)(position.TotalSeconds * fps);
+
+                if (targetFrameIndex == _scrubLastFrameIndex && _scrubLastDeliveredBuffer != null)
+                {
+                    //Exact repeat of the last delivered position —
+                    //SkSourceDecoder.NextFrame() is one-shot-per-call, so
+                    //calling it again here would silently advance PAST
+                    //this frame rather than re-returning it. Redeliver the
+                    //cached bytes instead of touching any decoder.
+                    OnVideoFrame(new VideoFrameEventArgs(
+                        _scrubLastDeliveredBuffer, _scrubLastDeliveredLength, width, height, position));
+                    return;
+                }
+
+                //See the class remarks' FORWARD-STEPPING section: only a
+                //genuine jump pays a reopen. _scrubContentSource == null
+                //covers both "never scrubbed yet this session" and
+                //"just torn down by EndScrubbing".
+                bool needsReopen =
+                    _scrubContentSource == null ||
+                    _scrubLastFrameIndex == null ||
+                    targetFrameIndex < _scrubLastFrameIndex.Value ||
+                    targetFrameIndex - _scrubLastFrameIndex.Value > ScrubForwardStepBudgetFrames;
+
+                int fromFrameIndex;
+
+                if (needsReopen)
+                {
+                    _scrubContentSource?.Dispose();
+
+                    Dictionary<Clip, TimeSpan> seekOffsets = ComputeSeekOffsets(Timeline, position);
+
+                    _scrubContentSource = new SkClipContentSource(
+                        fps, _scrubNativeSizes!, _scrubStaticImagePaths!, _scrubDecodePlans!,
+                        seekOffsets, _scrubDecodeSourcePaths!);
+
+                    fromFrameIndex = targetFrameIndex;
+                }
+                else
+                {
+                    fromFrameIndex = _scrubLastFrameIndex!.Value + 1;
+                }
+
+                SkClipContentSource contentSource = _scrubContentSource;
+
+                byte[]? pooledBuffer = null;
+                int length = 0;
+
+                for (int frameIndex = fromFrameIndex; frameIndex <= targetFrameIndex; frameIndex++)
+                {
+                    FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps, _scrubNativeSizes!);
+
+                    (byte[] buffer, int bufLength) = SkFrameCompositor.RenderFrame(
+                        state, contentSource, width, height, fps, _scrubSurfacePool!);
+
+                    if (frameIndex == targetFrameIndex)
+                    {
+                        pooledBuffer = buffer;
+                        length = bufLength;
+                    }
+                    else
+                    {
+                        //an intermediate, discarded step — the decode is
+                        //what advances the decoder correctly for the NEXT
+                        //call; the composited pixels themselves are not
+                        //needed
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    }
+
+                    if (_scrubDecoderReleaseSchedule!.TryGetValue(frameIndex, out List<Clip>? finished))
+                    {
+                        foreach (Clip clip in finished) contentSource.ReleaseDecoder(clip);
+                    }
+                }
+
+                _scrubLastFrameIndex = targetFrameIndex;
+
+                try
+                {
+                    //Own copy — pooledBuffer is returned to ArrayPool right
+                    //after delivery below and must not be relied on to
+                    //still hold this frame's bytes afterward.
+                    _scrubLastDeliveredBuffer = pooledBuffer![..length];
+                    _scrubLastDeliveredLength = length;
+
+                    OnVideoFrame(new VideoFrameEventArgs(pooledBuffer, length, width, height, position));
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(pooledBuffer!);
+                }
+
+                lock (_stateLock) { _lastKnownPosition = position; }
+            }
+            finally
+            {
+                _scrubGate.Release();
+            }
+        }
+
+        /// <summary>
+        /// One-time (per scrub session) setup shared across every
+        /// ScrubToAsync call: GpuContext, SkSurfacePool, the content-prep
+        /// dictionaries from a single PrepareContentAsync call, and the
+        /// decoder-release schedule. Deliberately does NOT open
+        /// _scrubContentSource itself — that depends on the target
+        /// position's own seekOffsets, which ScrubToAsync computes only
+        /// when a reopen is actually needed (see its own remarks). No-ops
+        /// if already prepared. NOT guarded by its own lock — callers hold
+        /// _scrubGate for the whole ScrubToAsync call already.
+        /// </summary>
+        private async Task EnsureScrubSessionBaseAsync(int width, int height, CancellationToken ct)
+        {
+            if (_scrubGpuContext != null) return;
+
+            var tempFiles = new ConcurrentBag<string>();
+            var nativeSizes = new ConcurrentDictionary<Clip, (int, int)>();
+            var staticImagePaths = new ConcurrentDictionary<Clip, string>();
+            var decodePlans = new ConcurrentDictionary<Clip, DecodeHwAccelPlan>();
+            var decodeSourcePaths = new ConcurrentDictionary<Clip, string>();
+
+            await RenderContentPreparation.PrepareContentAsync(
+                Timeline, width, height, RenderSettings.HardwareAccelerator,
+                nativeSizes, staticImagePaths, decodePlans, decodeSourcePaths, tempFiles);
+
+            ct.ThrowIfCancellationRequested();
+
+            _scrubTempFiles = tempFiles;
+            _scrubNativeSizes = nativeSizes;
+            _scrubStaticImagePaths = staticImagePaths;
+            _scrubDecodePlans = decodePlans;
+            _scrubDecodeSourcePaths = decodeSourcePaths;
+            _scrubDecoderReleaseSchedule =
+                RenderContentPreparation.BuildDecoderReleaseSchedule(Timeline, RenderSettings.Framerate);
+
+            _scrubGpuContext = GpuContext.Create(RenderSettings.HardwareAccelerator);
+            _scrubSurfacePool = new SkSurfacePool(
+                _scrubGpuContext.GRContext, width, height, Timeline.Channels.Count);
+        }
+
+        /// <summary>
+        /// Tears down the persistent scrub session (the persistent
+        /// SkClipContentSource and its decoders, GpuContext, SkSurfacePool,
+        /// content-prep state, and any temp files PrepareContentAsync
+        /// created for it), if one was ever started. Safe to call even if
+        /// ScrubToAsync was never used. Also called from Dispose() — a
+        /// scrub session isn't cleaned up by Stop(), since the two are
+        /// deliberately independent (see the SCRUB SESSION STATE fields'
+        /// own remarks).
+        /// </summary>
+        public void EndScrubbing()
+        {
+            _scrubGate.Wait();
+            try
+            {
+                _scrubContentSource?.Dispose();
+                _scrubContentSource = null;
+                _scrubLastFrameIndex = null;
+                _scrubLastDeliveredBuffer = null;
+                _scrubLastDeliveredLength = 0;
+
+                _scrubSurfacePool?.Dispose();
+                _scrubSurfacePool = null;
+
+                _scrubGpuContext?.Dispose();
+                _scrubGpuContext = null;
+
+                _scrubNativeSizes = null;
+                _scrubStaticImagePaths = null;
+                _scrubDecodePlans = null;
+                _scrubDecodeSourcePaths = null;
+                _scrubDecoderReleaseSchedule = null;
+
+                if (_scrubTempFiles != null)
+                {
+                    foreach (string path in _scrubTempFiles)
+                    {
+                        try { File.Delete(path); } catch { /* best-effort cleanup */ }
+                    }
+
+                    _scrubTempFiles = null;
+                }
+            }
+            finally
+            {
+                _scrubGate.Release();
+            }
+        }
+
         private async Task VideoLoopAsync(
             CancellationToken token, TimeSpan startPosition,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
@@ -455,6 +828,14 @@ namespace EditSharp.Playback
                 await RenderContentPreparation.PrepareContentAsync(
                     Timeline, width, height, RenderSettings.HardwareAccelerator,
                     nativeSizes, staticImagePaths, decodePlans, decodeSourcePaths, tempFiles);
+
+                //SupportsScrubbing is recomputed for every session from the
+                //exact same decision PrepareContentAsync/ProbeVideoAsync
+                //just made — reusing decodeSourcePaths here (rather than a
+                //second cache lookup pass) both saves the extra probing
+                //work and guarantees this can never disagree with what THIS
+                //session actually opened its decoders against.
+                SupportsScrubbing = AllVideoClipsRedirectedToCache(Timeline, decodeSourcePaths);
 
                 Dictionary<Clip, TimeSpan> seekOffsets = ComputeSeekOffsets(Timeline, startPosition);
 
@@ -659,6 +1040,35 @@ namespace EditSharp.Playback
         }
 
         /// <summary>
+        /// Cheap, no-I/O check: true when every video SourceClip in
+        /// `timeline` was redirected in `decodeSourcePaths` (i.e. its
+        /// decode path differs from its own original Source.Path) —
+        /// meaning THIS session's own PrepareContentAsync call actually
+        /// found and used a sufficient cache entry for every one of them.
+        /// A timeline with no video clips is trivially true. Kept separate
+        /// from RenderContentPreparation.AllVideoSourcesHaveSufficientCachedMediaAsync
+        /// (which re-probes/re-looks-up from scratch, for use BEFORE a
+        /// session exists) purely as a cheap same-session shortcut — the
+        /// two must always agree since they're deciding the same thing.
+        /// </summary>
+        private static bool AllVideoClipsRedirectedToCache(
+            Timeline timeline, IReadOnlyDictionary<Clip, string> decodeSourcePaths)
+        {
+            foreach (Channel channel in timeline.Channels)
+            {
+                foreach (Clip clip in channel.Clips.Values)
+                {
+                    if (clip is not SourceClip { Source.Type: SourceType.Video } video) continue;
+
+                    if (!decodeSourcePaths.TryGetValue(clip, out string? decodePath)) return false;
+                    if (decodePath == video.Source.Path) return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// Full session teardown for the NATURAL-END case specifically —
         /// same fields Stop() clears, but callable from within the video
         /// loop itself (no CancellationTokenSource to cancel or Task to
@@ -718,6 +1128,7 @@ namespace EditSharp.Playback
         public void Dispose()
         {
             Stop();
+            EndScrubbing();
         }
     }
 }
