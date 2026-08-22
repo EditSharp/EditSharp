@@ -1,7 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-
+ 
 namespace EditSharp.Playback
 {
     /// <summary>
@@ -44,7 +44,7 @@ namespace EditSharp.Playback
         private int _readyCount;
         private readonly TaskCompletionSource<bool> _gate =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-
+ 
         /// <param name="onReleased">
         /// Invoked exactly once, synchronously, the instant every
         /// participant has arrived — right before the gate actually opens.
@@ -56,11 +56,11 @@ namespace EditSharp.Playback
         {
             if (participantCount <= 0)
                 throw new ArgumentOutOfRangeException(nameof(participantCount));
-
+ 
             _participantCount = participantCount;
             _onReleased = onReleased;
         }
-
+ 
         /// <summary>
         /// Called once a participant (the video loop, the audio pump loop)
         /// has finished its own setup and is ready to start its pacing
@@ -76,10 +76,10 @@ namespace EditSharp.Playback
                 _onReleased?.Invoke();
                 _gate.TrySetResult(true);
             }
-
+ 
             await _gate.Task.WaitAsync(token);
         }
-
+ 
         /// <summary>
         /// Called by a participant whose OWN setup failed, so the other
         /// participant doesn't hang at ReadyAndWaitAsync waiting forever
@@ -93,3 +93,4 @@ namespace EditSharp.Playback
         }
     }
 }
+ 

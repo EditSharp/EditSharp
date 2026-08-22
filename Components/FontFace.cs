@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 using SkiaSharp;
-
+ 
 namespace EditSharp.Components
 {
     /// <summary>
@@ -30,7 +30,7 @@ namespace EditSharp.Components
         TrebuchetMs,
         Verdana,
     }
-
+ 
     public static class FontFaceExtensions
     {
         private static readonly Dictionary<FontFace, string> FamilyNames = new()
@@ -57,19 +57,20 @@ namespace EditSharp.Components
             [FontFace.TrebuchetMs] = "Trebuchet MS",
             [FontFace.Verdana] = "Verdana",
         };
-
+ 
         /// <summary>The real font family name SKFontManager needs to resolve this face.</summary>
         public static string ToFamilyName(this FontFace face) => FamilyNames[face];
-
+ 
         /// <summary>
         /// Resolves directly to an SKTypeface via the system font manager. Convenience
         /// wrapper around SKFontManager.Default.MatchFamily(face.ToFamilyName(), style).
         /// </summary>
         public static SKTypeface ToTypeface(this FontFace face, SKFontStyle? style = null) =>
             SKFontManager.Default.MatchFamily(face.ToFamilyName(), style ?? SKFontStyle.Normal);
-
+ 
         /// <summary>Resolves directly to an SKFont at the given size.</summary>
         public static SKFont ToFont(this FontFace face, float size, SKFontStyle? style = null) =>
             new(face.ToTypeface(style), size);
     }
 }
+ 

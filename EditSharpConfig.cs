@@ -1,6 +1,6 @@
 using System;
-using EditSharp.Render;
-
+using EditSharp.Composite;
+ 
 namespace EditSharp
 {
     /// <summary>
@@ -12,7 +12,7 @@ namespace EditSharp
     public static class EditSharpConfig
     {
         private static string _tempDirectory = Path.Combine(AppContext.BaseDirectory, "Temp");
-
+ 
         /// <summary>
         /// Root directory EditSharp writes scratch files into — rasterized text
         /// PNGs, oversized filter-graph scripts, segmented-render intermediates.
@@ -37,9 +37,9 @@ namespace EditSharp
             get => _tempDirectory;
             set => _tempDirectory = value ?? throw new ArgumentNullException(nameof(value));
         }
-
+ 
         private static string _optimizedMediaDirectory = Path.Combine(AppContext.BaseDirectory, "OptimizedMedia");
-
+ 
         /// <summary>
         /// Root directory OptimizedMediaCache reads and writes its
         /// persistent, content-addressed optimized media into — the
@@ -67,7 +67,7 @@ namespace EditSharp
             get => _optimizedMediaDirectory;
             set => _optimizedMediaDirectory = value ?? throw new ArgumentNullException(nameof(value));
         }
-
+ 
         /// <summary>
         /// Which codec OptimizedMediaCache builds persistent optimized media
         /// with — DNxHR or ProRes, decided in conversation to be
@@ -87,9 +87,9 @@ namespace EditSharp
         /// a collision to avoid.
         /// </summary>
         public static VideoCodec OptimizedMediaCodec { get; set; } = VideoCodec.DNxHR;
-
+ 
         private static int _optimizedMediaMaxDimension = 3840;
-
+ 
         /// <summary>
         /// The cap OptimizedMediaCache builds a source's optimized media
         /// at, on its longest axis — native resolution if the source is
@@ -111,28 +111,28 @@ namespace EditSharp
                 : throw new ArgumentOutOfRangeException(
                     nameof(value), "OptimizedMediaMaxDimension must be positive.");
         }
-
+ 
         /// <summary>
         /// Where EditSharp reports render progress and diagnostics. Defaults to
         /// a no-op logger, so a consumer who never sets this gets silence rather
         /// than an exception or unexpected console output.
         /// </summary>
         public static IEditSharpLogger Logger { get; set; } = NullEditSharpLogger.Instance;
-
+ 
         /// <summary>
         /// Executable name or full path used to launch ffmpeg. Defaults to
         /// "ffmpeg", resolved from PATH.
         /// </summary>
         public static string FfmpegPath { get; set; } = "ffmpeg";
-
+ 
         /// <summary>
         /// Executable name or full path used to launch ffprobe. Defaults to
         /// "ffprobe", resolved from PATH.
         /// </summary>
         public static string FfprobePath { get; set; } = "ffprobe";
-
+ 
         private static int _filterThreads = 1;
-
+ 
         /// <summary>
         /// How many threads libavfilter may use to execute a filter graph
         /// (ffmpeg's -filter_threads / -filter_complex_threads). Defaults to
@@ -221,7 +221,7 @@ namespace EditSharp
                 : throw new ArgumentOutOfRangeException(
                     nameof(value), "FilterThreads must be at least 1.");
         }
-
+ 
         /// <summary>
         /// Which swscale backend(s) ffmpeg 9.0+ is allowed to use for scale/
         /// format conversions (the scaler's -sws_backends flag). Defaults to
@@ -258,7 +258,7 @@ namespace EditSharp
         /// </summary>
         public static string SwsBackends { get; set; } = "x86";
     }
-
+ 
     /// <summary>
     /// Minimal logging seam so EditSharp doesn't assume Console, a specific
     /// logging framework, or any other ambient logger exists in the host
@@ -270,20 +270,20 @@ namespace EditSharp
         //standard log for information that is important to an end user
         //(ex. "render complete in x seconds", "
         void Log(string message);
-
+ 
         //log for debug information and information about each individual step of a process
         //(ex. info on renders of individual frames)
         void LogVerbose(string message);
-
+ 
         //log for when an issue occurs, but the issue is not fatal
         //(ex. fallbacks during a GPU render)
         void LogWarning(string message);
-
+ 
         //log for when an unrecoverable issue occurs
         //(ex. a throw happens during a render or ffmpeg crashes during a render)
         void LogError(string message);
     }
-
+ 
     internal sealed class NullEditSharpLogger : IEditSharpLogger
     {
         public static readonly NullEditSharpLogger Instance = new();
@@ -294,3 +294,4 @@ namespace EditSharp
         public void LogError(string message) { }
     }
 }
+ 

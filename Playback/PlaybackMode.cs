@@ -1,7 +1,7 @@
 using System;
-
+ 
 namespace EditSharp.Playback;
-
+ 
 public enum PlaybackMode
 {
     //ensure every frame is played 
@@ -14,3 +14,4 @@ public enum PlaybackMode
     //delays/skips frames to hit target
     SyncToAudio
 }
+ 

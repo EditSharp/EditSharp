@@ -1,7 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-
+ 
 namespace EditSharp.Playback
 {
     /// <summary>
@@ -30,12 +30,12 @@ namespace EditSharp.Playback
     {
         private readonly object _lock = new();
         private TaskCompletionSource<bool>? _resumeSignal;
-
+ 
         public bool IsPaused
         {
             get { lock (_lock) return _resumeSignal != null; }
         }
-
+ 
         public void Pause()
         {
             lock (_lock)
@@ -43,7 +43,7 @@ namespace EditSharp.Playback
                 _resumeSignal ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             }
         }
-
+ 
         public void Resume()
         {
             TaskCompletionSource<bool>? signal;
@@ -52,10 +52,10 @@ namespace EditSharp.Playback
                 signal = _resumeSignal;
                 _resumeSignal = null;
             }
-
+ 
             signal?.TrySetResult(true);
         }
-
+ 
         /// <summary>
         /// Returns immediately if not currently paused. If paused, waits
         /// until Resume() is called — or the token is cancelled (Stop()
@@ -67,8 +67,9 @@ namespace EditSharp.Playback
             Task? waitTask;
             lock (_lock) { waitTask = _resumeSignal?.Task; }
             if (waitTask == null) return;
-
+ 
             await waitTask.WaitAsync(token);
         }
     }
 }
+ 

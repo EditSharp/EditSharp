@@ -6,3 +6,4 @@ namespace EditSharp.Components.Transitions
         public override Transition Duplicate() => new FadeTransition { Duration = Duration };
     }
 }
+ 

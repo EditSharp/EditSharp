@@ -12,71 +12,60 @@ using EditSharp;
 using EditSharp.Components;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Transitions;
-
+using EditSharp.Composite;
+ 
 namespace EditSharp.Render
 {
     /// <summary>
-    /// Entry point for the render strategy — item 13's full rewrite of the
-    /// render loop, wiring items 3-12's Skia compositor into an actual
-    /// end-to-end render for the first time.
+    /// Entry point for the render strategy — wires the Skia compositor into
+    /// an actual end-to-end render.
     ///
-    /// RENAME NOTE: this class was FrameRenderer; renamed to Renderer for
-    /// end-user clarity (the file was already called Renderer.cs before the
-    /// class caught up). Doc comments elsewhere in the codebase that still
-    /// say "FrameRenderer" are historical references to this same type and
-    /// were not swept in this pass — flagged, not silently left as if
-    /// intentional.
-    ///
-    /// Shape of a render, POST-rewrite:
-    ///   1. Probe every video/image source's native size (MediaProbe) and
-    ///      rasterize every TextClip's PNG (TextRasterizer) — everything
-    ///      about a clip that's constant across its whole life, done once
-    ///      up front exactly as before. NO OptimizedMediaBuilder step
-    ///      anymore — that pre-render pass existed to give independent
-    ///      per-frame ffmpeg processes fast random-access seeks (items 10,
-    ///      11), and there is no such process left to serve. (A DIFFERENT,
-    ///      persistent optimized-media cache — OptimizedMediaCache — was
-    ///      added later, opportunistically, for a different reason: see
-    ///      RenderContentPreparation.ProbeVideoAsync's own remarks.)
-    ///   2. Render every output frame SEQUENTIALLY (no concurrency gate —
-    ///      see below) directly against an in-process SKCanvas
-    ///      (SkFrameCompositor), appending each frame's raw RGBA8888 bytes
-    ///      to a single growing lossless accumulator file. A video clip's
-    ///      SkSourceDecoder is opened on its first visible frame and
-    ///      disposed once its visible window ends (SkClipContentSource).
+    /// Shape of a render:
+    ///   1. Probe every Video-type MediaSourceNode's native size (MediaProbe)
+    ///      across the whole timeline — everything about a video clip's media
+    ///      inputs that's constant across its whole life, done once up front
+    ///      (RenderContentPreparation). TextInputNode/ColorGeneratorInputNode/
+    ///      NoiseInputNode/TimelineVideoInputNode need no such up-front prep
+    ///      any more — see RenderContentPreparation's own remarks.
+    ///   2. Render every output frame SEQUENTIALLY directly against an
+    ///      in-process SKCanvas (SkFrameCompositor), appending each frame's
+    ///      raw RGBA8888 bytes to a single growing lossless accumulator
+    ///      file. A Video-type MediaSourceNode's SkSourceDecoder is opened on
+    ///      its clip's first visible frame and disposed once that clip's
+    ///      visible window ends (SkClipContentSource).
     ///   3. Mux that accumulated video against the timeline's audio
-    ///      (FinalizeOutputAsync) and encode to Blueprint's chosen codec —
-    ///      the one ffmpeg subprocess step left on the video side, and the
-    ///      only lossy step in the whole pipeline.
+    ///      (FinalizeOutputAsync) and encode to Blueprint's chosen codec.
     ///
-    /// WHY FULLY SEQUENTIAL, NOT JUST "CONCURRENCY DEFAULTS TO 1": item 11
-    /// already decided FrameRenderConcurrency (parallel OUTPUT frames) is
-    /// incompatible with a single ordered pipe per video source and
-    /// dropped the Blueprint property, but left FrameRenderer's own
-    /// semaphore/task-array machinery in place, gated at 1. That machinery
-    /// has no remaining purpose now that RenderFrameAsync's replacement
-    /// (SkFrameCompositor.RenderFrame) is synchronous, in-process Skia
-    /// work rather than an awaited ffmpeg subprocess — there's nothing left
-    /// to overlap. Removed outright here, not just left gated at 1.
-    ///
-    /// PLAYBACK NOTE: PrepareContentAsync and BuildDecoderReleaseSchedule
-    /// moved out to RenderContentPreparation so EditSharp.Playback can share
-    /// them verbatim rather than re-deriving the same "what does every clip
-    /// need before frame 0" logic a second time. Everything else here is
-    /// still full-render-specific (the accumulator file, the mux/encode
-    /// finalize step) and has no playback equivalent.
+    /// "CLIPS ARE GRAPHS" REWRITE: RenderContentPreparation's
+    /// nativeSizes/decodePlans/decodeSourcePaths dictionaries are now keyed
+    /// by InputNode Id (Guid), not by Clip — a VideoClip's graph can contain
+    /// more than one MediaSourceNode. staticImagePaths and the tempFiles bag
+    /// PrepareContentAsync used to take are both gone from that call — text
+    /// rasterization now happens lazily inside SkClipContentSource itself,
+    /// which owns cleaning up its own temp files on Dispose (this file's own
+    /// tempFiles bag is still used for the render's OWN temp files — the raw
+    /// video accumulator and the raw audio PCM — just no longer shared with
+    /// content preparation). FrameStateResolver.Resolve no longer takes a
+    /// nativeSizes parameter at all — see its own remarks.
     /// </summary>
     public static class Renderer
     {
+        //Standard, plenty for any of AudioCodec's targets (AAC/MP3/FLAC all
+        //happily accept 48kHz stereo) — matches PlaybackAudioEngine's own
+        //SampleRate/ChannelCount constants, so a render and a live preview of
+        //the same timeline are mixed identically.
+        private const int AudioSampleRate = 48000;
+        private const int AudioChannelCount = 2;
+ 
         public static async Task RenderAsync(Blueprint blueprint)
         {
             Validate(blueprint);
-
+ 
             var tempFiles = new ConcurrentBag<string>();
             var sw = Stopwatch.StartNew();
-
+ 
             EditSharpConfig.Logger.Log("Starting render.");
-
+ 
             try
             {
                 await RenderCoreAsync(blueprint, tempFiles);
@@ -90,117 +79,82 @@ namespace EditSharp.Render
                 }
             }
         }
-
+ 
         private static async Task RenderCoreAsync(Blueprint blueprint, ConcurrentBag<string> tempFiles)
         {
             Timeline timeline = blueprint.Timeline;
             int width = (int)blueprint.RenderSettings.Resolution.X;
             int height = (int)blueprint.RenderSettings.Resolution.Y;
             int fps = blueprint.RenderSettings.Framerate;
-
-            //ConcurrentDictionary rather than plain Dictionary: PrepareContentAsync
-            //below runs one task per clip needing probing/rasterizing, all
-            //writing into these same two dictionaries concurrently. The old
-            //PrepareStaticContentAsync had this exact same shape and used a
-            //plain Dictionary, which is not safe for concurrent writes even to
-            //distinct keys (internal resize can race) — fixed here in passing,
-            //not a behaviour change worth its own checklist item.
-            var nativeSizes = new ConcurrentDictionary<Clip, (int, int)>();
-            var staticImagePaths = new ConcurrentDictionary<Clip, string>();
-            var decodePlans = new ConcurrentDictionary<Clip, DecodeHwAccelPlan>();
-
-            //which file each video clip's decoder actually opens — its own
-            //Source.Path by default, or a persistent OptimizedMediaCache
-            //entry when RenderContentPreparation.ProbeVideoAsync found a
-            //big-enough one for that source's content. See that method's
-            //own remarks; this is a pure opportunistic speed-up; a render
-            //against a completely uncached project behaves identically to
-            //before this dictionary existed.
-            var decodeSourcePaths = new ConcurrentDictionary<Clip, string>();
-
+            HardwareAccelerator hwAccel = blueprint.RenderSettings.HardwareAccelerator;
+ 
+            var nativeSizes = new ConcurrentDictionary<Guid, (int, int)>();
+            var decodePlans = new ConcurrentDictionary<Guid, DecodeHwAccelPlan>();
+            var decodeSourcePaths = new ConcurrentDictionary<Guid, string>();
+ 
             var prepSw = Stopwatch.StartNew();
             await RenderContentPreparation.PrepareContentAsync(
-                timeline, width, height, blueprint.RenderSettings.HardwareAccelerator,
-                nativeSizes, staticImagePaths, decodePlans, decodeSourcePaths, tempFiles);
+                timeline, width, height, hwAccel, nativeSizes, decodePlans, decodeSourcePaths);
             EditSharpConfig.Logger.LogVerbose($"Content prepared in {prepSw.ElapsedMilliseconds}ms.");
-
-            //when a video clip's decoder can be torn down — computed once,
-            //up front, from each clip's own known End time. Same role as the
-            //old OptimizedMediaBuilder deletion schedule, keyed on Clip
-            //identity instead of a media file path since there's no file to
-            //delete anymore, only a subprocess to kill
+ 
             Dictionary<int, List<Clip>> decoderReleaseSchedule =
                 RenderContentPreparation.BuildDecoderReleaseSchedule(timeline, fps);
-
+ 
             int totalFrames = Math.Max(1, (int)Math.Ceiling(timeline.Duration.TotalSeconds * fps));
-
+ 
             string accumulatorPath = GraphUtilities.GetVideoTempFilePath($"frames_{Guid.NewGuid():N}.raw");
             tempFiles.Add(accumulatorPath);
-
+ 
             EditSharpConfig.Logger.Log(
                 $"Rendering {totalFrames} frame(s) at {width}x{height}@{fps}fps " +
                 "(sequential, in-process Skia compositor).");
-
+ 
             using var contentSource = new SkClipContentSource(
-                fps, nativeSizes, staticImagePaths, decodePlans, decodeSourcePaths: decodeSourcePaths);
-
-            // One GRContext (or null -> software raster) for the whole render
-            // session, and one surface pool sitting on top of it — both live
-            // exactly as long as the frame loop below, since nothing about
-            // either is safe to share across separate renders (a GRContext
-            // wraps a real GPU device/command-queue handle; the pool's
-            // contents are only valid while that context is). Seeded with one
-            // canvas-sized surface per channel — see SkSurfacePool's own
-            // remarks for why that count, specifically.
-            using GpuContext gpuContext = GpuContext.Create(blueprint.RenderSettings.HardwareAccelerator);
+                fps, hwAccel, nativeSizes, decodePlans, decodeSourcePaths: decodeSourcePaths);
+ 
+            using GpuContext gpuContext = GpuContext.Create(hwAccel);
             using var surfacePool = new SkSurfacePool(
                 gpuContext.GRContext, width, height, timeline.Channels.Count);
-
+ 
+            //audio evaluation touches no GPU/Skia state at all, so it's kicked
+            //off concurrently with frame rendering rather than after it —
+            //independent work, no reason to serialize the two
+            Task<AudioBuffer> audioTask = AudioMixer.ComposeAsync(timeline, AudioSampleRate, AudioChannelCount);
+ 
             using (var accumulator = new FileStream(
                 accumulatorPath, FileMode.Create, FileAccess.Write, FileShare.None,
                 bufferSize: 1 << 20))
             {
                 await RenderAllFramesAsync(
-                    timeline, fps, width, height, nativeSizes, contentSource,
+                    timeline, fps, width, height, contentSource,
                     decoderReleaseSchedule, totalFrames, accumulator, surfacePool);
             }
-
+ 
+            AudioBuffer masterAudio = await audioTask;
+ 
             EditSharpConfig.Logger.Log("Finalizing output (mux + encode)...");
             var finalizeSw = Stopwatch.StartNew();
-            await FinalizeOutputAsync(accumulatorPath, width, height, fps, blueprint, tempFiles);
+            await FinalizeOutputAsync(accumulatorPath, masterAudio, width, height, fps, blueprint, tempFiles);
             EditSharpConfig.Logger.Log($"Finalize complete in {finalizeSw.ElapsedMilliseconds}ms.");
         }
-
-        /// <summary>
-        /// Renders every output frame, strictly in order, writing each to
-        /// the accumulator as it's produced. No concurrency gate, no task
-        /// array — see the class remarks for why that machinery had nothing
-        /// left to overlap once RenderFrameAsync's ffmpeg subprocess was
-        /// replaced with synchronous in-process Skia work. Strict order is
-        /// still required for two reasons, same as before: the accumulator
-        /// is a headerless raw stream with no per-frame timestamps, and
-        /// every active SkSourceDecoder must see its frames requested in
-        /// increasing order (see SkSourceDecoder's own "sequentially
-        /// forward" contract).
-        /// </summary>
+ 
         private static async Task RenderAllFramesAsync(
             Timeline timeline, int fps, int width, int height,
-            ConcurrentDictionary<Clip, (int, int)> nativeSizes,
             SkClipContentSource contentSource,
             Dictionary<int, List<Clip>> decoderReleaseSchedule,
             int totalFrames, Stream accumulator, SkSurfacePool surfacePool)
         {
             var sw = Stopwatch.StartNew();
-
+ 
             long previousElapsedMs = 0;
-
+ 
             for (int frameIndex = 0; frameIndex < totalFrames; frameIndex++)
             {
-                FrameState state = FrameStateResolver.Resolve(timeline, frameIndex, fps, nativeSizes);
-
+                FrameState state = FrameStateResolver.Resolve(timeline, frameIndex, fps);
+ 
                 (byte[] buffer, int length) = SkFrameCompositor.RenderFrame(
                     state, contentSource, width, height, fps, surfacePool);
-
+ 
                 try
                 {
                     await accumulator.WriteAsync(buffer.AsMemory(0, length));
@@ -209,81 +163,46 @@ namespace EditSharp.Render
                 {
                     ArrayPool<byte>.Shared.Return(buffer);
                 }
-
+ 
                 if (decoderReleaseSchedule.TryGetValue(frameIndex, out List<Clip>? finished))
                 {
                     foreach (Clip clip in finished) contentSource.ReleaseDecoder(clip);
                 }
-
+ 
                 long currentElapsedMs = sw.ElapsedMilliseconds;
                 long frameDeltaMs = currentElapsedMs - previousElapsedMs;
                 previousElapsedMs = currentElapsedMs;
-
-                //Both numbers together, not just cumulative — cumulative alone
-                //means reading per-frame cost requires subtracting consecutive
-                //log lines by hand, which every real profiling pass in this
-                //project so far has had to do manually. Matches the shape the
-                //old ffmpeg-based renderer's own progress output already had.
+ 
                 EditSharpConfig.Logger.LogVerbose(
                     $"Rendered frame {frameIndex + 1}/{totalFrames} " +
                     $"({frameDeltaMs}ms this frame, {currentElapsedMs}ms elapsed).");
             }
         }
-
+ 
         /// <summary>
-        /// Muxes the accumulated lossless video against the timeline's audio
-        /// and encodes to Blueprint's chosen codec — the one lossy step in
-        /// the whole pipeline, and only when the codec itself is lossy.
-        ///
-        /// Audio is built the same way it always has: a fresh InputGraph,
-        /// ClipContentBuilder per clip, AudioMixer.Compose — none of that
-        /// changed by this migration at all. The only thing item 13 touches
-        /// here is the VIDEO side's rawvideo input args: pix_fmt/byte-size
-        /// now describe SkOutputFormat's rgba8888 accumulator, not
-        /// PixelFormats.Primary's gbrap16le.
+        /// Muxes the accumulated lossless video against the timeline's
+        /// already fully-mixed, already graph-evaluated master AudioBuffer
+        /// and encodes to Blueprint's chosen codec. No filter_complex is
+        /// built for audio at all any more — the buffer is written to a raw
+        /// f32le temp file and mapped as a second plain input, since all the
+        /// real mixing/effects work already happened in AudioMixer.ComposeAsync.
         /// </summary>
         private static async Task FinalizeOutputAsync(
-            string accumulatorPath, int width, int height, int fps,
+            string accumulatorPath, AudioBuffer masterAudio, int width, int height, int fps,
             Blueprint blueprint, ConcurrentBag<string> tempFiles)
         {
-            var audioGraph = new InputGraph();
-            var contents = new Dictionary<Clip, ClipContent>();
-
-            //The accumulator occupies -i index 0 below, so it has to occupy
-            //index 0 in THIS graph too before any clip is built — see the
-            //original comment this is carried over from for the full
-            //reasoning (InputGraph hands out indices in call order and
-            //ClipContentBuilder bakes them straight into filter labels).
-            _ = audioGraph.AddInput(accumulatorPath, verifyExists: false);
-
-            foreach (Channel channel in blueprint.Timeline.Channels)
-            {
-                foreach (Clip clip in channel.Clips.Values)
-                {
-                    if (contents.ContainsKey(clip)) continue;
-
-                    contents[clip] = await ClipContentBuilder.BuildAsync(
-                        clip, audioGraph, width, height, fps, tempFiles, audioOnly: true);
-                }
-            }
-
-            string audioLabel = AudioMixer.Compose(blueprint.Timeline, contents, audioGraph);
-
+            string audioPath = GraphUtilities.GetAudioTempFilePath($"master_{Guid.NewGuid():N}.pcm");
+            await File.WriteAllBytesAsync(audioPath, masterAudio.ToFloat32Bytes());
+            tempFiles.Add(audioPath);
+ 
             bool isGif = blueprint.RenderSettings.VideoCodec == VideoCodec.GIF;
             (string videoEncoderName, List<string> videoQualityArgs) =
                 await FfmpegRunner.GetVideoEncoderSettingsAsync(
                     blueprint.RenderSettings.VideoCodec, blueprint.RenderSettings.HardwareAccelerator);
-
-            string filterComplex = string.Join(";", audioGraph.FilterLines);
-            string scriptPath = GraphUtilities.GetVideoTempFilePath($"audiofilter_{Guid.NewGuid():N}.txt");
-            await File.WriteAllTextAsync(scriptPath, filterComplex);
-
+ 
             var args = new List<string> { "-y", "-v", "error" };
             args.AddRange(GraphUtilities.FilterThreadingArgs());
-
-            //input 0: the accumulated frames. Headerless raw data at
-            //SkOutputFormat's rgba8888, straight alpha, packed with no row
-            //padding — exactly what SkFrameCompositor.ReadRgba8888 wrote
+ 
             args.AddRange(new[]
             {
                 "-f", "rawvideo",
@@ -292,26 +211,27 @@ namespace EditSharp.Render
                 "-r", fps.ToString(CultureInfo.InvariantCulture),
                 "-i", accumulatorPath,
             });
-
-            foreach (var input in audioGraph.Inputs.Skip(1))
+ 
+            if (!isGif)
             {
-                if (input.ExtraArgs != null) args.AddRange(input.ExtraArgs);
-                args.Add("-i");
-                args.Add(input.Path);
+                args.AddRange(new[]
+                {
+                    "-f", "f32le",
+                    "-ar", masterAudio.SampleRate.ToString(CultureInfo.InvariantCulture),
+                    "-ac", masterAudio.Channels.ToString(CultureInfo.InvariantCulture),
+                    "-i", audioPath,
+                });
             }
-
-            args.Add("-/filter_complex");
-            args.Add(scriptPath);
-
+ 
             args.Add("-map");
             args.Add("0:v");
-
+ 
             if (!isGif)
             {
                 args.Add("-map");
-                args.Add($"[{audioLabel}]");
+                args.Add("1:a");
             }
-
+ 
             if (isGif)
             {
                 args.Add("-c:v");
@@ -322,7 +242,7 @@ namespace EditSharp.Render
                 args.Add("-c:v");
                 args.Add(videoEncoderName);
                 args.AddRange(videoQualityArgs);
-
+ 
                 string audioCodecName = Constants.AudioCodecNames[blueprint.RenderSettings.AudioCodec];
                 args.Add("-c:a");
                 args.Add(audioCodecName);
@@ -332,9 +252,9 @@ namespace EditSharp.Render
                 args.Add("-pix_fmt");
                 args.Add("yuv420p");
             }
-
+ 
             args.Add(blueprint.OutputDirectory);
-
+ 
             var psi = new ProcessStartInfo
             {
                 FileName = EditSharpConfig.FfmpegPath,
@@ -344,57 +264,50 @@ namespace EditSharp.Render
                 CreateNoWindow = true,
             };
             foreach (string arg in args) psi.ArgumentList.Add(arg);
-
+ 
             using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             var stderr = new StringBuilder();
             process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
-
+ 
             process.Start();
             process.BeginErrorReadLine();
             process.BeginOutputReadLine();
             await process.WaitForExitAsync();
-
+ 
             if (process.ExitCode != 0)
                 throw new InvalidOperationException(
-                    $"ffmpeg exited with code {process.ExitCode} finalizing output:\n{stderr}\n\n" +
-                    $"Audio filter script preserved for inspection at: {scriptPath}");
-
-            try { File.Delete(scriptPath); } catch { /* best-effort cleanup */ }
+                    $"ffmpeg exited with code {process.ExitCode} finalizing output:\n{stderr}");
         }
-
+ 
         private static void Validate(Blueprint blueprint)
         {
             if (blueprint.Timeline == null || blueprint.Timeline.Channels.Count == 0)
                 throw new ArgumentException("Blueprint.Timeline must contain at least one Channel.");
-
+ 
             if (blueprint.Timeline.Channels.All(c => c.Clips.Count == 0))
                 throw new ArgumentException("Blueprint.Timeline contains no clips on any channel.");
-
+ 
             if ((int)blueprint.RenderSettings.Resolution.X <= 0 || (int)blueprint.RenderSettings.Resolution.Y <= 0)
                 throw new ArgumentException("Blueprint.Resolution must have positive width and height.");
-
+ 
             if (blueprint.RenderSettings.Framerate <= 0)
                 throw new ArgumentException("Blueprint.Framerate must be positive.");
-
+ 
             if (string.IsNullOrWhiteSpace(blueprint.OutputDirectory))
                 throw new ArgumentException("Blueprint.OutputDirectory must be a full output file path.");
-
+ 
             //A transition that does not preserve alpha punches an opaque
             //rectangle through everything beneath it for the length of the
-            //transition. Constants.PreservesAlpha(transition.Type) is gone
-            //along with the old TransitionType enum (item 8) — replaced with
-            //a direct type check, since FadeToColorTransition is now the
-            //ONLY kind that's alpha-unsafe by construction (it deliberately
-            //fills the whole canvas with a colour partway through). This is
-            //a reasoned-from-construction judgement, not a re-measurement
-            //the way the old AlphaUnsafeTransitions list was empirically
-            //built — flagged as such in the migration manifest.
+            //transition. FadeToColorTransition is the only kind that's
+            //alpha-unsafe by construction (it deliberately fills the whole
+            //canvas with a colour partway through) — a direct type check,
+            //reasoned from construction rather than re-measured.
             foreach (Channel channel in blueprint.Timeline.Channels.Skip(1))
             {
-                foreach ((Clip clip, Transition transition) in channel.Transitions)
+                foreach (Transition transition in channel.Transitions)
                 {
                     if (transition is not FadeToColorTransition) continue;
-
+ 
                     throw new ArgumentException(
                         $"Channel '{channel.Name}' uses a FadeToColorTransition, which does " +
                         "not preserve transparency, so it would black out the channels " +
@@ -405,3 +318,4 @@ namespace EditSharp.Render
         }
     }
 }
+ 

@@ -1,5 +1,5 @@
 using System;
-
+ 
 namespace EditSharp.Playback
 {
     /// <summary>
@@ -22,7 +22,7 @@ namespace EditSharp.Playback
         public int Width { get; }
         public int Height { get; }
         public TimeSpan Position { get; }
-
+ 
         public VideoFrameEventArgs(byte[] buffer, int length, int width, int height, TimeSpan position)
         {
             Buffer = buffer;
@@ -33,3 +33,4 @@ namespace EditSharp.Playback
         }
     }
 }
+ 

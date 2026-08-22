@@ -1,35 +1,34 @@
 using System;
-
+using EditSharp.Components.Clips;
+ 
 namespace EditSharp.Components.Transitions
 {
     /// <summary>
-    /// One channel-level transition between two adjacent clips. Abstract,
-    /// mirroring Effect's shape exactly: each transition kind is its own
-    /// class carrying only the parameters it actually needs, rather than
-    /// one class with every transition's fields (Color, Angle, and
-    /// whatever future transitions need) all present whether relevant or
-    /// not — the concrete problem this replaces: the previous design was
-    /// already showing this bloat with just three kinds.
+    /// One channel-level transition between two adjacent clips. Abstract —
+    /// the CLASS is the type, no separate TransitionType enum, matching
+    /// Effect/EffectNode's own "the class is the type" convention elsewhere
+    /// in this schema.
     ///
-    /// Unlike the old design, there's no TransitionType enum anymore — the
-    /// CLASS is the type, same as Effect has no separate "EffectType" enum.
-    /// Only transitions with a real Skia implementation exist as classes
-    /// (see FadeTransition.cs, FadeToColorTransition.cs, SlideTransition.cs).
-    /// The ~44 old ffmpeg xfade names (WipeLeft, CircleOpen, Dissolve, etc.)
-    /// that checklist item 8 left unported have NO class here at all — not
-    /// a reserved-and-throwing stub, genuinely not representable until
-    /// someone adds a class for one, same as adding a new Effect subclass.
-    /// This is a real, larger compatibility break than earlier item-8 gaps:
-    /// those left the enum member in place and threw at render time; this
-    /// removes the ability to even CONSTRUCT one of the unported kinds.
+    /// NEW in this rewrite: carries its own From/To directly (previously a
+    /// Channel held a separate (Clip, Transition) tuple list) — see the
+    /// schema doc's Channel section. This is what lets Channel.Transitions
+    /// simply be a List&lt;Transition&gt;.
     /// </summary>
     public abstract class Transition
     {
-        //how long the transition should last
+        public Clip From { get; internal set; } = null!;
+        public Clip To { get; internal set; } = null!;
+ 
+        //the transition's length — see Channel's overlap invariant for the
+        //carve-out this creates and how it's actually achieved (extending
+        //into each clip's own trim-handle material, not destructive trimming)
         public TimeSpan Duration { get; set; }
-
-        //deep copy — mirrors Effect.Duplicate for the same reason: clip
-        //fragments produced by a split must not share Transition instances
+ 
+        //deep copy — clip fragments produced by a split must not share
+        //Transition instances. From/To are NOT copied here — see
+        //Channel.SplitClip, which drops any Transition referencing a clip
+        //that no longer exists rather than trying to re-point it
         public abstract Transition Duplicate();
     }
 }
+ 
