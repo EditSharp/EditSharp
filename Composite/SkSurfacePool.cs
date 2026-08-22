@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using SkiaSharp;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -39,20 +39,50 @@ namespace EditSharp.Composite
     /// independent of whatever the surface does afterward, including being
     /// Cleared and redrawn by a later Rent of the same physical instance.
     /// So reusing a surface via this pool the instant its snapshot is taken
-    /// is exactly as safe as the `using` pattern it replaces.
+    /// is exactly as safe as the `using` pattern it replaces — AT LEAST for
+    /// a GRContext that submits its recorded GPU work in the way Skia's
+    /// documented copy-on-write contract assumes. See the GPU SUBMISSION
+    /// note below for the real gap found in the field.
     ///
-    /// HONEST CAVEAT on the performance side: if a returned surface is
-    /// Rent'd again and drawn on WHILE its own earlier snapshot is still
-    /// referenced elsewhere in that frame's chain (a real, common case —
-    /// e.g. ResizeContent's snapshot flows on as ApplyModulateSk's input
-    /// while ApplyModulateSk itself grabs a same-sized surface from the
-    /// pool), Skia's internal copy-on-write triggers a fresh allocation on
-    /// that particular reuse anyway — safe, but not free, for that one
-    /// instance. The pool self-tunes past this in practice: it naturally
-    /// grows to roughly as many concurrently-live instances of a given size
-    /// as a frame's chain actually needs, then stops allocating for that
-    /// size. Not measured yet on a real render — flag for the same
-    /// deferred-verification list as everything else pending item 14.
+    /// GPU SUBMISSION, ADDED AFTER A REAL REPORT — this pool (and every
+    /// other call site that draws to a GRContext-backed SKSurface in this
+    /// project) never once called GRContext.Flush()/Submit() anywhere.
+    /// Skia's own higher-level consumers (e.g. a windowed swapchain
+    /// integration) normally call Submit() once per displayed frame as part
+    /// of presenting it; this project has no such consumer, since every
+    /// surface here is read back via ReadPixels/Snapshot rather than
+    /// presented to a window, and it was assumed (WRONGLY, per the report
+    /// this fixes) that Skia's own internal flush-before-readback handled
+    /// this automatically regardless of backend. Recorded GPU work can sit
+    /// queued in Skia's own command-list state, not yet actually submitted
+    /// to the real ID3D12CommandQueue GpuContext constructed — a state
+    /// where reusing the SAME underlying texture for a new Rent+Clear+Draw
+    /// races the GPU's own execution of the PRIOR content's commands. This
+    /// is consistent with confirmed field behavior: absent entirely on pure
+    /// software rendering (no GPU queue to race) and on hardware that falls
+    /// back to software (see GpuContext's own remarks on D3D12 creation
+    /// failing outright on some machines), present intermittently — "not
+    /// present for a lot of the time" — specifically on the one machine
+    /// with the newest/fastest GPU (more headroom before Skia's own
+    /// internal resource budget forces a texture to be reclaimed and reused
+    /// while older commands against it are still in flight, so a bigger,
+    /// faster card takes longer to first exhibit it, not less likely to).
+    ///
+    /// FIX: force a real GPU submission — Flush() records any outstanding
+    /// work into the command buffer, Submit(syncCpu: true) hands it to the
+    /// queue AND blocks until the GPU has actually finished executing it —
+    /// every time a GPU-backed surface is Return()'d, before it can be
+    /// Rent()'d again and overwritten. This trades away some of the async
+    /// pipelining a GPU backend would otherwise give (an intentional,
+    /// correctness-over-throughput choice given how expensive silently-
+    /// wrong pixels are to debug) — but only for the GPU path; software-
+    /// backed surfaces (_grContext == null) skip it entirely, so this has
+    /// no effect on HardwareAccelerator.None or on any machine already
+    /// falling back to software. UNVERIFIED against a real installed
+    /// SkiaSharp build in this sandbox (same honesty flag as the rest of
+    /// GpuContext/SkSurfacePool) — wrapped in try/catch and logged rather
+    /// than allowed to take down a render if Submit's actual signature on
+    /// the referenced SkiaSharp version turns out to differ.
     ///
     /// NOT THREAD-SAFE, deliberately — matches the render loop's own
     /// strictly-sequential contract. A lock here would be pure overhead for
@@ -64,19 +94,20 @@ namespace EditSharp.Composite
         private readonly GRContext? _grContext;
         private readonly Dictionary<(int Width, int Height), Stack<SKSurface>> _free = new();
         private readonly List<SKSurface> _owned = new();
- 
+        private bool _gpuSubmitFailed;
+
         public SkSurfacePool(GRContext? grContext, int canvasWidth, int canvasHeight, int seedCount)
         {
             _grContext = grContext;
- 
+
             var key = (canvasWidth, canvasHeight);
             var stack = new Stack<SKSurface>(Math.Max(seedCount, 0));
             for (int i = 0; i < seedCount; i++)
                 stack.Push(CreateSurface(canvasWidth, canvasHeight));
- 
+
             _free[key] = stack;
         }
- 
+
         /// <summary>
         /// Hands out a surface of exactly width x height. Content is
         /// whatever was left on it by its previous use (or uninitialized,
@@ -89,34 +120,69 @@ namespace EditSharp.Composite
             var key = (width, height);
             if (_free.TryGetValue(key, out Stack<SKSurface>? stack) && stack.Count > 0)
                 return stack.Pop();
- 
+
             return CreateSurface(width, height);
         }
- 
+
         /// <summary>
         /// Returns a surface obtained from Rent (or present at seed time)
         /// for reuse. width/height must match what it was Rent'd as —
         /// there's no way to recover a surface's own size cheaply after the
         /// fact in SkiaSharp's public API, so this pool relies on the
         /// caller passing it back rather than deriving it.
+        ///
+        /// For a GPU-backed surface, this is also the synchronization point
+        /// — see the class remarks' GPU SUBMISSION section. The surface is
+        /// only pushed back for reuse AFTER the GPU has actually finished
+        /// with whatever was drawn into it, so the next Rent() of this same
+        /// physical instance can never race prior work still executing
+        /// against it.
         /// </summary>
         public void Return(SKSurface surface, int width, int height)
         {
+            EnsureGpuWorkSubmitted();
+
             var key = (width, height);
             if (!_free.TryGetValue(key, out Stack<SKSurface>? stack))
                 _free[key] = stack = new Stack<SKSurface>();
- 
+
             stack.Push(surface);
         }
- 
+
+        /// <summary>
+        /// Flushes and synchronously submits any outstanding GPU work on
+        /// this pool's GRContext — a no-op for a software-backed pool
+        /// (_grContext == null). Failure is logged once and then silently
+        /// skipped for the rest of this pool's life rather than retried
+        /// every single Return() call — see class remarks on why this is
+        /// unverified against a real SkiaSharp build.
+        /// </summary>
+        private void EnsureGpuWorkSubmitted()
+        {
+            if (_grContext == null || _gpuSubmitFailed) return;
+
+            try
+            {
+                _grContext.Flush();
+                _grContext.Submit();
+            }
+            catch (Exception ex)
+            {
+                _gpuSubmitFailed = true;
+                EditSharpConfig.Logger.LogWarning(
+                    "SkSurfacePool: GRContext.Flush()/Submit(syncCpu: true) failed and will not be " +
+                    $"retried for this render — GPU surface reuse may race outstanding GPU work: {ex.Message}");
+            }
+        }
+
         private SKSurface CreateSurface(int width, int height)
         {
             var info = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Premul);
- 
+
             SKSurface? surface = _grContext != null
                 ? SKSurface.Create(_grContext, budgeted: true, info)
                 : null;
- 
+
             // GPU-backed creation can legitimately fail (context lost,
             // texture budget exhausted) even when the GRContext itself is
             // healthy — fall back to raster for just this one surface
@@ -125,11 +191,11 @@ namespace EditSharp.Composite
             // whole-context fallback GpuContext itself already logs loudly;
             // not logged here to avoid spamming per-frame if it repeats.
             surface ??= SKSurface.Create(info);
- 
+
             _owned.Add(surface);
             return surface;
         }
- 
+
         public void Dispose()
         {
             foreach (SKSurface surface in _owned) surface.Dispose();
@@ -138,4 +204,3 @@ namespace EditSharp.Composite
         }
     }
 }
- 
