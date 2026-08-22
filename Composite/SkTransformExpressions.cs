@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using SkiaSharp;
 using EditSharp.Components.Clips;
-using EditSharp.Components.Effects;
  
 namespace EditSharp.Composite
 {

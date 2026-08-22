@@ -6,7 +6,8 @@ using System.Threading.Tasks;
 using EditSharp;
 using EditSharp.Components;
 using EditSharp.Components.Clips;
-using EditSharp.Components.Effects;
+using EditSharp.Components.Nodes;
+using EditSharp.Components.Nodes.Sources.Video;
  
 namespace EditSharp.Composite
 {

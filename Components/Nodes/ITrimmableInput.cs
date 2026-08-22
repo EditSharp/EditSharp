@@ -1,6 +1,6 @@
 using System;
  
-namespace EditSharp.Components.Effects
+namespace EditSharp.Components.Nodes
 {
     /// <summary>
     /// A node whose own in-point should shift in lockstep with every OTHER

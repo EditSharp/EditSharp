@@ -2,7 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components.Clips;
-using EditSharp.Components.Effects;
+using EditSharp.Components.Nodes.Sources.Video;
+using EditSharp.Components.Nodes.Sources.Audio;
  
 namespace EditSharp.Components
 {

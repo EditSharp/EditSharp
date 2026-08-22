@@ -6,8 +6,7 @@ using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using EditSharp.Components;
-using EditSharp.Composite;
-
+ 
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -113,7 +112,7 @@ namespace EditSharp.Composite
         /// before the encoder ever sees a frame.
         ///
         /// Only VideoCodec.FFV1 has a pixel format wired up
-        /// (PixelFormats.Primary) — see PixelFormatFor. Other codecs fall back
+        /// (Ffv1PixelFormat). See PixelFormatFor. Other codecs fall back
         /// to whatever ffmpeg negotiates on its own; there's no current caller
         /// that needs them.
         ///
@@ -223,18 +222,32 @@ namespace EditSharp.Composite
         }
  
         /// <summary>
-        /// The pixel format optimized media is built at for a given codec.
-        /// Only FFV1 has one wired up: PixelFormats.Primary (gbrap16le) —
-        /// referencing that constant rather than a separate hardcoded literal
-        /// here matters, not just for tidiness: this used to say "rgba64le"
-        /// directly, a SECOND definition of the same nominal value that could
-        /// silently drift from PixelFormats.Rgba (as it in fact did — FFV1 has
-        /// no packed-RGBA mode, so requesting rgba64le here was always being
+        /// The one pixel format this pipeline forces for optimized media at
+        /// all — FFV1's, gbrap16le. Kept as ITS OWN named constant here
+        /// (rather than a bare literal inline in PixelFormatFor) for exactly
+        /// the reason the previous version of this comment already
+        /// documented: this used to say "rgba64le" directly, a second
+        /// definition of the same nominal value that could silently drift
+        /// from whatever the real encode actually produced — FFV1 has no
+        /// packed-RGBA mode, so requesting rgba64le was always being
         /// silently substituted with gbrap16le by ffmpeg itself, while every
         /// downstream read still assumed genuine rgba64le and paid for an
-        /// unaccelerated conversion on every frame to get there). One shared
-        /// constant is what keeps the encode request and every downstream read
-        /// honestly describing the same bytes.
+        /// unaccelerated conversion on every frame to get there. A single
+        /// named constant is what keeps the encode request and every
+        /// downstream read honestly describing the same bytes.
+        ///
+        /// NOTE: there is no separate `PixelFormats` type anywhere in this
+        /// assembly — an earlier pass referenced `PixelFormats.Primary` /
+        /// `PixelFormats.Rgba` here without ever actually adding that class,
+        /// which doesn't compile. This constant is that fix: the one value
+        /// PixelFormatFor's FFV1 case actually needs, defined once, in the
+        /// one file that uses it.
+        /// </summary>
+        internal const string Ffv1PixelFormat = "gbrap16le";
+ 
+        /// <summary>
+        /// The pixel format optimized media is built at for a given codec.
+        /// Only FFV1 has one wired up: Ffv1PixelFormat (gbrap16le).
         ///
         /// Confirmed accepted cleanly by every filter the frame-by-frame
         /// render's per-frame compositor chain uses (perspective,
@@ -264,7 +277,7 @@ namespace EditSharp.Composite
         /// </summary>
         internal static string? PixelFormatFor(VideoCodec codec) => codec switch
         {
-            //VideoCodec.FFV1 => PixelFormat.Primary,
+            VideoCodec.FFV1 => Ffv1PixelFormat,
             VideoCodec.DNxHR => "yuv422p",
             VideoCodec.ProRes => "yuv422p10le",
             _ => null,

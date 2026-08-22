@@ -1,7 +1,7 @@
 using System;
 using SkiaSharp;
-using EditSharp.Components.Effects;
-
+using EditSharp.Components.Nodes.Sources.Video;
+ 
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -24,7 +24,7 @@ namespace EditSharp.Composite
     {
         private const double DetailCellsPerCanvas = 1000.0;
         private const double SeetheCellsPerSecond = 10.0;
-
+ 
         private const string ShaderSource = """
             uniform float2 resolution;
             uniform float xscale;
@@ -88,9 +88,9 @@ namespace EditSharp.Composite
                 return half4(v, v, v, 1.0);
             }
             """;
-
+ 
         private static readonly SKRuntimeEffect Effect = CreateEffect();
-
+ 
         private static SKRuntimeEffect CreateEffect()
         {
             SKRuntimeEffect? effect = SKRuntimeEffect.CreateShader(ShaderSource, out string errors);
@@ -98,14 +98,14 @@ namespace EditSharp.Composite
                 throw new InvalidOperationException($"NoiseInputNode shader failed to compile: {errors}");
             return effect;
         }
-
+ 
         public static SKImage Render(
             NoiseInputNode node, double clipSeconds, int canvasWidth, int canvasHeight, SkSurfacePool pool)
         {
             double xscale = Math.Max(node.Detail, 0f) * DetailCellsPerCanvas;
             double yscale = xscale * canvasHeight / (double)canvasWidth;
             double tscale = Math.Max(node.SeetheRate, 0f) * SeetheCellsPerSecond;
-
+ 
             var rng = new Random(node.Seed);
             float[] seedOffset =
             [
@@ -113,7 +113,7 @@ namespace EditSharp.Composite
                 (float)(rng.NextDouble() * 1000.0),
                 (float)(rng.NextDouble() * 1000.0),
             ];
-
+ 
             var uniforms = new SKRuntimeEffectUniforms(Effect)
             {
                 ["resolution"] = new float[] { canvasWidth, canvasHeight },
@@ -123,10 +123,10 @@ namespace EditSharp.Composite
                 ["time"] = (float)clipSeconds,
                 ["seedOffset"] = seedOffset,
             };
-
+ 
             using SKShader shader = Effect.ToShader(uniforms);
             using var paint = new SKPaint { Shader = shader };
-
+ 
             SKSurface surface = pool.Rent(canvasWidth, canvasHeight);
             try
             {
@@ -141,3 +141,4 @@ namespace EditSharp.Composite
         }
     }
 }
+ 

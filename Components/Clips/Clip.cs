@@ -1,6 +1,6 @@
 using System;
 using System.Linq;
-using EditSharp.Components.Effects;
+using EditSharp.Components.Nodes;
  
 namespace EditSharp.Components.Clips
 {
@@ -10,13 +10,13 @@ namespace EditSharp.Components.Clips
     /// kind of content (VideoClip/TextClip/GeneratorClip/NoiseClip/
     /// TimelineVideoClip on the visual side; AudioClip/TimelineAudioClip on
     /// the audible side), each wrapping its own bespoke content field, with
-    /// an EffectGraph bolted on afterward. That was backwards: a clip IS
+    /// a Graph bolted on afterward. That was backwards: a clip IS
     /// its graph. The only remaining concrete Clip subtypes are VideoClip
     /// and AudioClip — everything that used to be a distinct Clip subtype
     /// (a media file, text, a generated color, procedural noise, a
     /// synthesized tone, an embedded nested Timeline) is now just a
     /// different InputNode wired into an otherwise perfectly ordinary
-    /// EffectGraph (see EffectGraph.cs/VideoEffectNodes.cs/AudioEffectNodes.cs).
+    /// Graph (see EditSharp.Components.Nodes).
     /// A graph may have more than one InputNode — nothing about a graph
     /// having two, three, or more requires a different kind of Clip; it's
     /// still just VideoClip or AudioClip.
@@ -38,11 +38,11 @@ namespace EditSharp.Components.Clips
         internal static readonly TimeSpan MinimumDuration = TimeSpan.FromMilliseconds(1);
  
         /// <summary>
-        /// A clip's single EffectGraph, fixed to this clip's own
-        /// EffectDomain at construction (Image for VideoClip, Audio for
+        /// A clip's single Graph, fixed to this clip's own
+        /// NodeDomain at construction (Image for VideoClip, Audio for
         /// AudioClip) — see this class's own remarks.
         /// </summary>
-        public abstract EffectGraph Graph { get; }
+        public abstract Graph Graph { get; }
  
         /// <summary>
         /// Deep copy — does NOT copy LinkGroupId/Channel (a duplicate

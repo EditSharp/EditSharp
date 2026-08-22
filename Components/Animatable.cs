@@ -9,15 +9,19 @@ namespace EditSharp.Components
     /// itself needs to change for a new property type (as long as an
     /// IInterpolator&lt;T&gt; is registered — see Interpolators.Resolve).
     /// </summary>
-    public sealed class Animatable<T>(T staticValue)
+    public sealed class Animatable<T>
     {
         //used when there's no track, or fewer than 2 keyframes
-        public T StaticValue { get; set; } = staticValue;
-
+        public T StaticValue { get; set; }
+ 
         //null = not animated
         public KeyframeTrack<T>? Track { get; private set; }
-
-
+ 
+        public Animatable(T staticValue)
+        {
+            StaticValue = staticValue;
+        }
+ 
         public static implicit operator Animatable<T>(T value) => new(value);
  
         /// <summary>

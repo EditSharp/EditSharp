@@ -1,14 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using EditSharp.Components.Effects;
 using EditSharp.Components;
+using EditSharp.Components.Nodes;
+using EditSharp.Components.Nodes.Effects;
+using EditSharp.Components.Nodes.Math;
  
 namespace EditSharp.Composite
 {
     /// <summary>
     /// A REAL topological-order graph walker for the AUDIO domain
-    /// EffectGraph — the audio-side counterpart to EffectGraphEvaluatorSk,
+    /// Graph — the audio-side counterpart to EffectGraphEvaluatorSk,
     /// sharing its exact walking algorithm (EffectGraphTopology.Order) and
     /// its own-port-cache-per-node-per-visit shape, but dispatching genuine
     /// per-node SIGNAL PROCESSING on AudioBuffer instead of per-node image
@@ -26,12 +28,13 @@ namespace EditSharp.Composite
     ///     InputNode encountered in topological order, then walks the rest
     ///     of the graph exactly as before.
     ///   - GainNode/AudioMixNode's optional Value-typed modulation ports
-    ///     (see AudioEffectNodes.cs's own remarks) are resolved via
-    ///     ValueGraphEvaluator — the SAME shared Value-chain walker
-    ///     EffectGraphEvaluatorSk uses for MergeNode's "MixModulation" —
-    ///     evaluated once per automation block (same cadence as every other
-    ///     time-varying parameter here) and MULTIPLIED against that block's
-    ///     own keyframed value, exactly like MergeNode's own Mix handling.
+    ///     (see EditSharp.Components.Nodes.Effects's own remarks) are
+    ///     resolved via ValueGraphEvaluator — the SAME shared Value-chain
+    ///     walker EffectGraphEvaluatorSk uses for MergeNode's
+    ///     "MixModulation" — evaluated once per automation block (same
+    ///     cadence as every other time-varying parameter here) and
+    ///     MULTIPLIED against that block's own keyframed value, exactly
+    ///     like MergeNode's own Mix handling.
     ///   - ValueConstantNode/MathNode contribute nothing to the Audio cache
     ///     directly — resolved on demand wherever a consuming node's
     ///     modulation port is actually connected, same as the video side.
@@ -58,12 +61,12 @@ namespace EditSharp.Composite
         /// per-InputNode-type resolution. Returns the AudioOutputNode's
         /// resolved buffer.
         /// </summary>
-        public static AudioBuffer Evaluate(EffectGraph graph, IReadOnlyDictionary<Guid, AudioBuffer> resolvedInputs)
+        public static AudioBuffer Evaluate(Graph graph, IReadOnlyDictionary<Guid, AudioBuffer> resolvedInputs)
         {
-            if (graph.Domain != EffectDomain.Audio)
-                throw new InvalidOperationException("AudioEffectGraphEvaluator requires an Audio-domain EffectGraph.");
+            if (graph.Domain != NodeDomain.Audio)
+                throw new InvalidOperationException("AudioEffectGraphEvaluator requires an Audio-domain Graph.");
  
-            List<EffectNode> order = EffectGraphTopology.Order(graph);
+            List<Node> order = EffectGraphTopology.Order(graph);
  
             var buffers = new Dictionary<(Guid, string), AudioBuffer>();
  
@@ -78,7 +81,7 @@ namespace EditSharp.Composite
  
             AudioBuffer? result = null;
  
-            foreach (EffectNode node in order)
+            foreach (Node node in order)
             {
                 if (node is InputNode)
                 {
@@ -97,7 +100,7 @@ namespace EditSharp.Composite
                     continue;
                 }
  
-                if (ReferenceEquals(node, graph.Output))
+                if (ReferenceEquals(node, graph.OutputNode))
                 {
                     result = Require(graph, node, "Audio", buffers);
                     continue;
@@ -145,7 +148,7 @@ namespace EditSharp.Composite
                     }
  
                     //Image/Mask-domain nodes never appear in an Audio graph —
-                    //EffectGraph.AddNode already rejects a domain mismatch at
+                    //Graph.AddNode already rejects a domain mismatch at
                     //edit time. ValueConstantNode/MathNode carry no Audio
                     //output at all — resolved on demand by ValueGraphEvaluator
                     //wherever a consuming node's optional modulation port is
@@ -164,7 +167,7 @@ namespace EditSharp.Composite
             _ = sampleRate; _ = channels; //reserved for a future all-silent-graph fallback; unused for now
  
             return result ?? throw new InvalidOperationException(
-                "EffectGraph's AudioOutputNode has no incoming connection.");
+                "Graph's AudioOutputNode has no incoming connection.");
         }
  
         // -----------------------------------------------------------
@@ -172,7 +175,7 @@ namespace EditSharp.Composite
         // -----------------------------------------------------------
  
         private static AudioBuffer? Resolve(
-            EffectGraph graph, EffectNode node, string portName, Dictionary<(Guid, string), AudioBuffer> cache)
+            Graph graph, Node node, string portName, Dictionary<(Guid, string), AudioBuffer> cache)
         {
             Connection? c = graph.Connections.FirstOrDefault(x => x.ToNodeId == node.Id && x.ToPort == portName);
             if (c == null) return null;
@@ -180,7 +183,7 @@ namespace EditSharp.Composite
         }
  
         private static AudioBuffer Require(
-            EffectGraph graph, EffectNode node, string portName, Dictionary<(Guid, string), AudioBuffer> cache) =>
+            Graph graph, Node node, string portName, Dictionary<(Guid, string), AudioBuffer> cache) =>
             Resolve(graph, node, portName, cache)
             ?? throw new InvalidOperationException(
                 $"{node.GetType().Name}'s '{portName}' input has no incoming connection.");
@@ -220,7 +223,7 @@ namespace EditSharp.Composite
         /// meaning "no modulation, use the node's own keyframed value as-is").
         /// </summary>
         private static float?[] RenderValueModulation(
-            EffectGraph graph, EffectNode node, string portName, int frameCount, int sampleRate)
+            Graph graph, Node node, string portName, int frameCount, int sampleRate)
         {
             var values = new float?[frameCount];
             if (frameCount == 0) return values;
@@ -259,9 +262,9 @@ namespace EditSharp.Composite
  
         /// <summary>
         /// GainNode's optional "Modulation" Value input MULTIPLIES against
-        /// Gain's own keyframed value when connected — see AudioEffectNodes.cs's
-        /// own remarks — rather than replacing it, so an author keeps Gain's
-        /// own curve and layers a procedurally-computed modulation on top.
+        /// Gain's own keyframed value when connected — rather than replacing
+        /// it, so an author keeps Gain's own curve and layers a
+        /// procedurally-computed modulation on top.
         /// </summary>
         private static AudioBuffer ApplyGain(AudioBuffer input, Animatable<float> gain, float?[] modulation)
         {
@@ -434,7 +437,7 @@ namespace EditSharp.Composite
         /// video side. The shorter of the two branches is treated as silence
         /// past its own end, so mismatched branch lengths don't throw.
         /// </summary>
-        private static AudioBuffer ApplyMix(EffectGraph graph, AudioMixNode node, AudioBuffer a, AudioBuffer b)
+        private static AudioBuffer ApplyMix(Graph graph, AudioMixNode node, AudioBuffer a, AudioBuffer b)
         {
             int channels = a.Channels;
             if (b.Channels != channels)

@@ -52,26 +52,33 @@ namespace EditSharp.Composite
         };
  
         // ffmpeg -hwaccel candidates for source DECODE, in TRY-FIRST-TO-LAST
-        // priority order: cuda then vulkan, both GPU-scale-capable (decode AND
-        // the resize step stay on the GPU, only the final already-small frame
+        // priority order: cuda (NVIDIA, GPU-scale-capable — decode AND the
+        // resize step stay on the GPU, only the final already-small frame
         // gets downloaded for the pipe), THEN d3d11va as a broad Windows
-        // decode-only fallback (no widely available D3D11VA GPU scale filter
-        // in stock ffmpeg, so this one gets hardware DECODE but CPU scale — a
-        // real, deliberate asymmetry, not an oversight, and specifically why
-        // it ranks below both GPU-scale candidates rather than above them),
-        // then plain software as the final fallback (ScaleFilter null,
-        // HwaccelOutputFormat null).
+        // decode-only fallback (no GPU scale filter for this candidate, so
+        // it gets hardware DECODE but CPU scale — a real, deliberate
+        // asymmetry, not an oversight), then plain software as the final
+        // fallback (ScaleFilter null, HwaccelOutputFormat null).
         //
-        // scale_cuda and scale_vulkan are the two GPU-scale filters actually
-        // exercised — NOT verified against this project's actual installed
-        // ffmpeg build (same honesty flag as HardwareCodecNames' encoder
-        // names). GetDecodePlanAsync's probe runs the REAL intended filter
-        // chain (hwaccel + hwaccel_output_format + the scale filter itself +
-        // hwdownload), not just bare `-hwaccel`, specifically because
-        // encoder/filter availability can fail independently of basic decode
-        // working — same lesson FfmpegRunner's own encode-side quality-arg
-        // bug already taught once this pass (a probe that doesn't exercise
-        // the REAL pipeline can pass while the real pipeline still breaks).
+        // "vulkan"/scale_vulkan WAS in this list, ranked between cuda and
+        // d3d11va, and has been REMOVED — found in the field, not
+        // theoretical: on Intel iGPUs, ffmpeg's vulkan hwaccel decode +
+        // scale_vulkan + hwdownload,format=nv12 chain reliably PASSES
+        // ProbeDecodePlanAsync's probe (the process exits 0 — the mechanism
+        // is present and "works") while silently producing chroma-plane-
+        // misaligned frames, which show up as exactly the top/bottom
+        // discolored-band corruption reported for real video content while
+        // procedural (non-decoded) content is unaffected. An exit-code-only
+        // probe can't catch this — it confirms the filter chain RUNS, not
+        // that its output is pixel-correct — so rather than add a pixel-
+        // level self-check to the probe, the safer fix is to stop offering
+        // this specific candidate at all: cuda (NVIDIA) still gets full
+        // GPU decode+scale, and every other vendor (Intel, AMD, and any
+        // NVIDIA machine where cuda itself isn't available) now lands on
+        // d3d11va's known-good decode-only path instead of a GPU-scale path
+        // that can pass its own probe while still being wrong. Revisit only
+        // once a future ffmpeg/driver combination is confirmed correct here
+        // (ideally via an actual pixel comparison, not just an exit code).
         //
         // NOTE: none of these candidates ever apply to OptimizedMediaCache's
         // own output (DNxHR/ProRes) — that decode is always forced to
@@ -82,7 +89,6 @@ namespace EditSharp.Composite
             DecodeHwAccelCandidates =
         [
             ("cuda", "cuda", "scale_cuda"),
-            ("vulkan", "vulkan", "scale_vulkan"),
             ("d3d11va", null, null), // decode-only — CPU scale/format-convert fallback for this candidate specifically
         ];
  

@@ -1,5 +1,5 @@
 using SkiaSharp;
-using EditSharp.Components.Effects;
+using EditSharp.Components.Nodes.Sources.Video;
  
 namespace EditSharp.Composite
 {

@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using SkiaSharp;
-using EditSharp.Components.Effects;
+using EditSharp.Components.Nodes;
+using EditSharp.Components.Nodes.Effects;
+using EditSharp.Components.Nodes.Math;
 using EditSharp.Components.Clips;
 
 
@@ -39,13 +41,13 @@ namespace EditSharp.Composite
     ///     rather than a single precomputed per-clip content size — the
     ///     correct generalization once a graph can have more than one
     ///     TransformNode (e.g. one per branch before a MergeNode).
-    ///   - ValueConstantNode/MathNode (see ValueNodes.cs) are visited in
-    ///     topological order like any other node but contribute nothing to
-    ///     the Image cache directly — they're resolved ON DEMAND by
-    ///     ValueGraphEvaluator, walking backward from whichever node's
-    ///     optional Value input (MergeNode's "MixModulation") is actually
-    ///     connected, at the moment that node is dispatched. This evaluator
-    ///     just needs to not choke on visiting them.
+    ///   - ValueConstantNode/MathNode (see EditSharp.Components.Nodes.Math)
+    ///     are visited in topological order like any other node but
+    ///     contribute nothing to the Image cache directly — they're resolved
+    ///     ON DEMAND by ValueGraphEvaluator, walking backward from whichever
+    ///     node's optional Value input (MergeNode's "MixModulation") is
+    ///     actually connected, at the moment that node is dispatched. This
+    ///     evaluator just needs to not choke on visiting them.
     ///
     /// MASKS: unchanged — alpha-only convention, see ApplyMask/
     /// RenderShapeMask/ExtractMask/CombineMasks below.
@@ -62,13 +64,13 @@ namespace EditSharp.Composite
         /// returning, except the one actually returned.
         /// </summary>
         public static SKImage Evaluate(
-            EffectGraph graph,
+            Graph graph,
             IReadOnlyDictionary<Guid, SKImage> resolvedInputs,
             TimeSpan clipRelativeTime,
             SkClipChainContext context,
             SkSurfacePool pool)
         {
-            List<EffectNode> order = EffectGraphTopology.Order(graph);
+            List<Node> order = EffectGraphTopology.Order(graph);
  
             var images = new Dictionary<(Guid, string), SKImage>();
             var masks = new Dictionary<(Guid, string), SKImage>();
@@ -76,7 +78,7 @@ namespace EditSharp.Composite
  
             SKImage? result = null;
  
-            foreach (EffectNode node in order)
+            foreach (Node node in order)
             {
                 if (node is InputNode)
                 {
@@ -88,7 +90,7 @@ namespace EditSharp.Composite
                     continue;
                 }
  
-                if (ReferenceEquals(node, graph.Output))
+                if (ReferenceEquals(node, graph.OutputNode))
                 {
                     result = RequireImage(graph, node, "Image", images);
                     continue;
@@ -265,7 +267,7 @@ namespace EditSharp.Composite
             }
  
             SKImage final = result ?? throw new InvalidOperationException(
-                "EffectGraph's ImageOutputNode has no incoming connection.");
+                "Graph's ImageOutputNode has no incoming connection.");
  
             foreach (SKImage image in owned)
             {
@@ -292,7 +294,7 @@ namespace EditSharp.Composite
         // -----------------------------------------------------------
  
         private static SKImage? ResolveImage(
-            EffectGraph graph, EffectNode node, string portName, Dictionary<(Guid, string), SKImage> cache)
+            Graph graph, Node node, string portName, Dictionary<(Guid, string), SKImage> cache)
         {
             Connection? c = graph.Connections.FirstOrDefault(x => x.ToNodeId == node.Id && x.ToPort == portName);
             if (c == null) return null;
@@ -300,13 +302,13 @@ namespace EditSharp.Composite
         }
  
         private static SKImage RequireImage(
-            EffectGraph graph, EffectNode node, string portName, Dictionary<(Guid, string), SKImage> cache) =>
+            Graph graph, Node node, string portName, Dictionary<(Guid, string), SKImage> cache) =>
             ResolveImage(graph, node, portName, cache)
             ?? throw new InvalidOperationException(
                 $"{node.GetType().Name}'s '{portName}' input has no incoming connection.");
  
         private static SKImage? ResolveMaskRaw(
-            EffectGraph graph, EffectNode node, string portName, Dictionary<(Guid, string), SKImage> cache)
+            Graph graph, Node node, string portName, Dictionary<(Guid, string), SKImage> cache)
         {
             Connection? c = graph.Connections.FirstOrDefault(x => x.ToNodeId == node.Id && x.ToPort == portName);
             if (c == null) return null;
@@ -314,13 +316,13 @@ namespace EditSharp.Composite
         }
  
         private static SKImage RequireMask(
-            EffectGraph graph, EffectNode node, string portName, Dictionary<(Guid, string), SKImage> cache) =>
+            Graph graph, Node node, string portName, Dictionary<(Guid, string), SKImage> cache) =>
             ResolveMaskRaw(graph, node, portName, cache)
             ?? throw new InvalidOperationException(
                 $"{node.GetType().Name}'s '{portName}' mask input has no incoming connection.");
  
         private static SKImage? ResolveMask(
-            EffectGraph graph, EffectNode node, string portName, Dictionary<(Guid, string), SKImage> cache,
+            Graph graph, Node node, string portName, Dictionary<(Guid, string), SKImage> cache,
             SKImage target, SkSurfacePool pool, List<SKImage> owned)
         {
             SKImage? raw = ResolveMaskRaw(graph, node, portName, cache);

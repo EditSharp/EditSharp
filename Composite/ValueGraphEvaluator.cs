@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
-using EditSharp.Components.Effects;
+using EditSharp.Components.Nodes;
+using EditSharp.Components.Nodes.Math;
  
 namespace EditSharp.Composite
 {
@@ -25,18 +26,18 @@ namespace EditSharp.Composite
         /// own keyframed value with no modulation applied.
         /// </summary>
         public static float? TryEvaluateConnectedInput(
-            EffectGraph graph, EffectNode node, string inputPortName, TimeSpan time)
+            Graph graph, Node node, string inputPortName, TimeSpan time)
         {
             Connection? c = graph.Connections.FirstOrDefault(x => x.ToNodeId == node.Id && x.ToPort == inputPortName);
             if (c == null) return null;
  
-            EffectNode? source = graph.Nodes.FirstOrDefault(n => n.Id == c.FromNodeId);
+            Node? source = graph.Nodes.FirstOrDefault(n => n.Id == c.FromNodeId);
             if (source == null) return null;
  
             return Evaluate(graph, source, c.FromPort, time);
         }
  
-        private static float Evaluate(EffectGraph graph, EffectNode node, string outputPortName, TimeSpan time)
+        private static float Evaluate(Graph graph, Node node, string outputPortName, TimeSpan time)
         {
             switch (node)
             {
@@ -62,8 +63,7 @@ namespace EditSharp.Composite
  
                 default:
                     throw new NotSupportedException(
-                        $"ValueGraphEvaluator has no dispatch for {node.GetType().Name} as a Value source — " +
-                        $"'{outputPortName}' output is not a recognized Value-producing node type.");
+                        $"ValueGraphEvaluator has no dispatch for {node.GetType().Name} on port '{outputPortName}'.");
             }
         }
     }

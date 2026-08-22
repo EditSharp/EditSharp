@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using SkiaSharp;
-using EditSharp.Components.Effects;
+using EditSharp.Components.Nodes.Sources.Video;
 using EditSharp.Components;
 
 

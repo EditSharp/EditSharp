@@ -95,21 +95,40 @@ namespace EditSharp.Composite
         /// the real failure this replaces (NVENC's -preset p4 rejected outright by
         /// hevc_qsv).
         ///
-        /// NVENC's args are the one entry here CONFIRMED working (unchanged from
-        /// before this fix, and this is the vendor the original single-candidate
-        /// code was written and presumably tested against). QSV and AMF's args
-        /// below are NOT verified against a real machine with that hardware —
-        /// same honesty flag as Constants.HardwareCodecNames and GpuContext's D3D12
-        /// path, and for the same reason: no such hardware or ffmpeg build to test
-        /// against here. Both use each vendor's own "single quality number" mode
-        /// (QSV: ICQ via -global_quality, AMF: constant-QP via -rc cqp) chosen to
-        /// be the closest analogue to NVENC's -cq/libx264's -crf, but the exact
-        /// flag names/values are from ffmpeg encoder documentation general
-        /// knowledge, not a confirmed real encode the way NVENC's now effectively
-        /// are. If either fails the same way p4 did, the fix is the same shape:
-        /// find that vendor's real flag names and replace the guess below — the
-        /// probe won't catch it, only a real encode attempt will, exactly as
-        /// happened here.
+        /// NVENC's args include adaptive quantization (-spatial-aq/-temporal-aq),
+        /// ADDED AFTER A REAL REPORT: high-entropy, incompressible content —
+        /// procedural film-grain/noise being the concrete case, but this applies
+        /// to any genuinely noisy source — showed visible blocking/macroblock
+        /// artifacts under NVENC specifically, while the same content encoded
+        /// cleanly through QSV and looked fine when composited (the noise itself
+        /// is generated correctly; only the final lossy encode of it was
+        /// affected). This is a well-documented NVENC characteristic, not a
+        /// EditSharp-side rendering bug: NVENC's rate control under-allocates
+        /// bits to fine, spatially/temporally incoherent detail at a flat CQ
+        /// target unless adaptive quantization is explicitly turned on, which is
+        /// exactly what -spatial-aq/-temporal-aq (plus -aq-strength) correct for
+        /// by shifting bits toward high-detail regions instead of spreading them
+        /// evenly. -cq is also lowered slightly (21 -> 19) specifically for the
+        /// same reason: fine random detail needs a bit more headroom than typical
+        /// footage to stay clean at NVENC's default allocation. Ordinary
+        /// (non-noisy) content is unaffected by this change beyond a small
+        /// bitrate/quality improvement — this isn't gated to noise-only content
+        /// because NVENC has no reliable way to detect "this clip contains a
+        /// generator/noise node" from the encoder's own side, and there's no
+        /// downside to leaving AQ on for normal footage.
+        ///
+        /// QSV and AMF's args below are NOT verified against a real machine with
+        /// that hardware — same honesty flag as Constants.HardwareCodecNames and
+        /// GpuContext's D3D12 path, and for the same reason: no such hardware or
+        /// ffmpeg build to test against here. Both use each vendor's own "single
+        /// quality number" mode (QSV: ICQ via -global_quality, AMF: constant-QP
+        /// via -rc cqp) chosen to be the closest analogue to NVENC's -cq/libx264's
+        /// -crf, but the exact flag names/values are from ffmpeg encoder
+        /// documentation general knowledge, not a confirmed real encode the way
+        /// NVENC's now effectively are. If either fails the same way p4 did, the
+        /// fix is the same shape: find that vendor's real flag names and replace
+        /// the guess below — the probe won't catch it, only a real encode attempt
+        /// will, exactly as happened here.
         /// </summary>
         private static List<string> GetHardwareQualityArgs(string encoderName)
         {
@@ -119,8 +138,11 @@ namespace EditSharp.Composite
                 {
                     "-preset", "p4",   // balanced speed/quality, modern p1(fastest)-p7(slowest) scale
                     "-rc:v", "vbr",
-                    "-cq:v", "21",
+                    "-cq:v", "19",     // slightly below the general-purpose 21 — see class remarks on AQ
                     "-b:v", "0",
+                    "-spatial-aq", "1",
+                    "-temporal-aq", "1",
+                    "-aq-strength", "8", // 1(mild)-15(strong); 8 is NVENC's own documented middle ground
                 };
             }
  
@@ -176,7 +198,13 @@ namespace EditSharp.Composite
         /// pass while the real pipeline still breaks (there, NVENC's -preset p4
         /// silently broke hevc_qsv because the probe never tried quality args at
         /// all; here, testing bare `-hwaccel` without the scale filter would
-        /// have the same blind spot for scale_cuda/scale_vulkan specifically).
+        /// have the same blind spot for scale_cuda specifically).
+        ///
+        /// NOTE this is a MECHANISM probe only (does the filter chain run at
+        /// all, exit code 0), not a pixel-correctness probe — see Constants.cs's
+        /// own remarks on why the "vulkan" candidate was removed entirely rather
+        /// than trusted to this probe: it passed this exact check while still
+        /// producing corrupted frames on at least one real machine.
         ///
         /// Same loud-fallback-logging contract as encode: if every hardware
         /// candidate fails for this source, this logs via LogWarning once,

@@ -5,7 +5,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using EditSharp.Components;
 using EditSharp.Components.Clips;
-using EditSharp.Components.Effects;
+using EditSharp.Components.Nodes;
+using EditSharp.Components.Nodes.Sources.Audio;
  
 namespace EditSharp.Composite
 {
@@ -16,7 +17,7 @@ namespace EditSharp.Composite
     /// TimelineAudioClip shapes are gone. AudioClip is now the only concrete
     /// audible Clip type, and what used to distinguish "a real audio file"
     /// from "an embedded nested timeline" is now just which InputNode(s) its
-    /// single EffectGraph happens to contain — MediaAudioSourceNode,
+    /// single Graph happens to contain — MediaAudioSourceNode,
     /// ToneGeneratorInputNode (brand new — there was no synthesized-tone clip
     /// type before this), or TimelineAudioInputNode. ComposeClipAsync
     /// resolves EVERY InputNode in a clip's graph to its own raw AudioBuffer
@@ -159,7 +160,7 @@ namespace EditSharp.Composite
         }
  
         /// <summary>
-        /// Gets one TimelineAudioInputNode's own raw (pre-EffectGraph) audio:
+        /// Gets one TimelineAudioInputNode's own raw (pre-Graph) audio:
         /// recursively mixes its embedded Timeline and windows the result per
         /// its TimelineReference, then fits to the owning clip's Duration.
         /// </summary>

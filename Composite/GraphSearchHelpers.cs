@@ -1,13 +1,14 @@
 using System.Collections.Generic;
 using System.Linq;
-using EditSharp.Components.Effects;
+using EditSharp.Components.Nodes;
+using EditSharp.Components.Nodes.Effects;
  
 namespace EditSharp.Composite
 {
     /// <summary>
     /// Small shared graph-walking helper used by both RenderContentPreparation
     /// (deciding a MediaSourceNode's decode target size) and SkClipContentSource
-    /// (the same decision, at decoder-open time). Not part of EffectGraph itself
+    /// (the same decision, at decoder-open time). Not part of Graph itself
     /// — this is a RENDER-side heuristic, not a structural graph invariant.
     ///
     /// "CLIPS ARE GRAPHS" REWRITE: TransformNode's data (ClipTransform) now
@@ -31,7 +32,7 @@ namespace EditSharp.Composite
         /// none is downstream at all (a pure Value-domain branch, or a
         /// custom graph with no TransformNode whatsoever).
         /// </summary>
-        public static TransformNode? FindDownstreamTransform(EffectGraph graph, EffectNode start)
+        public static TransformNode? FindDownstreamTransform(Graph graph, Node start)
         {
             var visited = new HashSet<System.Guid> { start.Id };
             var queue = new Queue<System.Guid>();
@@ -45,7 +46,7 @@ namespace EditSharp.Composite
                 {
                     if (!visited.Add(c.ToNodeId)) continue;
  
-                    EffectNode? node = graph.Nodes.FirstOrDefault(n => n.Id == c.ToNodeId);
+                    Node? node = graph.Nodes.FirstOrDefault(n => n.Id == c.ToNodeId);
                     if (node is TransformNode transform) return transform;
                     if (node != null) queue.Enqueue(node.Id);
                 }
