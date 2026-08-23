@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using SkiaSharp;
 using EditSharp.Components.Clips;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -21,6 +21,28 @@ namespace EditSharp.Composite
     /// front before handing off. Composite's job shrinks to: hand the
     /// clip's whole graph (with every InputNode's own resolved content) to
     /// the evaluator, and draw whatever comes out the other end.
+    ///
+    /// SAMPLING — MIPMAP MODE, ROOT-CAUSE FIX FOR THE BLOCK-CORRUPTION BUG.
+    /// DrawWarped and Resize both used to request SKMipmapMode.Linear
+    /// unconditionally, on every draw, regardless of whether that draw
+    /// actually minified enough to need it. Confirmed via the D3D12 debug/
+    /// validation layer: a freshly created SKImage (as every image flowing
+    /// through this compositor is — a new GPU-surface Snapshot() every
+    /// frame) has no mipmap chain yet, so requesting mipmap sampling forces
+    /// Skia to generate one on the fly, and doing so allocates an internal
+    /// scratch resource named "_Skia_CopyBaseMipMapToView" to copy the base
+    /// level into the chain. On this D3D12 backend, that specific internal
+    /// copy step is broken: the validation layer reported hundreds of
+    /// ResourceBarrierBeforeAfterMismatch / InvalidSubresourceState errors
+    /// against exactly that resource, bounded precisely to the frame range
+    /// where a transformed clip needing mipmap generation was on screen —
+    /// a resource used while the D3D12 runtime's own state tracking for it
+    /// is wrong, which is exactly the mechanism that produces block/tile-
+    /// level pixel corruption. Neither draw here actually needs mipmapping
+    /// — that's for reducing shimmer on SEVERE minification, not something
+    /// either a typical resize or a warp requires — so both now request
+    /// SKMipmapMode.None instead: plain bilinear filtering, no mip chain
+    /// ever generated, and this whole broken code path is never entered.
     /// </summary>
     internal static class SkTransformExpressions
     {
@@ -38,14 +60,14 @@ namespace EditSharp.Composite
             // frame == content here (1:1 outset ratio) — see ComputeQuad's own remarks.
             var placement = new TransformExpressions.ContentPlacement(
                 contentWidth, contentHeight, 0, 0);
- 
+
             TransformExpressions.Quad q = TransformExpressions.ComputeQuad(
                 transform, nativeWidth, nativeHeight, canvasWidth, canvasHeight,
                 contentWidth, contentHeight, 0, 0, placement);
- 
+
             return RectToQuad(contentWidth, contentHeight, q);
         }
- 
+
         /// <summary>
         /// The general "unit-square-to-quadrilateral" homography (Heckbert),
         /// composed with a pre-scale so the SOURCE is an arbitrary WxH rect
@@ -58,20 +80,20 @@ namespace EditSharp.Composite
                 q.X1, q.Y1,
                 q.X3, q.Y3,
                 q.X2, q.Y2);
- 
+
             SKMatrix rectToUnit = SKMatrix.CreateScale(
                 (float)(1.0 / width), (float)(1.0 / height));
- 
+
             return SKMatrix.Concat(unitToQuad, rectToUnit);
         }
- 
+
         private static SKMatrix UnitSquareToQuad(
             double x0, double y0, double x1, double y1,
             double x2, double y2, double x3, double y3)
         {
             double dx1 = x1 - x2, dx2 = x3 - x2, dx3 = x0 - x1 + x2 - x3;
             double dy1 = y1 - y2, dy2 = y3 - y2, dy3 = y0 - y1 + y2 - y3;
- 
+
             if (dx3 == 0.0 && dy3 == 0.0)
             {
                 return new SKMatrix
@@ -82,19 +104,19 @@ namespace EditSharp.Composite
                     Persp0 = 0, Persp1 = 0, Persp2 = 1
                 };
             }
- 
+
             double denom = (dx1 * dy2) - (dx2 * dy1);
             double a13 = ((dx3 * dy2) - (dx2 * dy3)) / denom;
             double a23 = ((dx1 * dy3) - (dx3 * dy1)) / denom;
- 
+
             double a11 = x1 - x0 + (a13 * x1);
             double a21 = x3 - x0 + (a23 * x3);
             double a31 = x0;
- 
+
             double a12 = y1 - y0 + (a13 * y1);
             double a22 = y3 - y0 + (a23 * y3);
             double a32 = y0;
- 
+
             return new SKMatrix
             {
                 ScaleX = (float)a11, SkewY = (float)a12,
@@ -103,31 +125,37 @@ namespace EditSharp.Composite
                 Persp0 = (float)a13, Persp1 = (float)a23, Persp2 = 1
             };
         }
- 
-        /// <summary>Draws `content` warped by `matrix` onto `canvas`.</summary>
+
+        /// <summary>
+        /// Draws `content` warped by `matrix` onto `canvas`. Bilinear, NOT
+        /// mipmapped — see this class's own SAMPLING remarks for why.
+        /// </summary>
         public static void DrawWarped(SKCanvas canvas, SKImage content, SKMatrix matrix)
         {
             canvas.Save();
             canvas.Concat(in matrix);
             using (var paint = new SKPaint { IsAntialias = true })
             {
-                var sampling = new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear);
+                var sampling = new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None);
                 canvas.DrawImage(content, 0, 0, sampling, paint);
             }
             canvas.Restore();
         }
- 
-        /// <summary>Resizes `source` to width x height (linear/mipmap-linear sampling).</summary>
+
+        /// <summary>
+        /// Resizes `source` to width x height. Bilinear, NOT mipmapped —
+        /// see this class's own SAMPLING remarks for why.
+        /// </summary>
         public static SKImage Resize(SKImage source, int width, int height, SkSurfacePool pool)
         {
             if (source.Width == width && source.Height == height) return source;
- 
+
             SKSurface surface = pool.Rent(width, height);
             try
             {
                 var canvas = surface.Canvas;
                 canvas.Clear(SKColors.Transparent);
-                var sampling = new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear);
+                var sampling = new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None);
                 var dest = new SKRect(0, 0, width, height);
                 canvas.DrawImage(source, dest, sampling);
                 return surface.Snapshot();
@@ -138,7 +166,7 @@ namespace EditSharp.Composite
             }
         }
     }
- 
+
     /// <summary>
     /// Everything a clip's graph evaluation needs beyond the graph itself.
     ///
@@ -159,7 +187,7 @@ namespace EditSharp.Composite
         public int Fps { get; } = fps;
         public double DurationSeconds { get; } = durationSeconds;
     }
- 
+
     /// <summary>
     /// Thin driver: hand the clip's whole graph (with every InputNode's own
     /// already-resolved content) to EffectGraphEvaluatorSk, then draw
@@ -180,12 +208,11 @@ namespace EditSharp.Composite
             SkSurfacePool pool)
         {
             var clipRelativeTime = TimeSpan.FromSeconds(clipSeconds);
- 
+
             using SKImage final = EffectGraphEvaluatorSk.Evaluate(
                 clip.Graph, resolvedInputs, clipRelativeTime, context, pool);
- 
+
             canvas.DrawImage(final, 0, 0);
         }
     }
 }
- 

@@ -47,42 +47,41 @@ namespace EditSharp.Composite
     /// GPU SUBMISSION, ADDED AFTER A REAL REPORT — this pool (and every
     /// other call site that draws to a GRContext-backed SKSurface in this
     /// project) never once called GRContext.Flush()/Submit() anywhere.
-    /// Skia's own higher-level consumers (e.g. a windowed swapchain
-    /// integration) normally call Submit() once per displayed frame as part
-    /// of presenting it; this project has no such consumer, since every
-    /// surface here is read back via ReadPixels/Snapshot rather than
-    /// presented to a window, and it was assumed (WRONGLY, per the report
-    /// this fixes) that Skia's own internal flush-before-readback handled
-    /// this automatically regardless of backend. Recorded GPU work can sit
-    /// queued in Skia's own command-list state, not yet actually submitted
-    /// to the real ID3D12CommandQueue GpuContext constructed — a state
-    /// where reusing the SAME underlying texture for a new Rent+Clear+Draw
-    /// races the GPU's own execution of the PRIOR content's commands. This
-    /// is consistent with confirmed field behavior: absent entirely on pure
-    /// software rendering (no GPU queue to race) and on hardware that falls
-    /// back to software (see GpuContext's own remarks on D3D12 creation
-    /// failing outright on some machines), present intermittently — "not
-    /// present for a lot of the time" — specifically on the one machine
-    /// with the newest/fastest GPU (more headroom before Skia's own
-    /// internal resource budget forces a texture to be reclaimed and reused
-    /// while older commands against it are still in flight, so a bigger,
-    /// faster card takes longer to first exhibit it, not less likely to).
+    /// FIX: force a real GPU submission every time a GPU-backed surface is
+    /// Return()'d — see EnsureGpuWorkSubmitted below. Independently correct
+    /// and kept regardless of the notes below.
     ///
-    /// FIX: force a real GPU submission — Flush() records any outstanding
-    /// work into the command buffer, Submit(syncCpu: true) hands it to the
-    /// queue AND blocks until the GPU has actually finished executing it —
-    /// every time a GPU-backed surface is Return()'d, before it can be
-    /// Rent()'d again and overwritten. This trades away some of the async
-    /// pipelining a GPU backend would otherwise give (an intentional,
-    /// correctness-over-throughput choice given how expensive silently-
-    /// wrong pixels are to debug) — but only for the GPU path; software-
-    /// backed surfaces (_grContext == null) skip it entirely, so this has
-    /// no effect on HardwareAccelerator.None or on any machine already
-    /// falling back to software. UNVERIFIED against a real installed
-    /// SkiaSharp build in this sandbox (same honesty flag as the rest of
-    /// GpuContext/SkSurfacePool) — wrapped in try/catch and logged rather
-    /// than allowed to take down a render if Submit's actual signature on
-    /// the referenced SkiaSharp version turns out to differ.
+    /// INVESTIGATION HISTORY for a real block-corruption bug found in the
+    /// field, kept here for anyone re-reading this file later: a canvas
+    /// Save()/Restore() imbalance on a reused surface was checked for and
+    /// ruled out (a temporary Canvas.SaveCount assertion in Return() ran
+    /// through a full repro and never fired once). The D3D12 debug/
+    /// validation layer then identified the REAL cause as living one level
+    /// up, in SkTransformExpressions' sampling options (unconditional
+    /// SKMipmapMode.Linear triggering a broken on-the-fly mipmap-generation
+    /// path on this backend — see that file's own remarks) — not in this
+    /// pool's reuse scheme at all, which the validation layer's silence on
+    /// ResourceBarrier/subresource-state errors for ordinary (non-mipmap)
+    /// draws corroborates.
+    ///
+    /// FIRST-USE INITIALIZATION, ADDED AFTER A SEPARATE, SMALLER REAL
+    /// REPORT found in the same investigation: the D3D12 debug layer also
+    /// flagged 3 RenderTargetOrDepthStencilResouceNotInitialized errors,
+    /// all on the warm-up frame — a resource created with
+    /// D3D12_HEAP_FLAG_CREATE_NOT_ZEROED (as Skia's own D3D12 texture
+    /// allocator does) must have its very first GPU-side touch be a real
+    /// Discard/Clear/Copy, and this pool's seeded surfaces (created in the
+    /// constructor, before any drawing ever happens to them) were sitting
+    /// idle until whatever caller first Rent()'d them did its own
+    /// Clear()+Draw() — leaving open the possibility that a caller's Clear
+    /// gets folded into a render-pass "load action" alongside its Draw
+    /// rather than recorded as its own standalone GPU operation, which
+    /// doesn't satisfy this requirement. FIX: CreateSurface itself now
+    /// performs a real, immediately-submitted Clear the instant a GPU-
+    /// backed surface is created — for both seeded and on-demand surfaces
+    /// — so the requirement is met by a dedicated op under this pool's own
+    /// control, independent of whatever a caller's later Clear()+Draw()
+    /// sequence gets compiled into.
     ///
     /// NOT THREAD-SAFE, deliberately — matches the render loop's own
     /// strictly-sequential contract. A lock here would be pure overhead for
@@ -110,10 +109,11 @@ namespace EditSharp.Composite
 
         /// <summary>
         /// Hands out a surface of exactly width x height. Content is
-        /// whatever was left on it by its previous use (or uninitialized,
-        /// for a brand new one) — the caller MUST Clear() (or otherwise
-        /// fully overwrite every pixel) before drawing, same obligation
-        /// every existing SKSurface.Create call site already met.
+        /// whatever was left on it by its previous use (or transparent, for
+        /// a brand new one — see CreateSurface's first-use initialization)
+        /// — the caller MUST Clear() (or otherwise fully overwrite every
+        /// pixel) before drawing, same obligation every existing
+        /// SKSurface.Create call site already met.
         /// </summary>
         public SKSurface Rent(int width, int height)
         {
@@ -154,8 +154,7 @@ namespace EditSharp.Composite
         /// this pool's GRContext — a no-op for a software-backed pool
         /// (_grContext == null). Failure is logged once and then silently
         /// skipped for the rest of this pool's life rather than retried
-        /// every single Return() call — see class remarks on why this is
-        /// unverified against a real SkiaSharp build.
+        /// every single Return() call.
         /// </summary>
         private void EnsureGpuWorkSubmitted()
         {
@@ -170,7 +169,7 @@ namespace EditSharp.Composite
             {
                 _gpuSubmitFailed = true;
                 EditSharpConfig.Logger.LogWarning(
-                    "SkSurfacePool: GRContext.Flush()/Submit(syncCpu: true) failed and will not be " +
+                    "SkSurfacePool: GRContext.Flush()/Submit() failed and will not be " +
                     $"retried for this render — GPU surface reuse may race outstanding GPU work: {ex.Message}");
             }
         }
@@ -191,6 +190,37 @@ namespace EditSharp.Composite
             // whole-context fallback GpuContext itself already logs loudly;
             // not logged here to avoid spamming per-frame if it repeats.
             surface ??= SKSurface.Create(info);
+
+            // FIRST-USE INITIALIZATION — see class remarks. Give every
+            // GPU-backed surface a real, immediately-submitted Clear the
+            // instant it's created, before it's ever handed out via Rent(),
+            // so a D3D12 NOT_ZEROED render target's mandatory first-touch
+            // requirement is satisfied by a dedicated op this pool controls
+            // directly rather than depending on a caller's later
+            // Clear()+Draw() sequence.
+            if (_grContext != null)
+            {
+                surface.Canvas.Clear(SKColors.Transparent);
+
+                // surface.Flush() (not just GRContext.Flush) is what forces
+                // THIS surface's own pending ops to actually be recorded —
+                // a clear with nothing drawn after it is otherwise a prime
+                // candidate for Skia to elide entirely as dead work, which
+                // is the likely reason a first attempt at this fix (Clear +
+                // GRContext.Flush/Submit alone) left the
+                // RenderTargetOrDepthStencilResouceNotInitialized errors
+                // exactly as they were. Wrapped because SKSurface.Flush's
+                // presence/shape varies across SkiaSharp versions and this
+                // whole D3D12 surface is unverified here (see GpuContext).
+                try { surface.Flush(); }
+                catch (Exception ex)
+                {
+                    EditSharpConfig.Logger.LogVerbose(
+                        $"SkSurfacePool: SKSurface.Flush() on a new surface failed: {ex.Message}");
+                }
+
+                EnsureGpuWorkSubmitted();
+            }
 
             _owned.Add(surface);
             return surface;

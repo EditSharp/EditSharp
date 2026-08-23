@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Threading;
 using SkiaSharp;
 using EditSharp.Components.Nodes.Sources.Video;
 
@@ -6,7 +8,8 @@ namespace EditSharp.Composite
 {
     /// <summary>
     /// Real-time procedural noise via an SkSL shader — no pre-render, no
-    /// seek, nothing to pre-render at all.
+    /// seek, nothing to pre-render at all. Rendered on the GPU (via the
+    /// shared SkSurfacePool) like everything else in the compositor.
     ///
     /// HONESTY FLAG, carried over unchanged: this is a standard
     /// gradient-noise (Perlin-style) implementation, NOT a byte-exact port
@@ -21,38 +24,49 @@ namespace EditSharp.Composite
     /// size now comes from the resolved image itself" change.
     ///
     /// UNIFORM LAYOUT, DELIBERATELY THREE vec4's INSTEAD OF SIX SEPARATE
-    /// float/float2/float3 UNIFORMS — this is a real fix, not a style
-    /// preference. This is the ONLY draw in the whole compositor that uses
-    /// a custom multi-uniform SKRuntimeEffect (every other draw is a plain
-    /// DrawImage of pre-resolved pixels with no uniform block at all), and
-    /// it's the one place a real, reported bug showed up: on the D3D12
-    /// GRContext backend (see GpuContext), a scalar/vec2/vec3 uniform
-    /// sequence (float2, float, float, float, float, float3 — the original
-    /// shape here) can straddle HLSL's 16-byte constant-buffer register
-    /// boundaries depending on exactly how the backend packs them, which is
-    /// precisely the kind of thing that can differ by GPU vendor/driver
-    /// even on the same backend — confirmed in the field as visible
-    /// rectangular block corruption in the noise output on an NVIDIA GPU
-    /// (where the real D3D12 GPU shader path actually runs) while the same
-    /// content rendered correctly on hardware that fell back to software
-    /// rasterization instead (see GpuContext's own remarks: D3D12 device
-    /// creation failing at all falls straight to software with no ANGLE/GL
-    /// middle ground, and a weaker/older iGPU is a plausible place for that
-    /// to happen) — i.e. the bug only manifests wherever the real GPU
-    /// uniform-packing path is actually exercised, not from anything
-    /// specific to noise's own math.
+    /// float/float2/float3 UNIFORMS — every uniform is naturally aligned to
+    /// a 16-byte boundary with nothing left for a constant-buffer packer to
+    /// get creative about. A real hardening measure, kept even though it
+    /// turned out not to be the cause of the block-corruption bug under
+    /// active investigation (see SkSurfacePool's own remarks for where that
+    /// investigation currently stands). u2 only uses its first component
+    /// (seedOffset.z) — the trailing padding is intentional, not leftover.
     ///
-    /// Packing every uniform into three vec4's (u0/u1/u2), each exactly 16
-    /// bytes, removes the ambiguity entirely: every uniform is now
-    /// naturally aligned to its own HLSL register with nothing left for a
-    /// packer to get creative about, regardless of backend or vendor. u2
-    /// only uses its first component (seedOffset.z) — the trailing padding
-    /// is intentional, not leftover.
+    /// BLOCK-CORRUPTION BUG, STATUS: confirmed (via a temporary debug dump
+    /// that has since been removed) to be present in this shader's raw GPU
+    /// output the instant it leaves the draw below — before pool.Return,
+    /// before any compositing, tinting, or transform ever touches it. That
+    /// rules out the compositor/blend/tint stages entirely and narrows the
+    /// search to the GPU draw itself and whatever GPU state the rented
+    /// surface arrived with — see SkSurfacePool's own remarks for the
+    /// current leading theory and the diagnostic now in place for it.
     /// </summary>
     internal static class SkNoiseClip
     {
         private const double DetailCellsPerCanvas = 1000.0;
         private const double SeetheCellsPerSecond = 10.0;
+
+        // ---------------------------------------------------------------
+        // TEMPORARY DIAGNOSTIC (re-enabled for the DETERMINISM test) —
+        // remove once root-caused. Set EDITSHARP_NOISE_DEBUG_DUMP to a
+        // folder and the first 120 noise frames are written to PNG the
+        // instant they come back from the GPU draw, before anything else
+        // touches them.
+        //
+        // The question this round is NOT "is it corrupted" (already
+        // established: yes, from frame one) but "is the corruption
+        // BIT-IDENTICAL between two separate runs of the same blueprint."
+        // Identical => a deterministic logic bug (uniform/descriptor/
+        // binding — something computed wrong the same way every time).
+        // Different => uninitialized VRAM or a genuine race, which points
+        // at the RenderTargetOrDepthStencilResouceNotInitialized errors
+        // still in the D3D12 log instead. Those two causes need opposite
+        // fixes, so this distinction decides the whole next step.
+        // ---------------------------------------------------------------
+        private static readonly string? DebugDumpDir =
+            Environment.GetEnvironmentVariable("EDITSHARP_NOISE_DEBUG_DUMP");
+        private static int _debugDumpCount;
+        private const int DebugDumpMax = 120;
 
         private const string ShaderSource = """
             uniform float4 u0; // resolution.x, resolution.y, xscale, yscale
@@ -154,16 +168,41 @@ namespace EditSharp.Composite
             using SKShader shader = Effect.ToShader(uniforms);
             using var paint = new SKPaint { Shader = shader };
 
+            SKImage result;
             SKSurface surface = pool.Rent(canvasWidth, canvasHeight);
             try
             {
                 surface.Canvas.Clear(SKColors.Transparent);
                 surface.Canvas.DrawRect(new SKRect(0, 0, canvasWidth, canvasHeight), paint);
-                return surface.Snapshot();
+                result = surface.Snapshot();
             }
             finally
             {
                 pool.Return(surface, canvasWidth, canvasHeight);
+            }
+
+            if (DebugDumpDir != null) DumpDebugFrame(result, clipSeconds);
+
+            return result;
+        }
+
+        /// <summary>See the TEMPORARY DIAGNOSTIC remarks above this class's fields.</summary>
+        private static void DumpDebugFrame(SKImage image, double clipSeconds)
+        {
+            int index = Interlocked.Increment(ref _debugDumpCount);
+            if (index > DebugDumpMax) return;
+
+            try
+            {
+                Directory.CreateDirectory(DebugDumpDir!);
+                string path = Path.Combine(DebugDumpDir!, $"noise_raw_{index:0000}_{clipSeconds:F3}s.png");
+
+                using SKData? png = image.Encode(SKEncodedImageFormat.Png, 100);
+                if (png != null) File.WriteAllBytes(path, png.ToArray());
+            }
+            catch (Exception ex)
+            {
+                EditSharpConfig.Logger.LogWarning($"SkNoiseClip debug dump failed: {ex.Message}");
             }
         }
     }
