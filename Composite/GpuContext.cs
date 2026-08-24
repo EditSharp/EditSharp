@@ -50,8 +50,17 @@ namespace EditSharp.Composite
     /// Revisit if a real need shows up (a machine where D3D12 device
     /// creation itself fails but GL/ANGLE would have worked).
     ///
-    /// ADAPTER LIFETIME — THE REAL ROOT CAUSE OF A BLOCK-CORRUPTION BUG
-    /// FOUND IN THE FIELD, fixed here. An earlier pass at a genuine COM
+    /// ADAPTER LIFETIME — a real bug found and fixed here, but NOT the
+    /// cause of the block-corruption bug. It was believed to be the cause
+    /// when this was written; that was wrong, and the claim is corrected
+    /// rather than deleted so the reasoning trail stays honest. The
+    /// corruption survived this fix, and was later shown to appear on
+    /// UNCHANGED code that had previously rendered correctly (reverting to
+    /// the first GPU commit did not help, with no SkiaSharp/ffmpeg version
+    /// change), which points outside the codebase entirely — see the
+    /// ENVIRONMENT FINGERPRINT section below. The lifetime fix stays
+    /// because it is independently correct: a GRContext must not outlive
+    /// the adapter it borrows. An earlier pass at a genuine COM
     /// leak (the adapter enumeration loop never called adapter.Dispose() at
     /// all) fixed the leak by disposing every enumerated IDXGIAdapter1
     /// unconditionally in a `finally`, including the one adapter actually
@@ -68,19 +77,10 @@ namespace EditSharp.Composite
     /// out from under a GRContext that was still going to dereference it —
     /// a real use-after-free, not merely a leak.
     ///
-    /// This explains the exact symptom reported: rectangular block
-    /// corruption that (a) only ever showed up through the real D3D12 GPU
-    /// path (a context that never got this far — falling back to software —
-    /// never touches an adapter this way at all); (b) reproduced identically
-    /// on a second, factory-fresh RTX 5070 in a completely different
-    /// machine (a use-after-free from a coding bug reproduces on any
-    /// hardware running the same code path — it was never a property of one
-    /// degrading GPU unit); and (c) was most visible specifically in
-    /// Perlin-noise output — not because noise's own shader was special, but
-    /// because a few corrupted texture blocks are far more visually obvious
-    /// against a smooth procedural noise field than blended into ordinary
-    /// video content, where the same underlying corruption would likely go
-    /// unnoticed.
+    /// (The reasoning that made this look like the culprit — GPU-path-only,
+    /// reproducing on a second factory-fresh card, most visible against
+    /// smooth noise — turned out to fit the actual environmental cause just
+    /// as well, which is why it was convincing and still wrong.)
     ///
     /// FIX: GpuContext now holds onto (and owns) the successful adapter for
     /// its own entire lifetime, disposing it in Dispose() alongside
@@ -114,6 +114,94 @@ namespace EditSharp.Composite
         // disables itself with a logged reason instead of crashing the
         // render. Remove once root-caused.
         // ---------------------------------------------------------------
+
+        // ---------------------------------------------------------------
+        // ENVIRONMENT FINGERPRINT + ADAPTER OVERRIDE.
+        //
+        // Added after the decisive observation that UNCHANGED code which
+        // previously rendered correctly began producing block corruption —
+        // reverting all the way to the first GPU commit did not help, and
+        // no SkiaSharp/ffmpeg version changed. A bug that appears without a
+        // code change is environmental, so the environment has to be
+        // recorded as precisely as the code is.
+        //
+        // EDITSHARP_D3D12_ADAPTER=<index> forces a specific DXGI adapter
+        // instead of "first non-software". On a hybrid machine that is the
+        // only way to A/B the discrete and integrated GPU with the same
+        // build, same blueprint, same moment — the cleanest possible test
+        // of whether this is vendor/driver-specific.
+        // ---------------------------------------------------------------
+        private static readonly string? AdapterOverrideRaw =
+            Environment.GetEnvironmentVariable("EDITSHARP_D3D12_ADAPTER");
+
+        private static int AdapterOverrideIndex =>
+            int.TryParse(AdapterOverrideRaw, out int idx) ? idx : -1;
+
+        /// <summary>
+        /// Logs everything about the runtime graphics environment that
+        /// could plausibly change underneath an unchanged build: the
+        /// adapter identity, the user-mode driver version (the prime
+        /// suspect), the actual loaded SkiaSharp assembly, and the OS
+        /// build. Logged unconditionally — this is cheap, happens once per
+        /// render session, and is exactly the information that was missing
+        /// when the corruption first appeared.
+        /// </summary>
+        private static void LogEnvironmentFingerprint(IDXGIAdapter1 adapter, uint index)
+        {
+            try
+            {
+                AdapterDescription1 desc = adapter.Description1;
+
+                string driver = "unavailable";
+                try
+                {
+                    // The user-mode driver version. For NVIDIA the
+                    // user-facing number (e.g. 576.90) is encoded in the
+                    // low half, so both raw and decoded forms are logged.
+                    if (adapter.CheckInterfaceSupport(typeof(IDXGIDevice).GUID, out long umd).Success)
+                    {
+                        long sub = (umd >> 16) & 0xFFFF;
+                        long build = umd & 0xFFFF;
+                        long nvidiaStyle = ((sub % 10) * 10000) + build;
+                        driver =
+                            $"raw=0x{umd:X16} " +
+                            $"({(umd >> 48) & 0xFFFF}.{(umd >> 32) & 0xFFFF}.{sub}.{build}) " +
+                            $"nvidia-style~{nvidiaStyle / 100.0:F2}";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    driver = $"query failed: {ex.Message}";
+                }
+
+                var skia = typeof(SKSurface).Assembly.GetName();
+                string skiaInfo = skia.Version?.ToString() ?? "unknown";
+                try
+                {
+                    string loc = typeof(SKSurface).Assembly.Location;
+                    if (!string.IsNullOrEmpty(loc))
+                        skiaInfo += $" @ {loc}";
+                }
+                catch { /* single-file publish has no Location */ }
+
+                EditSharpConfig.Logger.LogWarning(
+                    "=== EditSharp GPU environment fingerprint ===\n" +
+                    $"  Adapter[{index}]  : {desc.Description}\n" +
+                    $"  Vendor/Device : 0x{desc.VendorId:X4} / 0x{desc.DeviceId:X4} " +
+                    $"(rev 0x{desc.Revision:X}, subsys 0x{desc.SubsystemId:X})\n" +
+                    $"  Dedicated VRAM: {desc.DedicatedVideoMemory / (1024 * 1024)} MB\n" +
+                    $"  UMD driver    : {driver}\n" +
+                    $"  SkiaSharp     : {skiaInfo}\n" +
+                    $"  OS            : {Environment.OSVersion} / {System.Runtime.InteropServices.RuntimeInformation.OSDescription}\n" +
+                    $"  Process arch  : {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}\n" +
+                    "============================================");
+            }
+            catch (Exception ex)
+            {
+                EditSharpConfig.Logger.LogWarning($"GpuContext: environment fingerprint failed: {ex.Message}");
+            }
+        }
+
         private static readonly bool DebugLayerRequested =
             Environment.GetEnvironmentVariable("EDITSHARP_D3D12_DEBUG") == "1";
 
@@ -271,6 +359,29 @@ namespace EditSharp.Composite
                 {
                     if (adapter == null) continue;
 
+                    // Full adapter listing, so EDITSHARP_D3D12_ADAPTER can be
+                    // aimed at a specific GPU without guessing. On a hybrid
+                    // machine the FIRST non-software adapter is frequently the
+                    // INTEGRATED GPU — which means this selection logic can
+                    // silently decide which vendor's shader compiler runs the
+                    // whole compositor, and a machine reconfigured from hybrid
+                    // to dGPU-only starts executing the same unchanged code on
+                    // a completely different GPU. That is not a hypothetical:
+                    // it is the leading explanation for a block-corruption bug
+                    // that appeared with no code change and survived reverting
+                    // to the first GPU commit.
+                    try
+                    {
+                        AdapterDescription1 d = adapter.Description1;
+                        bool software = (d.Flags & AdapterFlags.Software) != 0;
+                        EditSharpConfig.Logger.LogWarning(
+                            $"Composite: adapter[{i}] '{d.Description}' " +
+                            $"vendor=0x{d.VendorId:X4} device=0x{d.DeviceId:X4} " +
+                            $"vram={d.DedicatedVideoMemory / (1024 * 1024)}MB" +
+                            (software ? " [SOFTWARE — skipped]" : ""));
+                    }
+                    catch { /* listing is diagnostic only, never fatal */ }
+
                     // `keepAlive` tracks whether THIS adapter is the one
                     // that ends up backing a successful GRContext — if so,
                     // GpuContext takes ownership of it for its own lifetime
@@ -285,6 +396,18 @@ namespace EditSharp.Composite
                     {
                         if ((adapter.Description1.Flags & AdapterFlags.Software) != 0)
                             continue;
+
+                        // Adapter override: skip everything that isn't the
+                        // requested index. See this class's ENVIRONMENT
+                        // FINGERPRINT remarks.
+                        int overrideIndex = AdapterOverrideIndex;
+                        if (overrideIndex >= 0 && i != (uint)overrideIndex)
+                        {
+                            EditSharpConfig.Logger.LogVerbose(
+                                $"Composite: skipping adapter[{i}] '{adapter.Description1.Description}' " +
+                                $"(EDITSHARP_D3D12_ADAPTER={overrideIndex}).");
+                            continue;
+                        }
 
                         if (D3D12.D3D12CreateDevice(adapter, Vortice.Direct3D.FeatureLevel.Level_11_0, out device).Success
                             && device != null)
@@ -317,6 +440,7 @@ namespace EditSharp.Composite
                             GRContext? grContext = GRContext.CreateDirect3D(backendContext);
                             if (grContext != null)
                             {
+                                LogEnvironmentFingerprint(adapter, i);
                                 keepAlive = true;
                                 return new GpuContext(grContext, factory, adapter, device, queue, infoQueue);
                             }

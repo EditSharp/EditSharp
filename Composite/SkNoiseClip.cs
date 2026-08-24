@@ -32,53 +32,77 @@ namespace EditSharp.Composite
     /// investigation currently stands). u2 only uses its first component
     /// (seedOffset.z) — the trailing padding is intentional, not leftover.
     ///
-    /// ROOT CAUSE OF THE BLOCK-CORRUPTION BUG — FOUND, AND FIXED BELOW BY
-    /// THE SINGLE LINE `float3 f = p - i;` IN gradientNoise3D.
+    /// ROOT CAUSE OF THE BLOCK-CORRUPTION BUG, and the two changes that
+    /// fix it. Established by controlled A/B on ONE machine (Framework
+    /// Laptop 16), ONE build, at ONE moment, selecting the GPU with
+    /// EDITSHARP_D3D12_ADAPTER:
+    ///     AMD Radeon 890M  -> fully correct, no bisect stage diverges
+    ///     NVIDIA RTX 5070  -> blocked noise, bisect diverges at stage 7
+    /// Same binary, same blueprint, same instant. That excludes hardware,
+    /// driver version (multiple were tried), the D3D12 context, the surface
+    /// pool, uniform binding, and every other shared code path at once, and
+    /// leaves exactly one thing: this shader contains arithmetic whose
+    /// result depends on compiler rounding choices, and NVIDIA's compiler
+    /// makes different (entirely legal) choices than AMD's.
     ///
-    /// The shader used to compute the lattice cell and the position within
-    /// that cell as two INDEPENDENT expressions:
-    ///     float3 i = floor(p);
-    ///     float3 f = fract(p);   // <-- the bug
-    /// Both look like they read the same `p`, but `p` here is not a stored
-    /// value — it is the inlined expression
-    /// `xscale * (fragCoord.x / resolution.x) + seedOffset.x` (and the y/t
-    /// equivalents). A shader compiler is free to contract that multiply-add
-    /// into a single FMA instruction at one use site and emit a separate
-    /// multiply and add at the other. The two `p` values then differ by
-    /// about one ULP. For the vast majority of pixels that is invisible —
-    /// but for any pixel lying near a lattice boundary it means floor()
-    /// reports cell N while fract() returns a fraction belonging to cell
-    /// N+1. The gradient is then fetched for one cell and interpolated with
-    /// the other cell's weight, producing a hard discontinuity along the
-    /// whole shared edge: a rectangular SEAM, not isolated speckle.
+    /// (1) THE HASH — the amplifier, and the reason the corruption is
+    /// visible at all. The old hash ended with:
+    ///         return fract((p.x + p.y) * p.z);   // argument approx 5000
+    /// fract() of a value near 5000, where fp32's ULP is about 4.9e-4. Any
+    /// one-ULP difference in how the chain is evaluated — FMA contraction,
+    /// reassociation, both legal and both invisible in source — nudges that
+    /// argument. Nearly always harmless; but whenever it sits within a few
+    /// ULP of an integer, fract() flips between ~0.999 and ~0.001 and that
+    /// lattice corner's gradient becomes COMPLETELY different. One poisoned
+    /// corner corrupts the up-to-eight cells sharing it, and each cell is
+    /// tens of pixels wide: a scatter of grossly wrong rectangles in an
+    /// otherwise correct field. Deterministic (same coordinates every
+    /// frame), vendor-specific, magnitude-sensitive, and completely
+    /// invisible to the D3D12 validation layer because nothing about it is
+    /// an API error.
+    ///     FIX: an exact-integer hash (mod289/permute, below). Every
+    ///     intermediate is an fp32 value that is mathematically an integer
+    ///     below 2^24, and fp32 represents those EXACTLY — so there is no
+    ///     rounding for any compiler to disagree about. Bit-identical on
+    ///     NVIDIA, AMD, and the CPU rasterizer, by construction.
     ///
-    /// HOW THIS WAS ESTABLISHED (SkNoiseShaderBisect, run against real
-    /// hardware — every earlier theory was falsified by measurement first):
-    ///   - compositor/tint/transform stages: excluded (raw pre-composite
-    ///     dumps were already corrupted)
-    ///   - uninitialized VRAM / races / submission ordering: excluded (the
-    ///     corruption is bit-identical across separate runs)
-    ///   - the mipmap-generation path: a real bug, found and fixed, but not
-    ///     this one (D3D12 validation layer went fully clean, corruption
-    ///     remained)
-    ///   - shader float precision: excluded (fract(u*30 + 1000.0) came back
-    ///     smooth and bit-identical on GPU and CPU)
-    ///   - uniform binding: excluded (stage 6 echoed all three uniforms as a
-    ///     flat colour, bit-identical GPU vs CPU)
-    ///   - fract(p) ALONE (stage 1): clean. floor(p)-derived gradient ALONE
-    ///     (stage 4): clean. The FIRST stage to use i and f TOGETHER
-    ///     (stage 7, dot(gradient(i), f)): DIVERGED. That is the whole
-    ///     result — each half is individually correct, and only their
-    ///     combination is wrong, which is precisely what an i/f
-    ///     disagreement looks like and nothing else does.
+    /// (2) floor/fract CONSISTENCY — a second, independent hazard, fixed by
+    /// `float3 f = p - i;` in gradientNoise3D. `floor(p)` and `fract(p)`
+    /// were two separate reads of an INLINED expression
+    /// (`xscale * (fragCoord.x / resolution.x) + seedOffset.x`), which a
+    /// compiler may contract into an FMA at one site and not the other. The
+    /// two values then differ by ~1 ULP, and a pixel near a cell boundary
+    /// gets its cell index from one and its sub-cell fraction from the
+    /// other — gradient from cell N, weight from cell N+1, a hard seam
+    /// along the whole shared edge. Deriving f FROM i makes i + f == p hold
+    /// bit-exactly whatever the compiler materialises, and keeps the corner
+    /// arithmetic (i + offset against f - offset) complementary. Applied
+    /// first, on its own it was necessary but NOT sufficient: it removes
+    /// the boundary seams, while (1) removes the poisoned cells.
     ///
-    /// Deriving f from i (f = p - i) makes the two exactly complementary by
-    /// construction: whatever value of p the compiler materialises,
-    /// i + f == p holds bit-exactly, and the corner arithmetic
-    /// (i + offset paired with f - offset) stays consistent. The seams
-    /// cannot form. There is no performance cost — a subtract replaces a
-    /// fract — and the same discipline protects every future shader on this
-    /// path, keying included.
+    /// Both changes are free — a subtract replaces a fract, and the integer
+    /// hash is comparable arithmetic — and both are the right discipline for
+    /// every future shader on this path, keying included: never let a
+    /// visible result depend on the low bits of a large float, and never
+    /// compute two quantities that must agree as independent expressions.
+    ///
+    /// NOTE: the generated pattern is DIFFERENT from the old hash's for the
+    /// same Seed. Detail/SeetheRate/Seed semantics are unchanged and seeds
+    /// remain well distributed; existing projects will see their noise
+    /// change appearance once.
+    ///
+    /// FALSIFIED ALONG THE WAY, recorded so none of it is re-litigated:
+    /// failing hardware (reproduced on a second, factory-fresh card);
+    /// driver regression (multiple driver versions, including several
+    /// 5xx.xx, all reproduce); compositor/tint/transform stages (raw
+    /// pre-composite dumps were already corrupted); uninitialised VRAM,
+    /// races and submission ordering (corruption is bit-identical across
+    /// separate runs); the mipmap-generation path (a real bug, found and
+    /// fixed, validation layer now clean — but not this); shader float
+    /// precision in the shallow case (a fract(u*30 + 1000.0) probe came
+    /// back smooth and bit-identical on both backends); and uniform
+    /// binding (stage 6 echoed all three uniforms as a flat colour,
+    /// bit-identical GPU vs CPU).
     /// </summary>
     internal static class SkNoiseClip
     {
@@ -112,17 +136,34 @@ namespace EditSharp.Composite
             uniform float4 u1; // tscale, time, seedOffset.x, seedOffset.y
             uniform float4 u2; // seedOffset.z, unused, unused, unused
 
-            float hash31(float3 p) {
-                p = fract(p * float3(0.1031, 0.1030, 0.0973));
-                p += dot(p, p.yzx + 33.33);
-                return fract((p.x + p.y) * p.z);
+            // EXACT-INTEGER HASH. Every intermediate below is an fp32
+            // value that is mathematically an integer smaller than 2^24,
+            // and fp32 represents such integers EXACTLY. There is no
+            // rounding anywhere in this chain, so no compiler is free to
+            // produce a different answer: identical results on NVIDIA, on
+            // AMD, and on the CPU rasterizer. This replaces a fract()-based
+            // float hash whose final step took fract() of a value around
+            // 5000 (ULP ~4.9e-4) — see this file's ROOT CAUSE remarks.
+            //
+            // Worst-case magnitude check (must stay under 16,777,216):
+            //   permute input  < 581
+            //   (581*34 + 1) * 581 = 11,477,655            OK
+            float mod289(float x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            float permute(float x) { return mod289(((x * 34.0) + 1.0) * x); }
+
+            // `p` must be an integer lattice coordinate. `salt` selects one
+            // of several independent streams for the same lattice point.
+            float hash31(float3 p, float salt) {
+                float h = permute(
+                    permute(permute(mod289(p.x)) + mod289(p.y)) + mod289(p.z) + salt);
+                return h * (1.0 / 289.0);
             }
 
             float3 gradient(float3 p) {
                 return float3(
-                    hash31(p + float3(17.0, 0.0, 0.0)),
-                    hash31(p + float3(0.0, 17.0, 0.0)),
-                    hash31(p + float3(0.0, 0.0, 17.0))
+                    hash31(p, 0.0),
+                    hash31(p, 1.0),
+                    hash31(p, 2.0)
                 ) * 2.0 - 1.0;
             }
 
@@ -196,9 +237,12 @@ namespace EditSharp.Composite
             double tscale = Math.Max(node.SeetheRate, 0f) * SeetheCellsPerSecond;
 
             var rng = new Random(node.Seed);
-            float seedOffsetX = (float)(rng.NextDouble() * 1000.0);
-            float seedOffsetY = (float)(rng.NextDouble() * 1000.0);
-            float seedOffsetZ = (float)(rng.NextDouble() * 1000.0);
+            // 289 is the exact-integer hash's wrap period (see the shader):
+            // offsets beyond it add no new lattice variety, and a smaller
+            // magnitude leaves more mantissa for the sub-cell fraction.
+            float seedOffsetX = (float)(rng.NextDouble() * 289.0);
+            float seedOffsetY = (float)(rng.NextDouble() * 289.0);
+            float seedOffsetZ = (float)(rng.NextDouble() * 289.0);
 
             float[] u0 = [canvasWidth, canvasHeight, (float)xscale, (float)yscale];
             float[] u1 = [(float)tscale, (float)clipSeconds, seedOffsetX, seedOffsetY];
