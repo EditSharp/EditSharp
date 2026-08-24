@@ -6,7 +6,9 @@ using SkiaSharp;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Effects;
 using EditSharp.Components.Nodes.Math;
- 
+using EditSharp.Components.Clips;
+
+
 namespace EditSharp.Composite
 {
     /// <summary>

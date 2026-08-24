@@ -8,8 +8,8 @@ namespace EditSharp.Components.Nodes.Effects
 {
     public sealed class DropShadowNode : Node
     {
-        public Animatable<Vector2> Offset { get; set; } = new(default);
-        public Animatable<float> Blur { get; set; } = new(0f);
+        public Animatable<Vector2> Offset { get; set; } = new(new(0.01f, 0.01f));
+        public Animatable<float> Blur { get; set; } = new(0.01f);
         public Animatable<SKColor> Color { get; set; } = new(SKColors.Black);
  
         private static readonly NodePort[] StaticPorts =

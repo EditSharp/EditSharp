@@ -6,7 +6,7 @@ namespace EditSharp.Components.Nodes.Effects
 {
     public sealed class RoundedCornersNode : Node
     {
-        public Animatable<float> Radius { get; set; } = new(0f);
+        public Animatable<float> Radius { get; set; } = new(0.1f);
  
         private static readonly NodePort[] StaticPorts =
         [

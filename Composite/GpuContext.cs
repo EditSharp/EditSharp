@@ -198,7 +198,7 @@ namespace EditSharp.Composite
                     // User-mode driver version. NVIDIA's user-facing number
                     // (e.g. 576.90) lives in the low half, so both the raw
                     // and decoded forms are recorded.
-                    if (adapter.CheckInterfaceSupport(typeof(IDXGIDevice).GUID, out long umd))
+                    if (adapter.CheckInterfaceSupport(typeof(IDXGIDevice).GUID, out long umd).Success)
                     {
                         long sub = (umd >> 16) & 0xFFFF;
                         long build = umd & 0xFFFF;
