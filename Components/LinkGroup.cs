@@ -140,6 +140,16 @@ namespace EditSharp.Components
         // two groups: everything before keeps this Id, everything at/after
         // gets a fresh one. Matches DaVinci Resolve's own behavior — see
         // the schema doc.
+        //
+        // BUG FOUND IN THE FIELD (fixed here): the pre-fix version always
+        // assigned a fresh Id to the at/after side (and left the before
+        // side on the original Id) with no regard for how many members
+        // ended up on either side — a group of exactly two members split at
+        // a point between them left BOTH sides as a "group" of one clip
+        // each, neither of which was ever dissolved. Every other place a
+        // group's membership can shrink (Timeline.NotifyClipDetached,
+        // Timeline.Link — see its own remarks) auto-dissolves a group once
+        // it's down to a single member; Split is now consistent with that.
         // ---------------------------------------------------------------
  
         public void Split(TimeSpan at)
@@ -154,10 +164,25 @@ namespace EditSharp.Components
             //position is enough; no need for Clip.Split to have handed back
             //its fragments
             Guid newGroupId = Guid.NewGuid();
+ 
+            List<Clip> before = [];
+            List<Clip> after = [];
+ 
             foreach (Clip clip in Members)
             {
-                if (clip.Start >= at) clip.LinkGroupId = newGroupId;
+                if (clip.Start >= at)
+                {
+                    clip.LinkGroupId = newGroupId;
+                    after.Add(clip);
+                }
+                else
+                {
+                    before.Add(clip);
+                }
             }
+ 
+            if (before.Count == 1) before[0].LinkGroupId = null;
+            if (after.Count == 1) after[0].LinkGroupId = null;
         }
  
         public void Delete()

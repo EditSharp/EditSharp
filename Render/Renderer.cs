@@ -112,7 +112,8 @@ namespace EditSharp.Render
             using var contentSource = new SkClipContentSource(
                 fps, hwAccel, nativeSizes, decodePlans, decodeSourcePaths: decodeSourcePaths);
  
-            using GpuContext gpuContext = GpuContext.Create(hwAccel);
+            using GpuContext gpuContext = GpuContext.Create(
+                hwAccel, blueprint.RenderSettings.GpuAdapterIndex);
             using var surfacePool = new SkSurfacePool(
                 gpuContext.GRContext, width, height, timeline.Channels.Count);
  
@@ -292,6 +293,12 @@ namespace EditSharp.Render
  
             if (blueprint.RenderSettings.Framerate <= 0)
                 throw new ArgumentException("Blueprint.Framerate must be positive.");
+ 
+            if (blueprint.RenderSettings.GpuAdapterIndex is < 0)
+                throw new ArgumentException(
+                    "Blueprint.RenderSettings.GpuAdapterIndex must be null (auto) or a non-negative " +
+                    "DXGI adapter index. Valid indices for this machine are listed in the log at the " +
+                    "start of every GPU session.");
  
             if (string.IsNullOrWhiteSpace(blueprint.OutputDirectory))
                 throw new ArgumentException("Blueprint.OutputDirectory must be a full output file path.");

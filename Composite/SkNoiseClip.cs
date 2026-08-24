@@ -1,9 +1,7 @@
 using System;
-using System.IO;
-using System.Threading;
 using SkiaSharp;
 using EditSharp.Components.Nodes.Sources.Video;
-
+ 
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -108,29 +106,7 @@ namespace EditSharp.Composite
     {
         private const double DetailCellsPerCanvas = 1000.0;
         private const double SeetheCellsPerSecond = 10.0;
-
-        // ---------------------------------------------------------------
-        // TEMPORARY DIAGNOSTIC (re-enabled for the DETERMINISM test) —
-        // remove once root-caused. Set EDITSHARP_NOISE_DEBUG_DUMP to a
-        // folder and the first 120 noise frames are written to PNG the
-        // instant they come back from the GPU draw, before anything else
-        // touches them.
-        //
-        // The question this round is NOT "is it corrupted" (already
-        // established: yes, from frame one) but "is the corruption
-        // BIT-IDENTICAL between two separate runs of the same blueprint."
-        // Identical => a deterministic logic bug (uniform/descriptor/
-        // binding — something computed wrong the same way every time).
-        // Different => uninitialized VRAM or a genuine race, which points
-        // at the RenderTargetOrDepthStencilResouceNotInitialized errors
-        // still in the D3D12 log instead. Those two causes need opposite
-        // fixes, so this distinction decides the whole next step.
-        // ---------------------------------------------------------------
-        private static readonly string? DebugDumpDir =
-            Environment.GetEnvironmentVariable("EDITSHARP_NOISE_DEBUG_DUMP");
-        private static int _debugDumpCount;
-        private const int DebugDumpMax = 120;
-
+ 
         private const string ShaderSource = """
             uniform float4 u0; // resolution.x, resolution.y, xscale, yscale
             uniform float4 u1; // tscale, time, seedOffset.x, seedOffset.y
@@ -218,9 +194,9 @@ namespace EditSharp.Composite
                 return half4(v, v, v, 1.0);
             }
             """;
-
+ 
         private static readonly SKRuntimeEffect Effect = CreateEffect();
-
+ 
         private static SKRuntimeEffect CreateEffect()
         {
             SKRuntimeEffect? effect = SKRuntimeEffect.CreateShader(ShaderSource, out string errors);
@@ -228,14 +204,14 @@ namespace EditSharp.Composite
                 throw new InvalidOperationException($"NoiseInputNode shader failed to compile: {errors}");
             return effect;
         }
-
+ 
         public static SKImage Render(
             NoiseInputNode node, double clipSeconds, int canvasWidth, int canvasHeight, SkSurfacePool pool)
         {
             double xscale = Math.Max(node.Detail, 0f) * DetailCellsPerCanvas;
             double yscale = xscale * canvasHeight / (double)canvasWidth;
             double tscale = Math.Max(node.SeetheRate, 0f) * SeetheCellsPerSecond;
-
+ 
             var rng = new Random(node.Seed);
             // 289 is the exact-integer hash's wrap period (see the shader):
             // offsets beyond it add no new lattice variety, and a smaller
@@ -243,62 +219,33 @@ namespace EditSharp.Composite
             float seedOffsetX = (float)(rng.NextDouble() * 289.0);
             float seedOffsetY = (float)(rng.NextDouble() * 289.0);
             float seedOffsetZ = (float)(rng.NextDouble() * 289.0);
-
+ 
             float[] u0 = [canvasWidth, canvasHeight, (float)xscale, (float)yscale];
             float[] u1 = [(float)tscale, (float)clipSeconds, seedOffsetX, seedOffsetY];
             float[] u2 = [seedOffsetZ, 0f, 0f, 0f];
-
-            // TEMPORARY DIAGNOSTIC — no-op unless EDITSHARP_SHADER_BISECT
-            // is set. Deliberately passed the SAME uniform arrays the real
-            // draw below uses. See SkNoiseShaderBisect's own remarks.
-            SkNoiseShaderBisect.RunOnce(canvasWidth, canvasHeight, pool, u0, u1, u2);
-
+ 
             var uniforms = new SKRuntimeEffectUniforms(Effect)
             {
                 ["u0"] = u0,
                 ["u1"] = u1,
                 ["u2"] = u2,
             };
-
+ 
             using SKShader shader = Effect.ToShader(uniforms);
             using var paint = new SKPaint { Shader = shader };
-
-            SKImage result;
+ 
             SKSurface surface = pool.Rent(canvasWidth, canvasHeight);
             try
             {
                 surface.Canvas.Clear(SKColors.Transparent);
                 surface.Canvas.DrawRect(new SKRect(0, 0, canvasWidth, canvasHeight), paint);
-                result = surface.Snapshot();
+                return surface.Snapshot();
             }
             finally
             {
                 pool.Return(surface, canvasWidth, canvasHeight);
             }
-
-            if (DebugDumpDir != null) DumpDebugFrame(result, clipSeconds);
-
-            return result;
-        }
-
-        /// <summary>See the TEMPORARY DIAGNOSTIC remarks above this class's fields.</summary>
-        private static void DumpDebugFrame(SKImage image, double clipSeconds)
-        {
-            int index = Interlocked.Increment(ref _debugDumpCount);
-            if (index > DebugDumpMax) return;
-
-            try
-            {
-                Directory.CreateDirectory(DebugDumpDir!);
-                string path = Path.Combine(DebugDumpDir!, $"noise_raw_{index:0000}_{clipSeconds:F3}s.png");
-
-                using SKData? png = image.Encode(SKEncodedImageFormat.Png, 100);
-                if (png != null) File.WriteAllBytes(path, png.ToArray());
-            }
-            catch (Exception ex)
-            {
-                EditSharpConfig.Logger.LogWarning($"SkNoiseClip debug dump failed: {ex.Message}");
-            }
         }
     }
 }
+ 

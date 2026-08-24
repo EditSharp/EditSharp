@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Concurrent;
 using EditSharp.Components;
-using EditSharp.Components.Clips;
 using SkiaSharp;
  
 namespace EditSharp.Composite

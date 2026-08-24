@@ -33,7 +33,10 @@ namespace EditSharp.Playback
     /// SYNCHRONIZED STARTUP / PAUSE: see PlaybackStartGate and
     /// PlaybackPauseGate's own remarks.
     ///
-    /// DELIVERY IS "PLAY THIS NOW" — NO LOOKAHEAD, DELIBERATELY.
+    /// DELIVERY IS "PLAY THIS NOW" — NO LOOKAHEAD, DELIBERATELY. This means
+    /// the target time for a chunk must be the chunk's OWN START position
+    /// (how much was already delivered BEFORE it), not its end — see
+    /// PumpAsync's own remarks on a real bug this used to have.
     ///
     /// LEADER / FOLLOWER (PlaybackReferenceClock): in SyncToAudio mode,
     /// this engine is the LEADER — own Stopwatch, delivers each chunk
@@ -78,6 +81,23 @@ namespace EditSharp.Playback
                 token);
         }
  
+        /// <summary>
+        /// FOUND IN THE FIELD, FIXED: `bytesDelivered` used to be
+        /// incremented BEFORE computing `targetElapsed`/`position` for the
+        /// chunk about to be delivered, so both were computed against the
+        /// byte count AS OF THE END of that chunk rather than its start.
+        /// Since this runs for every chunk starting with the very first
+        /// one, it meant chunk 0 (which should deliver immediately at
+        /// t=0, per this class's own "no lookahead" contract) instead
+        /// waited until the pacing clock reached one whole ChunkBytes'
+        /// worth of elapsed time (~100ms) — and every later chunk was
+        /// delivered exactly one chunk-length later than it should have
+        /// been, a constant ~100ms of audible startup silence plus a
+        /// persistent ~100ms A/V sync offset for the rest of the session.
+        /// Fix: compute the target position from `bytesDelivered` as it
+        /// stood BEFORE this chunk (the chunk's own start), THEN advance
+        /// it by `toDeliver` for the next iteration.
+        /// </summary>
         private async Task PumpAsync(
             TimeSpan startPosition,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
@@ -118,9 +138,12 @@ namespace EditSharp.Playback
                 Array.Copy(_pcm, byteOffset, chunk, 0, toDeliver);
                 byteOffset += toDeliver;
  
-                bytesDelivered += toDeliver;
+                // Target/position computed from bytes delivered BEFORE this
+                // chunk (its start), not after (its end) — see the method's
+                // own remarks.
                 TimeSpan targetElapsed = TimeSpan.FromSeconds(bytesDelivered / (double)BytesPerSecond);
                 TimeSpan position = startPosition + targetElapsed;
+                bytesDelivered += toDeliver;
  
                 while (true)
                 {

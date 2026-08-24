@@ -183,8 +183,17 @@ namespace EditSharp.Components
             //it was enumerated in
             _keyframes.Sort((a, b) => a.Start.CompareTo(b.Start));
  
+            //FOUND IN THE FIELD: this used to only ever recompute the LEFT
+            //neighbor's Auto handle (`index - 1`, using the PRE-move index)
+            //— the right neighbor's Auto handle depends on the gap to this
+            //keyframe too and was left stale after a move, unlike
+            //RemoveKeyframe, which correctly refreshes both sides. Recompute
+            //using the keyframe's freshly-resorted index so both actual
+            //neighbors (left AND right) get refreshed.
+            int newIndex = _keyframes.IndexOf(keyframe);
             RecomputeAutoHandles(keyframe);
-            if (index > 0) RecomputeAutoHandles(_keyframes[Math.Max(0, _keyframes.IndexOf(keyframe) - 1)]);
+            if (newIndex > 0) RecomputeAutoHandles(_keyframes[newIndex - 1]);
+            if (newIndex < _keyframes.Count - 1) RecomputeAutoHandles(_keyframes[newIndex + 1]);
         }
  
         /// <summary>
@@ -305,7 +314,26 @@ namespace EditSharp.Components
             {
                 Keyframe<T> from = _keyframes[i];
                 Keyframe<T> to = _keyframes[i + 1];
-                if (time < from.Start || time > to.Start) continue;
+ 
+                //FOUND IN THE FIELD, FIXED: this used to be `time > to.Start`
+                //(strict), which meant that at the EXACT instant of an
+                //interior keyframe (time == to.Start, and `to` isn't the
+                //very last keyframe — that case is already handled by the
+                //early return above) THIS segment matched and won, before
+                //the next iteration (whose own `from` is this same `to`)
+                //ever got a chance to. For a Linear/Bezier segment that's
+                //harmless (u solves to 1, so InterpolateSegment already
+                //returns `to.Value` either way) — but InterpolateSegment
+                //short-circuits a Hold segment straight to `from.Value`
+                //regardless of u, so exactly AT a Hold keyframe's own time
+                //this returned the OLD held value instead of that
+                //keyframe's own new one — one instant too early. Using
+                //`>=` here defers time == to.Start to the NEXT segment
+                //instead, where `to` is that segment's own `from` and u
+                //correctly solves to 0 — giving `to.Value` in every case,
+                //matching how the very last keyframe already behaves via
+                //the early return above.
+                if (time < from.Start || time >= to.Start) continue;
  
                 return InterpolateSegment(from, to, time);
             }

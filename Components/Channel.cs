@@ -111,25 +111,34 @@ namespace EditSharp.Components
         // Extend
         // ---------------------------------------------------------------
  
-        internal void ExtendHead(Clip clip, TimeSpan amount, bool ripple)
+        /// <summary>
+        /// `exclude`, when given, is skipped entirely by the Overwrite scan
+        /// this performs — used ONLY by AddTransition below, where `clip`
+        /// and `exclude` are the two clips a transition is legitimately
+        /// making overlap. Every other caller (the public Clip.ExtendStart
+        /// path, used for an ordinary extend with no transition involved)
+        /// passes null here and gets the normal "overwrite whatever's in
+        /// the way" behavior against every neighbor, adjacent or not.
+        /// </summary>
+        internal void ExtendHead(Clip clip, TimeSpan amount, bool ripple, Clip? exclude = null)
         {
             _clips.Remove(clip.Start);
  
             TimeSpan newStart = clip.Start - amount;
             if (ripple) RippleFrom(newStart, amount);
-            else Overwrite(newStart, clip.Start);
+            else Overwrite(newStart, clip.Start, exclude);
  
             clip.ApplyHeadExtend(amount);
             PlaceInternal(clip);
             ReconcileTransitionsFor(clip);
         }
  
-        internal void ExtendTail(Clip clip, TimeSpan amount, bool ripple)
+        internal void ExtendTail(Clip clip, TimeSpan amount, bool ripple, Clip? exclude = null)
         {
             _clips.Remove(clip.Start);
  
             if (ripple) RippleFrom(clip.End, amount);
-            else Overwrite(clip.End, clip.End + amount);
+            else Overwrite(clip.End, clip.End + amount, exclude);
  
             clip.ApplyTailExtend(amount);
             PlaceInternal(clip);
@@ -171,6 +180,29 @@ namespace EditSharp.Components
         // Transitions
         // ---------------------------------------------------------------
  
+        /// <summary>
+        /// FOUND IN THE FIELD, FIXED: this used to call the ordinary
+        /// `to.ExtendStart(achievableHalf)` / `from.ExtendEnd(achievableHalf)`
+        /// — both of which resolve conflicts via the normal Overwrite path,
+        /// with NO exclusion. Since `to.Start == from.End` by construction
+        /// (that's what "adjacent" means here), each extend's own Overwrite
+        /// call found the OTHER transition partner sitting exactly in the
+        /// region it was trying to claim, and trimmed it right back —
+        /// extending `to`'s head trimmed `from`'s tail back to where it
+        /// started, then extending `from`'s tail pushed `to`'s head back
+        /// out to where IT started. Net effect: both clips ended up
+        /// completely unchanged, `transition.Duration` was set to a value
+        /// that no longer matched `to.Start == from.End` at all, and the
+        /// very next trim/extend on either clip would silently delete this
+        /// "transition" via ReconcileTransitionsFor's own consistency
+        /// check — no crossfade region was ever actually created.
+        ///
+        /// Fix: call ExtendHead/ExtendTail directly (bypassing Clip's own
+        /// ExtendStart/ExtendEnd wrappers) with each other passed as
+        /// `exclude`, since a transition's whole point is to make exactly
+        /// these two clips overlap — every OTHER neighbor on the channel
+        /// still gets the normal overwrite treatment.
+        /// </summary>
         public Transition AddTransition(Transition transition)
         {
             Clip from = transition.From;
@@ -187,8 +219,11 @@ namespace EditSharp.Components
             TimeSpan achievableHalf = toCeiling == TimeSpan.MaxValue || requestedHalf <= toCeiling
                 ? requestedHalf : toCeiling;
  
-            to.ExtendStart(achievableHalf);
-            from.ExtendEnd(achievableHalf);
+            if (achievableHalf > TimeSpan.Zero)
+            {
+                ExtendHead(to, achievableHalf, ripple: false, exclude: from);
+                ExtendTail(from, achievableHalf, ripple: false, exclude: to);
+            }
  
             transition.Duration = achievableHalf + achievableHalf;
             _transitions.Add(transition);
@@ -210,10 +245,16 @@ namespace EditSharp.Components
         // Overwrite / Ripple mechanics
         // ---------------------------------------------------------------
  
-        private void Overwrite(TimeSpan newStart, TimeSpan newEnd)
+        /// <summary>
+        /// `exclude`, when given, is never trimmed/split/deleted by this
+        /// scan even if its span falls inside [newStart, newEnd) — see
+        /// AddTransition, the only caller that ever passes one.
+        /// </summary>
+        private void Overwrite(TimeSpan newStart, TimeSpan newEnd, Clip? exclude = null)
         {
             foreach (Clip target in _clips.Values.ToList())
             {
+                if (ReferenceEquals(target, exclude)) continue;
                 if (target.End <= newStart || target.Start >= newEnd) continue; //no overlap
  
                 bool coveredHead = target.Start >= newStart;

@@ -11,9 +11,9 @@ namespace EditSharp.Composite
 {
     /// <summary>
     /// Encoder selection for the frame-by-frame render's final mux/encode step
-    /// (see FrameRenderer.FinalizeOutputAsync) — resolving a VideoCodec +
-    /// HardwareAccelerator into an actual ffmpeg encoder name, including NVENC
-    /// probing with a software fallback.
+    /// (see Renderer.FinalizeOutputAsync) — resolving a VideoCodec +
+    /// HardwareAccelerator into an actual ffmpeg encoder name, including
+    /// hardware-encoder probing with a software fallback.
     /// </summary>
     internal static class FfmpegRunner
     {
@@ -26,23 +26,19 @@ namespace EditSharp.Composite
         /// don't even agree WITH EACH OTHER: NVENC's -preset takes p1-p7 tokens,
         /// QSV's -preset takes named speed tiers, and passing NVENC's "p4" to
         /// hevc_qsv fails at the real encode with exit code -22 ("Undefined
-        /// constant... Unable to parse 'preset' option value 'p4'") — this is not
-        /// hypothetical, it's a real failure this method used to produce before
-        /// GetHardwareQualityArgs existed, because the probe below only confirms
-        /// the ENCODER exists and can encode a bare frame with no quality args at
-        /// all — it never exercises the quality args themselves, so a wrong preset
-        /// name for the winning candidate sails through probing and only breaks at
-        /// the real encode. See GetHardwareQualityArgs for the per-vendor split.
+        /// constant... Unable to parse 'preset' option value 'p4'"). See
+        /// GetHardwareQualityArgs for the per-vendor split.
         ///
         /// HardwareAccelerator.GPU being requested doesn't guarantee any candidate
         /// is actually usable — needs a matching GPU with current drivers, and older
         /// GPUs don't support every codec (e.g. av1_nvenc needs an RTX 40-series or
         /// newer). Each candidate in priority order gets a trivial 1-frame trial
-        /// encode; the first that works wins. If EVERY hardware candidate fails,
-        /// this falls back to the software encoder and logs via LogWarning — GPU
-        /// was requested and the render is about to run noticeably slower than
-        /// expected, which should never be a silent surprise to whoever's watching
-        /// the render finish.
+        /// encode WITH ITS REAL QUALITY ARGS; the first that works wins. If EVERY
+        /// hardware candidate fails, this falls back to the software encoder and
+        /// reports each candidate's actual ffmpeg error — GPU was requested and the
+        /// render is about to run noticeably slower than expected, which should
+        /// never be a silent surprise, and "unavailable" with no reason attached is
+        /// nearly as unhelpful as silence.
         /// </summary>
         public static async Task<(string EncoderName, List<string> QualityArgs)> GetVideoEncoderSettingsAsync(
             VideoCodec codec, HardwareAccelerator hwAccel)
@@ -54,38 +50,53 @@ namespace EditSharp.Composite
             {
                 if (Constants.HardwareCodecNames.TryGetValue(codec, out string[]? candidates))
                 {
+                    var failures = new List<string>();
+ 
                     foreach (string candidateName in candidates)
                     {
-                        if (await IsEncoderAvailableAsync(candidateName))
-                        {
-                            EditSharpConfig.Logger.LogVerbose($"Encode: using hardware encoder '{candidateName}'.");
+                        List<string> qualityArgs = GetHardwareQualityArgs(candidateName);
+                        EncoderProbeResult probe = await ProbeEncoderCachedAsync(candidateName, qualityArgs);
  
-                            return (candidateName, GetHardwareQualityArgs(candidateName));
+                        if (probe.Succeeded)
+                        {
+                            EditSharpConfig.Logger.Log($"Encode: using hardware encoder '{candidateName}'.");
+                            return (candidateName, qualityArgs);
                         }
  
+                        failures.Add($"  {candidateName}: {probe.Describe()}");
                         EditSharpConfig.Logger.LogVerbose(
-                            $"Encode: hardware candidate '{candidateName}' unavailable, trying next.");
+                            $"Encode: hardware candidate '{candidateName}' unavailable ({probe.Describe()}), trying next.");
                     }
-                }
  
-                // GPU requested, but no hardware candidate for this codec worked
-                // (or none are even defined for it) — fall through to software,
-                // loudly, so this is never a silent slowdown.
-                EditSharpConfig.Logger.LogWarning(
-                    $"HardwareAccelerator.GPU requested, but no hardware encoder for {codec} is " +
-                    "usable on this machine. Falling back to software encoding.");
+                    // GPU requested, but no hardware candidate for this codec
+                    // worked. Report every candidate's REAL failure, not just
+                    // that it "didn't work" — a wrong quality flag, a missing
+                    // GPU, an ffmpeg built without that encoder, and a driver
+                    // too old for this GPU generation all look identical from
+                    // the outside and need completely different fixes.
+                    EditSharpConfig.Logger.LogWarning(
+                        $"HardwareAccelerator.GPU requested, but no hardware encoder for {codec} is " +
+                        "usable on this machine. Falling back to software encoding. Candidates tried:" +
+                        Environment.NewLine + string.Join(Environment.NewLine, failures));
+                }
+                else
+                {
+                    EditSharpConfig.Logger.LogWarning(
+                        $"HardwareAccelerator.GPU requested, but {codec} has no hardware encoder " +
+                        "defined at all (see Constants.HardwareCodecNames). Encoding on the CPU.");
+                }
             }
  
             string softwareEncoderName = Constants.VideoCodecNames[codec];
-            var qualityArgs = new List<string> { "-crf", "21" };
+            var softwareQualityArgs = new List<string> { "-crf", "21" };
             if (codec == VideoCodec.AV1)
             {
                 // libaom-av1 needs -b:v 0 for true CRF mode.
-                qualityArgs.Add("-b:v");
-                qualityArgs.Add("0");
+                softwareQualityArgs.Add("-b:v");
+                softwareQualityArgs.Add("0");
             }
  
-            return (softwareEncoderName, qualityArgs);
+            return (softwareEncoderName, softwareQualityArgs);
         }
  
         /// <summary>
@@ -95,64 +106,37 @@ namespace EditSharp.Composite
         /// the real failure this replaces (NVENC's -preset p4 rejected outright by
         /// hevc_qsv).
         ///
-        /// NVENC's args include adaptive quantization (-spatial-aq/-temporal-aq),
-        /// ADDED AFTER A REAL REPORT: high-entropy, incompressible content —
-        /// procedural film-grain/noise being the concrete case, but this applies
-        /// to any genuinely noisy source — showed visible blocking/macroblock
-        /// artifacts under NVENC specifically, while the same content encoded
-        /// cleanly through QSV and looked fine when composited (the noise itself
-        /// is generated correctly; only the final lossy encode of it was
-        /// affected). This is a well-documented NVENC characteristic, not a
-        /// EditSharp-side rendering bug: NVENC's rate control under-allocates
-        /// bits to fine, spatially/temporally incoherent detail at a flat CQ
-        /// target unless adaptive quantization is explicitly turned on, which is
-        /// exactly what -spatial-aq/-temporal-aq (plus -aq-strength) correct for
-        /// by shifting bits toward high-detail regions instead of spreading them
-        /// evenly. -cq is also lowered slightly (21 -> 19) specifically for the
-        /// same reason: fine random detail needs a bit more headroom than typical
-        /// footage to stay clean at NVENC's default allocation. Ordinary
-        /// (non-noisy) content is unaffected by this change beyond a small
-        /// bitrate/quality improvement — this isn't gated to noise-only content
-        /// because NVENC has no reliable way to detect "this clip contains a
-        /// generator/noise node" from the encoder's own side, and there's no
-        /// downside to leaving AQ on for normal footage.
-        ///
-        /// QSV and AMF's args below are NOT verified against a real machine with
-        /// that hardware — same honesty flag as Constants.HardwareCodecNames and
-        /// GpuContext's D3D12 path, and for the same reason: no such hardware or
-        /// ffmpeg build to test against here. Both use each vendor's own "single
-        /// quality number" mode (QSV: ICQ via -global_quality, AMF: constant-QP
-        /// via -rc cqp) chosen to be the closest analogue to NVENC's -cq/libx264's
-        /// -crf, but the exact flag names/values are from ffmpeg encoder
-        /// documentation general knowledge, not a confirmed real encode the way
-        /// NVENC's now effectively are. If either fails the same way p4 did, the
-        /// fix is the same shape: find that vendor's real flag names and replace
-        /// the guess below — the probe won't catch it, only a real encode attempt
-        /// will, exactly as happened here.
+        /// QSV and AMF's args below are NOT verified against real hardware — same
+        /// honesty flag as Constants.HardwareCodecNames and GpuContext's D3D12
+        /// path. Both use each vendor's own "single quality number" mode (QSV:
+        /// ICQ via -global_quality, AMF: constant-QP via -rc cqp) chosen as the
+        /// closest analogue to NVENC's -cq and libx264's -crf, but the exact flag
+        /// names/values come from ffmpeg's encoder documentation rather than a
+        /// confirmed encode. Since the probe now runs WITH these args, a wrong
+        /// flag makes that candidate fail probing and fall through to the next
+        /// one — with the real ffmpeg error logged — instead of sailing through
+        /// and breaking the actual render.
         /// </summary>
         private static List<string> GetHardwareQualityArgs(string encoderName)
         {
-            if (encoderName.EndsWith("_nvenc", System.StringComparison.Ordinal))
+            if (encoderName.EndsWith("_nvenc", StringComparison.Ordinal))
             {
                 return new List<string>
                 {
                     "-preset", "p4",   // balanced speed/quality, modern p1(fastest)-p7(slowest) scale
                     "-rc:v", "vbr",
-                    "-cq:v", "19",     // slightly below the general-purpose 21 — see class remarks on AQ
+                    "-cq:v", "21",
                     "-b:v", "0",
-                    "-spatial-aq", "1",
-                    "-temporal-aq", "1",
-                    "-aq-strength", "8", // 1(mild)-15(strong); 8 is NVENC's own documented middle ground
                 };
             }
  
-            if (encoderName.EndsWith("_qsv", System.StringComparison.Ordinal))
+            if (encoderName.EndsWith("_qsv", StringComparison.Ordinal))
             {
                 // ICQ (Intelligent Constant Quality) mode — UNVERIFIED, see class remarks.
                 return new List<string> { "-preset", "medium", "-global_quality", "21" };
             }
  
-            if (encoderName.EndsWith("_amf", System.StringComparison.Ordinal))
+            if (encoderName.EndsWith("_amf", StringComparison.Ordinal))
             {
                 // Constant-QP mode — UNVERIFIED, see class remarks.
                 return new List<string>
@@ -178,9 +162,8 @@ namespace EditSharp.Composite
         /// use, see DecodeHwAccelPlan) for a source, or DecodeHwAccelPlan.Software
         /// for software decode/scale. Probed against the ACTUAL source, not just
         /// the codec name — hwaccel support depends on the source's own codec/
-        /// profile in a way a generic probe can't predict, same reasoning
-        /// GetVideoEncoderSettingsAsync's trial-encode already relies on for
-        /// encode. HardwareAccelerator.None returns DecodeHwAccelPlan.Software
+        /// profile in a way a generic probe can't predict.
+        /// HardwareAccelerator.None returns DecodeHwAccelPlan.Software
         /// unconditionally, no probing at all — matches encode's same "None
         /// means an absolute guarantee, not a preference" contract.
         ///
@@ -189,26 +172,13 @@ namespace EditSharp.Composite
         /// against a small placeholder size (320x240) rather than the clip's
         /// real decode target — the probe's job is confirming the MECHANISM
         /// works (is scale_cuda actually compiled into this ffmpeg build, etc),
-        /// not validating a specific size, and the real per-clip decode target
-        /// isn't known until SkClipContentSource.GetOrOpenDecoder computes it
-        /// from the clip's own max-scale — deliberately decoupled so this probe
-        /// can run once per source at content-prep time, before any per-clip
-        /// sizing exists. This is exactly the lesson the encode-side quality-arg
-        /// bug taught: a probe that doesn't exercise the real pipeline shape can
-        /// pass while the real pipeline still breaks (there, NVENC's -preset p4
-        /// silently broke hevc_qsv because the probe never tried quality args at
-        /// all; here, testing bare `-hwaccel` without the scale filter would
-        /// have the same blind spot for scale_cuda specifically).
+        /// not validating a specific size.
         ///
         /// NOTE this is a MECHANISM probe only (does the filter chain run at
         /// all, exit code 0), not a pixel-correctness probe — see Constants.cs's
         /// own remarks on why the "vulkan" candidate was removed entirely rather
         /// than trusted to this probe: it passed this exact check while still
         /// producing corrupted frames on at least one real machine.
-        ///
-        /// Same loud-fallback-logging contract as encode: if every hardware
-        /// candidate fails for this source, this logs via LogWarning once,
-        /// naming the source, before returning DecodeHwAccelPlan.Software.
         /// </summary>
         public static async Task<DecodeHwAccelPlan> GetDecodePlanAsync(
             string sourcePath, HardwareAccelerator hwAccel)
@@ -255,37 +225,16 @@ namespace EditSharp.Composite
         /// <summary>
         /// Whether ffmpeg can actually run `plan`'s REAL intended filter chain
         /// against `sourcePath` on this machine right now — a real 1-frame trial
-        /// decode at a small placeholder size (320x240; see GetDecodePlanAsync's
-        /// remarks on why a placeholder is correct here), same shape and same
-        /// reasoning as ProbeEncoderAsync (a flag/filter being recognized by
-        /// name doesn't mean the hardware/driver/codec combination actually
-        /// works end to end).
-        ///
-        /// On failure, logs ffmpeg's actual stderr via LogVerbose before
-        /// returning false — "unavailable" collapses several genuinely
-        /// different failure causes into one boolean (ffmpeg built without
-        /// this hwaccel/filter at all; a device-selection conflict, e.g. an
-        /// iGPU and a dGPU both enumerating as candidates for the same API;
-        /// this specific source's codec/profile not being decodable via this
-        /// path) that all look identical from the outside without this. Added
-        /// specifically because CUDA unexpectedly lost to d3d11va on a machine
-        /// with an active dGPU — don't want to guess at why the same way the
-        /// NVENC/QSV quality-arg bug was guessed at before it broke a real
-        /// encode; this makes the real ffmpeg error visible instead.
+        /// decode at a small placeholder size. On failure, logs ffmpeg's actual
+        /// stderr: "unavailable" collapses several genuinely different causes
+        /// (ffmpeg built without this hwaccel; a device-selection conflict; this
+        /// source's codec/profile not being decodable via this path) into one
+        /// boolean that all look identical from the outside without it.
         /// </summary>
         private static async Task<bool> ProbeDecodePlanAsync(DecodeHwAccelPlan plan, string sourcePath)
         {
             try
             {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = EditSharpConfig.FfmpegPath,
-                    RedirectStandardError = true,
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
- 
                 var args = new List<string> { "-v", "error" };
                 args.AddRange(plan.HwAccelArgs);
                 args.AddRange(new[]
@@ -295,23 +244,16 @@ namespace EditSharp.Composite
                     "-frames:v", "1", "-f", "null", "-",
                 });
  
-                foreach (string arg in args) psi.ArgumentList.Add(arg);
+                (int exitCode, string stderr) = await RunFfmpegAsync(args);
  
-                using var process = new Process { StartInfo = psi };
-                process.Start();
- 
-                Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
-                Task<string> stderrTask = process.StandardError.ReadToEndAsync();
-                await Task.WhenAll(stdoutTask, stderrTask, process.WaitForExitAsync());
- 
-                if (process.ExitCode != 0)
+                if (exitCode != 0)
                 {
                     EditSharpConfig.Logger.LogVerbose(
                         $"Decode: probe for '{plan.Candidate}' against '{sourcePath}' failed " +
-                        $"(exit {process.ExitCode}): {stderrTask.Result.Trim()}");
+                        $"(exit {exitCode}): {stderr.Trim()}");
                 }
  
-                return process.ExitCode == 0;
+                return exitCode == 0;
             }
             catch (Exception ex)
             {
@@ -321,64 +263,106 @@ namespace EditSharp.Composite
             }
         }
  
+        /// <summary>The outcome of one encoder probe, including WHY it failed.</summary>
+        private readonly record struct EncoderProbeResult(bool Succeeded, int ExitCode, string Error)
+        {
+            public string Describe() =>
+                Succeeded
+                    ? "ok"
+                    : string.IsNullOrWhiteSpace(Error)
+                        ? $"exit {ExitCode}, no error output"
+                        : $"exit {ExitCode}: {Error.Trim()}";
+        }
+ 
         // Probing spins up a real ffmpeg process, so results are cached per encoder
         // name for the process's lifetime rather than re-probed on every render.
-        private static readonly ConcurrentDictionary<string, Task<bool>> EncoderAvailabilityCache = new();
+        private static readonly ConcurrentDictionary<string, Task<EncoderProbeResult>> EncoderProbeCache = new();
  
-        private static Task<bool> IsEncoderAvailableAsync(string encoderName) =>
-            EncoderAvailabilityCache.GetOrAdd(encoderName, ProbeEncoderAsync);
+        private static Task<EncoderProbeResult> ProbeEncoderCachedAsync(
+            string encoderName, List<string> qualityArgs) =>
+            EncoderProbeCache.GetOrAdd(encoderName, _ => ProbeEncoderAsync(encoderName, qualityArgs));
  
         /// <summary>
         /// Whether ffmpeg can actually use the given encoder on this machine right
-        /// now — a 1-frame trial encode against a trivial lavfi source, discarded to
-        /// null. This is the only reliable way to know: the encoder being compiled
-        /// into ffmpeg (which "ffmpeg -encoders" would show) doesn't mean the
-        /// hardware/drivers it needs are actually present.
+        /// now — a 1-frame trial encode against a trivial lavfi source, discarded
+        /// to null. This is the only reliable way to know: the encoder being
+        /// compiled into ffmpeg (which "ffmpeg -encoders" would show) doesn't mean
+        /// the hardware and drivers it needs are actually present and current.
+        ///
+        /// THE PROBE MIRRORS THE REAL ENCODE, deliberately:
+        ///   * it passes the SAME quality args the real encode will use. A probe
+        ///     that skips them can pass while the real encode dies on a bad flag —
+        ///     exactly how NVENC's "-preset p4" reached hevc_qsv and failed there
+        ///     with exit -22. Anything wrong with a vendor's flags now costs that
+        ///     candidate the probe (and gets logged) instead of the render.
+        ///   * it pins -pix_fmt yuv420p, like the real encode does. Hardware
+        ///     encoders accept a narrow set of pixel formats, and leaving the
+        ///     lavfi source to negotiate one freely makes the probe test a
+        ///     different pipeline shape than the render actually uses.
+        ///   * it encodes at 1280x720. Hardware encoders reject frame sizes below
+        ///     a minimum that varies by GPU and codec generation — 64x64 was small
+        ///     enough to fail on genuinely working NVENC hardware, making this
+        ///     probe report "unavailable" incorrectly.
+        ///
+        /// ffmpeg's stderr is captured and returned rather than discarded. A
+        /// hardware encoder can fail for reasons that need completely different
+        /// fixes — no such GPU, an ffmpeg build without that encoder, a driver
+        /// too old for this GPU generation, all NVENC sessions already in use, a
+        /// rejected flag — and every one of them collapses to "unavailable"
+        /// without the message.
         /// </summary>
-        private static async Task<bool> ProbeEncoderAsync(string encoderName)
+        private static async Task<EncoderProbeResult> ProbeEncoderAsync(
+            string encoderName, List<string> qualityArgs)
         {
             try
             {
-                var psi = new ProcessStartInfo
+                var args = new List<string>
                 {
-                    FileName = EditSharpConfig.FfmpegPath,
-                    RedirectStandardError = true,
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
+                    "-v", "error",
+                    "-f", "lavfi", "-i", "color=black:size=1280x720:rate=30",
+                    "-frames:v", "1",
+                    "-c:v", encoderName,
                 };
-                foreach (var arg in new[]
-                {
-                    // NVENC (and hardware encoders generally) reject frame sizes
-                    // below a minimum that varies by GPU/codec generation — 64x64
-                    // was small enough to fail even on a genuinely working NVENC
-                    // setup, making this probe report "unavailable" incorrectly.
-                    // 1280x720 stays safely above any known NVENC minimum while
-                    // still being a trivial, near-instant 1-frame encode.
-                    "-v", "error", "-f", "lavfi", "-i", "color=black:size=1280x720:rate=30",
-                    "-frames:v", "1", "-c:v", encoderName, "-f", "null", "-",
-                })
-                {
-                    psi.ArgumentList.Add(arg);
-                }
+                args.AddRange(qualityArgs);
+                args.AddRange(new[] { "-pix_fmt", "yuv420p", "-f", "null", "-" });
  
-                using var process = new Process { StartInfo = psi };
-                process.Start();
- 
-                // Drain both redirected streams concurrently with waiting for exit
-                // — otherwise a full output buffer can deadlock the child process.
-                Task stdoutTask = process.StandardOutput.ReadToEndAsync();
-                Task stderrTask = process.StandardError.ReadToEndAsync();
-                await Task.WhenAll(stdoutTask, stderrTask, process.WaitForExitAsync());
- 
-                return process.ExitCode == 0;
+                (int exitCode, string stderr) = await RunFfmpegAsync(args);
+                return new EncoderProbeResult(exitCode == 0, exitCode, stderr);
             }
-            catch
+            catch (Exception ex)
             {
                 // ffmpeg itself failing to start, or any other unexpected error
-                // probing — treat as "not available" rather than propagating.
-                return false;
+                // probing — treat as "not available", but keep the reason.
+                return new EncoderProbeResult(false, -1, $"probe threw: {ex.Message}");
             }
+        }
+ 
+        /// <summary>
+        /// Runs ffmpeg with `args` to completion, returning its exit code and
+        /// captured stderr. Both redirected streams are drained concurrently with
+        /// waiting for exit — otherwise a full output buffer can deadlock the
+        /// child process.
+        /// </summary>
+        private static async Task<(int ExitCode, string Stderr)> RunFfmpegAsync(List<string> args)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = EditSharpConfig.FfmpegPath,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (string arg in args) psi.ArgumentList.Add(arg);
+ 
+            using var process = new Process { StartInfo = psi };
+            process.Start();
+ 
+            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderrTask = process.StandardError.ReadToEndAsync();
+            await Task.WhenAll(stdoutTask, stderrTask, process.WaitForExitAsync());
+ 
+            return (process.ExitCode, stderrTask.Result);
         }
     }
 }

@@ -6,9 +6,7 @@ using SkiaSharp;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Effects;
 using EditSharp.Components.Nodes.Math;
-using EditSharp.Components.Clips;
-
-
+ 
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -169,9 +167,17 @@ namespace EditSharp.Composite
                         float sigma = (float)Math.Clamp(
                             blur.Radius.Evaluate(clipRelativeTime) * context.CanvasWidth, 0.1, 1024.0);
  
-                        SKImage result2 = ApplyBlur(upstream, sigma, pool);
-                        if (mask != null) result2 = ApplyMask(result2, mask, pool, owned);
-                        owned.Add(result2);
+                        // NOTE: the pre-mask filtered image is tracked in
+                        // `owned` immediately, separately from the (possibly
+                        // different) post-mask image — previously the bare
+                        // filtered image was silently dropped when a Mask
+                        // was connected (ApplyMask's return value overwrote
+                        // the only reference to it before it was ever added
+                        // to `owned`), leaking one SKImage per frame for
+                        // every Blur node with a connected Mask input.
+                        SKImage blurred = ApplyBlur(upstream, sigma, pool);
+                        owned.Add(blurred);
+                        SKImage result2 = mask != null ? ApplyMask(blurred, mask, pool, owned) : blurred;
                         images[(node.Id, "Image")] = result2;
                         break;
                     }
@@ -183,9 +189,14 @@ namespace EditSharp.Composite
                         if (!shadow.Enabled) { images[(node.Id, "Image")] = upstream; break; }
  
                         SKImage? mask = ResolveMask(graph, node, "Mask", masks, upstream, pool, owned);
-                        SKImage result2 = ApplyDropShadow(shadow, upstream, clipRelativeTime, context, pool);
-                        if (mask != null) result2 = ApplyMask(result2, mask, pool, owned);
-                        owned.Add(result2);
+ 
+                        // Same leak/fix as BlurNode above: track the
+                        // pre-mask shadowed image in `owned` right away
+                        // instead of only tracking whichever image happens
+                        // to survive the (possible) mask reassignment.
+                        SKImage shadowed = ApplyDropShadow(shadow, upstream, clipRelativeTime, context, pool);
+                        owned.Add(shadowed);
+                        SKImage result2 = mask != null ? ApplyMask(shadowed, mask, pool, owned) : shadowed;
                         images[(node.Id, "Image")] = result2;
                         break;
                     }

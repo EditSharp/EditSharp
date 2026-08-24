@@ -59,12 +59,40 @@ namespace EditSharp.Components
  
         public LinkGroup? GetLinkGroup(Guid? id) => id.HasValue ? new LinkGroup(id.Value, this) : null;
  
+        /// <summary>
+        /// Adds every clip in `clips` to one link group (an existing one,
+        /// if any of them already belongs to one; otherwise a fresh Id).
+        ///
+        /// BUG FOUND IN THE FIELD (fixed here): a clip being linked here may
+        /// already belong to a DIFFERENT group than the one this call
+        /// settles on — e.g. linking [B, C] where B is already grouped with
+        /// A (group G1) and C is already grouped with D (group G2) resolves
+        /// to G1, silently "poaching" C out of G2 and leaving D behind as an
+        /// orphaned singleton group (LinkGroupId set, but the sole member).
+        /// Every other group-membership change in this file (LinkGroup.Split,
+        /// Timeline.NotifyClipDetached) auto-dissolves a group once it's
+        /// down to one member; this method used to be the one place that
+        /// didn't. Fixed by recording each clip's PRE-reassignment group,
+        /// then dissolving any of those old groups left with exactly one
+        /// member once the reassignment is done.
+        /// </summary>
         public LinkGroup Link(IEnumerable<Clip> clips)
         {
             List<Clip> list = [.. clips];
             Guid groupId = list.Select(c => c.LinkGroupId).FirstOrDefault(g => g.HasValue) ?? Guid.NewGuid();
  
+            HashSet<Guid> oldGroups = [.. list
+                .Select(c => c.LinkGroupId)
+                .Where(g => g.HasValue && g.Value != groupId)
+                .Select(g => g!.Value)];
+ 
             foreach (Clip clip in list) clip.LinkGroupId = groupId;
+ 
+            foreach (Guid oldGroupId in oldGroups)
+            {
+                List<Clip> remaining = [.. AllClips().Where(c => c.LinkGroupId == oldGroupId)];
+                if (remaining.Count == 1) remaining[0].LinkGroupId = null;
+            }
  
             return new LinkGroup(groupId, this);
         }
