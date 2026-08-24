@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 using EditSharp.Components;
 using EditSharp.Components.Clips;
 using SkiaSharp;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -25,6 +25,12 @@ namespace EditSharp.Composite
     /// heavily-embedded timeline this means more concurrent decoders/GPU
     /// surfaces than a fully shared-resource design would use. Correct
     /// output, not the most resource-efficient possible implementation.
+    ///
+    /// REWRITE ("channels split by kind"): the SkSurfacePool seed below now
+    /// uses _timeline.VideoChannels.Count specifically, instead of the old
+    /// mixed _timeline.Channels.Count — only a VideoChannel's clips ever need
+    /// a GPU-backed canvas surface here (see SkSurfacePool's own remarks:
+    /// this is a warm-start heuristic, not a hard cap).
     /// </summary>
     internal sealed class NestedTimelineRenderer : IDisposable
     {
@@ -32,16 +38,16 @@ namespace EditSharp.Composite
         private readonly TimelineReference _reference;
         private readonly int _fps;
         private readonly HardwareAccelerator _hwAccel;
- 
+
         private GpuContext? _gpuContext;
         private SkSurfacePool? _pool;
         private SkClipContentSource? _contentSource;
         private bool _prepared;
- 
+
         private readonly ConcurrentDictionary<Guid, (int, int)> _nativeSizes = new();
         private readonly ConcurrentDictionary<Guid, DecodeHwAccelPlan> _decodePlans = new();
         private readonly ConcurrentDictionary<Guid, string> _decodeSourcePaths = new();
- 
+
         public NestedTimelineRenderer(TimelineReference reference, int fps, HardwareAccelerator hwAccel)
         {
             _reference = reference;
@@ -49,7 +55,7 @@ namespace EditSharp.Composite
             _fps = fps;
             _hwAccel = hwAccel;
         }
- 
+
         /// <summary>
         /// Renders the nested Timeline's frame corresponding to `clipSeconds`
         /// into the embedding clip, honoring TimelineReference.Start (where
@@ -61,25 +67,25 @@ namespace EditSharp.Composite
         public SKImage RenderFrame(double clipSeconds, int canvasWidth, int canvasHeight)
         {
             EnsurePrepared(canvasWidth, canvasHeight);
- 
+
             TimeSpan refStart = _reference.Start ?? TimeSpan.Zero;
             double nestedSeconds = refStart.TotalSeconds + Math.Max(0.0, clipSeconds);
- 
+
             double maxSeconds = Math.Max(0.0, _timeline.Duration.TotalSeconds - (1.0 / _fps));
             nestedSeconds = Math.Clamp(nestedSeconds, 0.0, maxSeconds);
- 
+
             int frameIndex = (int)Math.Round(nestedSeconds * _fps);
- 
+
             FrameState state = FrameStateResolver.Resolve(_timeline, frameIndex, _fps);
- 
+
             return SkFrameCompositor.ComposeFrameImage(
                 state, _contentSource!, canvasWidth, canvasHeight, _fps, _pool!);
         }
- 
+
         private void EnsurePrepared(int canvasWidth, int canvasHeight)
         {
             if (_prepared) return;
- 
+
             //Synchronous wait deliberately: this is called from inside the
             //synchronous, sequential per-frame render loop (SkFrameCompositor
             //has no async path), and preparing a nested timeline's own media
@@ -88,14 +94,14 @@ namespace EditSharp.Composite
             RenderContentPreparation
                 .PrepareContentAsync(_timeline, canvasWidth, canvasHeight, _hwAccel, _nativeSizes, _decodePlans, _decodeSourcePaths)
                 .GetAwaiter().GetResult();
- 
+
             _gpuContext = GpuContext.Create(_hwAccel);
-            _pool = new SkSurfacePool(_gpuContext.GRContext, canvasWidth, canvasHeight, _timeline.Channels.Count);
+            _pool = new SkSurfacePool(_gpuContext.GRContext, canvasWidth, canvasHeight, _timeline.VideoChannels.Count);
             _contentSource = new SkClipContentSource(_fps, _hwAccel, _nativeSizes, _decodePlans, decodeSourcePaths: _decodeSourcePaths);
- 
+
             _prepared = true;
         }
- 
+
         public void Dispose()
         {
             _contentSource?.Dispose();
@@ -104,4 +110,3 @@ namespace EditSharp.Composite
         }
     }
 }
- 

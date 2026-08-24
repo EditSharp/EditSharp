@@ -13,7 +13,7 @@ using EditSharp.Components;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Transitions;
 using EditSharp.Composite;
- 
+
 namespace EditSharp.Render
 {
     /// <summary>
@@ -47,6 +47,18 @@ namespace EditSharp.Render
     /// video accumulator and the raw audio PCM — just no longer shared with
     /// content preparation). FrameStateResolver.Resolve no longer takes a
     /// nativeSizes parameter at all — see its own remarks.
+    ///
+    /// REWRITE ("channels split by kind"): the SkSurfacePool seed count below
+    /// now uses timeline.VideoChannels.Count specifically (only a
+    /// VideoChannel's clips ever need a GPU-backed canvas surface — see
+    /// SkSurfacePool's own remarks on this being a warm-start heuristic, not
+    /// a hard cap) instead of the old mixed timeline.Channels.Count. Validate's
+    /// FadeToColorTransition check below also now walks timeline.VideoChannels
+    /// specifically — that check is fundamentally about VIDEO channel
+    /// stacking (an opaque transition blacking out whatever composites
+    /// beneath it), which AudioChannels were never actually part of; walking
+    /// VideoChannels directly says what the check means instead of relying on
+    /// AudioChannel transitions happening to never trip it.
     /// </summary>
     public static class Renderer
     {
@@ -56,16 +68,16 @@ namespace EditSharp.Render
         //the same timeline are mixed identically.
         private const int AudioSampleRate = 48000;
         private const int AudioChannelCount = 2;
- 
+
         public static async Task RenderAsync(Blueprint blueprint)
         {
             Validate(blueprint);
- 
+
             var tempFiles = new ConcurrentBag<string>();
             var sw = Stopwatch.StartNew();
- 
+
             EditSharpConfig.Logger.Log("Starting render.");
- 
+
             try
             {
                 await RenderCoreAsync(blueprint, tempFiles);
@@ -79,7 +91,7 @@ namespace EditSharp.Render
                 }
             }
         }
- 
+
         private static async Task RenderCoreAsync(Blueprint blueprint, ConcurrentBag<string> tempFiles)
         {
             Timeline timeline = blueprint.Timeline;
@@ -87,41 +99,41 @@ namespace EditSharp.Render
             int height = (int)blueprint.RenderSettings.Resolution.Y;
             int fps = blueprint.RenderSettings.Framerate;
             HardwareAccelerator hwAccel = blueprint.RenderSettings.HardwareAccelerator;
- 
+
             var nativeSizes = new ConcurrentDictionary<Guid, (int, int)>();
             var decodePlans = new ConcurrentDictionary<Guid, DecodeHwAccelPlan>();
             var decodeSourcePaths = new ConcurrentDictionary<Guid, string>();
- 
+
             var prepSw = Stopwatch.StartNew();
             await RenderContentPreparation.PrepareContentAsync(
                 timeline, width, height, hwAccel, nativeSizes, decodePlans, decodeSourcePaths);
             EditSharpConfig.Logger.LogVerbose($"Content prepared in {prepSw.ElapsedMilliseconds}ms.");
- 
+
             Dictionary<int, List<Clip>> decoderReleaseSchedule =
                 RenderContentPreparation.BuildDecoderReleaseSchedule(timeline, fps);
- 
+
             int totalFrames = Math.Max(1, (int)Math.Ceiling(timeline.Duration.TotalSeconds * fps));
- 
+
             string accumulatorPath = GraphUtilities.GetVideoTempFilePath($"frames_{Guid.NewGuid():N}.raw");
             tempFiles.Add(accumulatorPath);
- 
+
             EditSharpConfig.Logger.Log(
                 $"Rendering {totalFrames} frame(s) at {width}x{height}@{fps}fps " +
                 "(sequential, in-process Skia compositor).");
- 
+
             using var contentSource = new SkClipContentSource(
                 fps, hwAccel, nativeSizes, decodePlans, decodeSourcePaths: decodeSourcePaths);
- 
+
             using GpuContext gpuContext = GpuContext.Create(
                 hwAccel, blueprint.RenderSettings.GpuAdapterIndex);
             using var surfacePool = new SkSurfacePool(
-                gpuContext.GRContext, width, height, timeline.Channels.Count);
- 
+                gpuContext.GRContext, width, height, timeline.VideoChannels.Count);
+
             //audio evaluation touches no GPU/Skia state at all, so it's kicked
             //off concurrently with frame rendering rather than after it —
             //independent work, no reason to serialize the two
             Task<AudioBuffer> audioTask = AudioMixer.ComposeAsync(timeline, AudioSampleRate, AudioChannelCount);
- 
+
             using (var accumulator = new FileStream(
                 accumulatorPath, FileMode.Create, FileAccess.Write, FileShare.None,
                 bufferSize: 1 << 20))
@@ -130,15 +142,15 @@ namespace EditSharp.Render
                     timeline, fps, width, height, contentSource,
                     decoderReleaseSchedule, totalFrames, accumulator, surfacePool);
             }
- 
+
             AudioBuffer masterAudio = await audioTask;
- 
+
             EditSharpConfig.Logger.Log("Finalizing output (mux + encode)...");
             var finalizeSw = Stopwatch.StartNew();
             await FinalizeOutputAsync(accumulatorPath, masterAudio, width, height, fps, blueprint, tempFiles);
             EditSharpConfig.Logger.Log($"Finalize complete in {finalizeSw.ElapsedMilliseconds}ms.");
         }
- 
+
         private static async Task RenderAllFramesAsync(
             Timeline timeline, int fps, int width, int height,
             SkClipContentSource contentSource,
@@ -146,16 +158,16 @@ namespace EditSharp.Render
             int totalFrames, Stream accumulator, SkSurfacePool surfacePool)
         {
             var sw = Stopwatch.StartNew();
- 
+
             long previousElapsedMs = 0;
- 
+
             for (int frameIndex = 0; frameIndex < totalFrames; frameIndex++)
             {
                 FrameState state = FrameStateResolver.Resolve(timeline, frameIndex, fps);
- 
+
                 (byte[] buffer, int length) = SkFrameCompositor.RenderFrame(
                     state, contentSource, width, height, fps, surfacePool);
- 
+
                 try
                 {
                     await accumulator.WriteAsync(buffer.AsMemory(0, length));
@@ -164,22 +176,22 @@ namespace EditSharp.Render
                 {
                     ArrayPool<byte>.Shared.Return(buffer);
                 }
- 
+
                 if (decoderReleaseSchedule.TryGetValue(frameIndex, out List<Clip>? finished))
                 {
                     foreach (Clip clip in finished) contentSource.ReleaseDecoder(clip);
                 }
- 
+
                 long currentElapsedMs = sw.ElapsedMilliseconds;
                 long frameDeltaMs = currentElapsedMs - previousElapsedMs;
                 previousElapsedMs = currentElapsedMs;
- 
+
                 EditSharpConfig.Logger.LogVerbose(
                     $"Rendered frame {frameIndex + 1}/{totalFrames} " +
                     $"({frameDeltaMs}ms this frame, {currentElapsedMs}ms elapsed).");
             }
         }
- 
+
         /// <summary>
         /// Muxes the accumulated lossless video against the timeline's
         /// already fully-mixed, already graph-evaluated master AudioBuffer
@@ -195,15 +207,15 @@ namespace EditSharp.Render
             string audioPath = GraphUtilities.GetAudioTempFilePath($"master_{Guid.NewGuid():N}.pcm");
             await File.WriteAllBytesAsync(audioPath, masterAudio.ToFloat32Bytes());
             tempFiles.Add(audioPath);
- 
+
             bool isGif = blueprint.RenderSettings.VideoCodec == VideoCodec.GIF;
             (string videoEncoderName, List<string> videoQualityArgs) =
                 await FfmpegRunner.GetVideoEncoderSettingsAsync(
                     blueprint.RenderSettings.VideoCodec, blueprint.RenderSettings.HardwareAccelerator);
- 
+
             var args = new List<string> { "-y", "-v", "error" };
             args.AddRange(GraphUtilities.FilterThreadingArgs());
- 
+
             args.AddRange(new[]
             {
                 "-f", "rawvideo",
@@ -212,7 +224,7 @@ namespace EditSharp.Render
                 "-r", fps.ToString(CultureInfo.InvariantCulture),
                 "-i", accumulatorPath,
             });
- 
+
             if (!isGif)
             {
                 args.AddRange(new[]
@@ -223,16 +235,16 @@ namespace EditSharp.Render
                     "-i", audioPath,
                 });
             }
- 
+
             args.Add("-map");
             args.Add("0:v");
- 
+
             if (!isGif)
             {
                 args.Add("-map");
                 args.Add("1:a");
             }
- 
+
             if (isGif)
             {
                 args.Add("-c:v");
@@ -243,7 +255,7 @@ namespace EditSharp.Render
                 args.Add("-c:v");
                 args.Add(videoEncoderName);
                 args.AddRange(videoQualityArgs);
- 
+
                 string audioCodecName = Constants.AudioCodecNames[blueprint.RenderSettings.AudioCodec];
                 args.Add("-c:a");
                 args.Add(audioCodecName);
@@ -253,9 +265,9 @@ namespace EditSharp.Render
                 args.Add("-pix_fmt");
                 args.Add("yuv420p");
             }
- 
+
             args.Add(blueprint.OutputDirectory);
- 
+
             var psi = new ProcessStartInfo
             {
                 FileName = EditSharpConfig.FfmpegPath,
@@ -265,56 +277,59 @@ namespace EditSharp.Render
                 CreateNoWindow = true,
             };
             foreach (string arg in args) psi.ArgumentList.Add(arg);
- 
+
             using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             var stderr = new StringBuilder();
             process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
- 
+
             process.Start();
             process.BeginErrorReadLine();
             process.BeginOutputReadLine();
             await process.WaitForExitAsync();
- 
+
             if (process.ExitCode != 0)
                 throw new InvalidOperationException(
                     $"ffmpeg exited with code {process.ExitCode} finalizing output:\n{stderr}");
         }
- 
+
         private static void Validate(Blueprint blueprint)
         {
             if (blueprint.Timeline == null || blueprint.Timeline.Channels.Count == 0)
                 throw new ArgumentException("Blueprint.Timeline must contain at least one Channel.");
- 
+
             if (blueprint.Timeline.Channels.All(c => c.Clips.Count == 0))
                 throw new ArgumentException("Blueprint.Timeline contains no clips on any channel.");
- 
+
             if ((int)blueprint.RenderSettings.Resolution.X <= 0 || (int)blueprint.RenderSettings.Resolution.Y <= 0)
                 throw new ArgumentException("Blueprint.Resolution must have positive width and height.");
- 
+
             if (blueprint.RenderSettings.Framerate <= 0)
                 throw new ArgumentException("Blueprint.Framerate must be positive.");
- 
+
             if (blueprint.RenderSettings.GpuAdapterIndex is < 0)
                 throw new ArgumentException(
                     "Blueprint.RenderSettings.GpuAdapterIndex must be null (auto) or a non-negative " +
                     "DXGI adapter index. Valid indices for this machine are listed in the log at the " +
                     "start of every GPU session.");
- 
+
             if (string.IsNullOrWhiteSpace(blueprint.OutputDirectory))
                 throw new ArgumentException("Blueprint.OutputDirectory must be a full output file path.");
- 
+
             //A transition that does not preserve alpha punches an opaque
             //rectangle through everything beneath it for the length of the
             //transition. FadeToColorTransition is the only kind that's
             //alpha-unsafe by construction (it deliberately fills the whole
             //canvas with a colour partway through) — a direct type check,
-            //reasoned from construction rather than re-measured.
-            foreach (Channel channel in blueprint.Timeline.Channels.Skip(1))
+            //reasoned from construction rather than re-measured. Walks
+            //VideoChannels specifically (not the mixed Channels view) — this
+            //is a video-compositing concern, about what draws on top of what;
+            //see this class's own remarks.
+            foreach (Channel channel in blueprint.Timeline.VideoChannels.Skip(1))
             {
                 foreach (Transition transition in channel.Transitions)
                 {
                     if (transition is not FadeToColorTransition) continue;
- 
+
                     throw new ArgumentException(
                         $"Channel '{channel.Name}' uses a FadeToColorTransition, which does " +
                         "not preserve transparency, so it would black out the channels " +
@@ -325,4 +340,3 @@ namespace EditSharp.Render
         }
     }
 }
- 

@@ -4,7 +4,7 @@ using System.Linq;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes.Sources.Video;
 using EditSharp.Components.Nodes.Sources.Audio;
- 
+
 namespace EditSharp.Components
 {
     /// <summary>
@@ -12,7 +12,7 @@ namespace EditSharp.Components
     /// (cycle prevention, UsedBy tracking) — see the remarks on
     /// ValidateNoCycle/RegisterEmbeddedTimelines/NotifyClipDetached below.
     ///
-    /// REWRITE ("clips are graphs"): the old dedicated
+    /// REWRITE (\"clips are graphs\"): the old dedicated
     /// AddTimelineClip/RippleAddTimelineClip/AddTimelineClipCore methods are
     /// GONE. Embedding a nested Timeline used to require a special add path
     /// because it was a distinct Clip subtype (TimelineVideoClip/
@@ -27,38 +27,172 @@ namespace EditSharp.Components
     /// into ValidateNoCycle/RegisterEmbeddedTimelines itself (see Channel.cs),
     /// generalized to scan the clip's graph for however many embed nodes it
     /// actually has (zero, one, or several) rather than assuming exactly one.
+    ///
+    /// REWRITE (\"channels split by kind\"): VideoChannels and AudioChannels
+    /// used to live together in one mixed `_channels` list, ordered however
+    /// they were added. They're now two entirely separate lists. The reason
+    /// is LinkGroup.MoveChannel/RippleMoveChannel (see LinkGroup.cs): asking
+    /// a linked group to \"move up/down a channel\" only has an unambiguous
+    /// meaning per member if each member's own channel index is counted
+    /// among channels of its OWN kind — a video clip and its linked audio
+    /// clip can never share a channel, so there's no single mixed index that
+    /// means the same thing for both of them at once. With two separate
+    /// lists, \"move this video clip's channel index by `delta`\" and \"move
+    /// this audio clip's channel index by the SAME `delta`\" are just two
+    /// independent, symmetric lookups — see ResolveChannelDelta below, which
+    /// also creates whichever new channels (of the matching kind) a delta
+    /// past the current top requires. VideoChannels keeps its own
+    /// bottom-to-top compositing order exactly as before; AudioChannels'
+    /// order still carries no acoustic meaning (see AudioMixer).
     /// </summary>
     public sealed class Timeline
     {
-        private readonly List<Channel> _channels = [];
-        public IReadOnlyList<Channel> Channels => _channels;
- 
-        public TimeSpan Duration => _channels.Count == 0 ? TimeSpan.Zero : _channels.Max(c => c.End);
- 
+        private readonly List<VideoChannel> _videoChannels = [];
+        private readonly List<AudioChannel> _audioChannels = [];
+
+        /// <summary>
+        /// Every VideoChannel on this timeline, in compositing order —
+        /// index 0 is the bottom layer, each one after it draws on top,
+        /// exactly as before this split.
+        /// </summary>
+        public IReadOnlyList<VideoChannel> VideoChannels => _videoChannels;
+
+        /// <summary>
+        /// Every AudioChannel on this timeline. Order has no acoustic
+        /// meaning (see AudioMixer's own remarks) — it only affects how
+        /// channels are listed in a UI.
+        /// </summary>
+        public IReadOnlyList<AudioChannel> AudioChannels => _audioChannels;
+
+        /// <summary>
+        /// Every channel on this timeline, video channels first (in their
+        /// own compositing order) then audio channels — a convenience view
+        /// for code that genuinely doesn't care about the split (\"is there
+        /// at least one channel at all,\" walking every clip on the
+        /// timeline, and so on). Allocates a freshly merged list on every
+        /// access, so a caller in a hot per-frame path should prefer
+        /// VideoChannels/AudioChannels directly instead — see
+        /// FrameStateResolver/AudioMixer, which do exactly that.
+        /// </summary>
+        public IReadOnlyList<Channel> Channels => [.. _videoChannels, .. _audioChannels];
+
+        public TimeSpan Duration
+        {
+            get
+            {
+                TimeSpan max = TimeSpan.Zero;
+                foreach (VideoChannel channel in _videoChannels) if (channel.End > max) max = channel.End;
+                foreach (AudioChannel channel in _audioChannels) if (channel.End > max) max = channel.End;
+                return max;
+            }
+        }
+
         //timelines currently embedding THIS one as a nested-timeline child
         //(possibly more than once — see RegisterEmbeddedTimelines)
         private readonly List<Timeline> _usedBy = [];
         public IReadOnlyList<Timeline> UsedBy => _usedBy;
- 
-        public Channel AddChannel(Channel channel)
+
+        // ---------------------------------------------------------------
+        // Channel management
+        // ---------------------------------------------------------------
+
+        public VideoChannel AddChannel(VideoChannel channel)
         {
-            _channels.Add(channel);
+            _videoChannels.Add(channel);
             channel.Timeline = this;
             return channel;
         }
- 
+
+        public AudioChannel AddChannel(AudioChannel channel)
+        {
+            _audioChannels.Add(channel);
+            channel.Timeline = this;
+            return channel;
+        }
+
+        /// <summary>
+        /// Runtime-typed fallback for a caller holding only a `Channel`
+        /// reference (its concrete type isn't known until this runs) —
+        /// dispatches to whichever typed overload above actually matches.
+        /// Prefer AddChannel(VideoChannel)/AddChannel(AudioChannel) when the
+        /// concrete type is known at the call site; they need no such
+        /// dispatch and hand back the concrete type directly.
+        /// </summary>
+        public Channel AddChannel(Channel channel) => channel switch
+        {
+            VideoChannel video => AddChannel(video),
+            AudioChannel audio => AddChannel(audio),
+            _ => throw new ArgumentException(
+                $"Unknown channel type {channel.GetType().Name}.", nameof(channel)),
+        };
+
         public void RemoveChannel(Channel channel)
         {
-            _channels.Remove(channel);
+            switch (channel)
+            {
+                case VideoChannel video: _videoChannels.Remove(video); break;
+                case AudioChannel audio: _audioChannels.Remove(audio); break;
+                default: throw new ArgumentException(
+                    $"Unknown channel type {channel.GetType().Name}.", nameof(channel));
+            }
+
             channel.Timeline = null;
         }
- 
+
+        // ---------------------------------------------------------------
+        // Channel-delta resolution — used by LinkGroup.MoveChannel/
+        // RippleMoveChannel (see LinkGroup.cs) to answer \"what channel is
+        // `delta` steps away from `current`, among channels of its own
+        // kind,\" creating new channels along the way if `delta` reaches
+        // past the current top.
+        // ---------------------------------------------------------------
+
+        internal Channel ResolveChannelDelta(Channel current, int delta) => current switch
+        {
+            VideoChannel video => ResolveChannelDeltaCore(_videoChannels, video, delta, static () => new VideoChannel()),
+            AudioChannel audio => ResolveChannelDeltaCore(_audioChannels, audio, delta, static () => new AudioChannel()),
+            _ => throw new NotSupportedException($"Unknown channel type {current.GetType().Name}."),
+        };
+
+        /// <summary>
+        /// `current` must already be one of `list`'s own entries (it came
+        /// from a placed Clip's own Channel, so it always is in practice).
+        /// Moving UP (positive delta) past the current top channel creates
+        /// however many new, empty channels of the matching kind are needed
+        /// to reach it — the same thing that happens in most editors when
+        /// you drag a clip above the last track and a new one appears.
+        /// Moving DOWN (negative delta) past the bottom channel has nowhere
+        /// to go — there's no way to insert a channel below index 0 without
+        /// renumbering every channel already there — so it just clamps at
+        /// the bottom channel instead.
+        /// </summary>
+        private Channel ResolveChannelDeltaCore<T>(List<T> list, T current, int delta, Func<T> factory)
+            where T : Channel
+        {
+            int index = list.IndexOf(current);
+            if (index < 0)
+                throw new InvalidOperationException("This channel does not belong to this timeline.");
+
+            int target = index + delta;
+
+            while (target >= list.Count)
+            {
+                T created = factory();
+                list.Add(created);
+                created.Timeline = this;
+            }
+
+            if (target < 0) target = 0;
+
+            return list[target];
+        }
+
         // ---------------------------------------------------------------
         // Linking
         // ---------------------------------------------------------------
- 
+
         public LinkGroup? GetLinkGroup(Guid? id) => id.HasValue ? new LinkGroup(id.Value, this) : null;
- 
+
         /// <summary>
         /// Adds every clip in `clips` to one link group (an existing one,
         /// if any of them already belongs to one; otherwise a fresh Id).
@@ -67,7 +201,7 @@ namespace EditSharp.Components
         /// already belong to a DIFFERENT group than the one this call
         /// settles on — e.g. linking [B, C] where B is already grouped with
         /// A (group G1) and C is already grouped with D (group G2) resolves
-        /// to G1, silently "poaching" C out of G2 and leaving D behind as an
+        /// to G1, silently \"poaching\" C out of G2 and leaving D behind as an
         /// orphaned singleton group (LinkGroupId set, but the sole member).
         /// Every other group-membership change in this file (LinkGroup.Split,
         /// Timeline.NotifyClipDetached) auto-dissolves a group once it's
@@ -80,25 +214,26 @@ namespace EditSharp.Components
         {
             List<Clip> list = [.. clips];
             Guid groupId = list.Select(c => c.LinkGroupId).FirstOrDefault(g => g.HasValue) ?? Guid.NewGuid();
- 
+
             HashSet<Guid> oldGroups = [.. list
                 .Select(c => c.LinkGroupId)
                 .Where(g => g.HasValue && g.Value != groupId)
                 .Select(g => g!.Value)];
- 
+
             foreach (Clip clip in list) clip.LinkGroupId = groupId;
- 
+
             foreach (Guid oldGroupId in oldGroups)
             {
                 List<Clip> remaining = [.. AllClips().Where(c => c.LinkGroupId == oldGroupId)];
                 if (remaining.Count == 1) remaining[0].LinkGroupId = null;
             }
- 
+
             return new LinkGroup(groupId, this);
         }
- 
-        internal IEnumerable<Clip> AllClips() => _channels.SelectMany(c => c.Clips);
- 
+
+        internal IEnumerable<Clip> AllClips() =>
+            _videoChannels.SelectMany(c => c.Clips).Concat(_audioChannels.SelectMany(c => c.Clips));
+
         /// <summary>
         /// Called by Channel.RemoveClip whenever a clip TRULY leaves this
         /// timeline for good (not a transient mid-Move relocation, which
@@ -118,16 +253,16 @@ namespace EditSharp.Components
                     if (lastMember != null) lastMember.LinkGroupId = null;
                 }
             }
- 
+
             UnregisterEmbeddedTimelines(clip);
         }
- 
+
         // ---------------------------------------------------------------
         // Nested-timeline cycle prevention / UsedBy bookkeeping — GENERIC
         // over however many TimelineVideoInputNode/TimelineAudioInputNode
         // nodes a clip's graph contains (see this class's own remarks).
         // ---------------------------------------------------------------
- 
+
         /// <summary>Throws if placing `clip` on this timeline would create a nested-timeline cycle.</summary>
         internal void ValidateNoCycle(Clip clip)
         {
@@ -139,28 +274,28 @@ namespace EditSharp.Components
                         "chain of embeddings) if placed here.");
             }
         }
- 
+
         internal void RegisterEmbeddedTimelines(Clip clip)
         {
             foreach (Timeline embedded in EmbeddedTimelinesOf(clip))
                 embedded._usedBy.Add(this);
         }
- 
+
         private void UnregisterEmbeddedTimelines(Clip clip)
         {
             foreach (Timeline embedded in EmbeddedTimelinesOf(clip))
                 embedded._usedBy.Remove(this);
         }
- 
+
         private static IEnumerable<Timeline> EmbeddedTimelinesOf(Clip clip)
         {
             foreach (TimelineVideoInputNode node in clip.Graph.Nodes.OfType<TimelineVideoInputNode>())
                 yield return node.Reference.Timeline;
- 
+
             foreach (TimelineAudioInputNode node in clip.Graph.Nodes.OfType<TimelineAudioInputNode>())
                 yield return node.Reference.Timeline;
         }
- 
+
         /// <summary>
         /// True if `child` is reachable by walking UP this timeline's own
         /// ancestry (this.UsedBy, then each of those timelines' own UsedBy,
@@ -171,21 +306,20 @@ namespace EditSharp.Components
         private bool WouldCreateCycle(Timeline child)
         {
             if (ReferenceEquals(child, this)) return true;
- 
+
             var visited = new HashSet<Timeline>();
             var queue = new Queue<Timeline>(_usedBy);
- 
+
             while (queue.Count > 0)
             {
                 Timeline current = queue.Dequeue();
                 if (ReferenceEquals(current, child)) return true;
                 if (!visited.Add(current)) continue;
- 
+
                 foreach (Timeline ancestor in current._usedBy) queue.Enqueue(ancestor);
             }
- 
+
             return false;
         }
     }
 }
- 

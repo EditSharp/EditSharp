@@ -8,7 +8,7 @@ using EditSharp.Components;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Sources.Video;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -39,6 +39,15 @@ namespace EditSharp.Composite
     ///     dimensions (needed to size an ffmpeg decode target and to judge
     ///     OptimizedMediaCache sufficiency) and which file its decoder
     ///     should actually open.
+    ///
+    /// REWRITE ("channels split by kind"): every method here only ever cared
+    /// about VideoClip content, so each now walks timeline.VideoChannels
+    /// directly instead of timeline.Channels filtered by `is not VideoClip` —
+    /// Timeline keeps VideoChannel and AudioChannel as two separate lists
+    /// (see Timeline.cs's own remarks), and VideoChannel.IsValidClipType
+    /// already guarantees every clip on one is a VideoClip, so the runtime
+    /// type check these three methods used to need is gone along with the
+    /// filter.
     /// </summary>
     internal static class RenderContentPreparation
     {
@@ -49,27 +58,27 @@ namespace EditSharp.Composite
             ConcurrentDictionary<Guid, string> decodeSourcePaths)
         {
             var tasks = new List<Task>();
- 
-            foreach (Channel channel in timeline.Channels)
+
+            foreach (VideoChannel channel in timeline.VideoChannels)
             {
                 foreach (Clip clip in channel.Clips)
                 {
                     if (clip is not VideoClip video) continue;
- 
+
                     foreach (MediaSourceNode media in video.Graph.Nodes.OfType<MediaSourceNode>())
                     {
                         if (media.Source.Type != SourceType.Video) continue;
- 
+
                         tasks.Add(ProbeVideoAsync(
                             video, media, canvasWidth, canvasHeight, hwAccel,
                             nativeSizes, decodePlans, decodeSourcePaths));
                     }
                 }
             }
- 
+
             return Task.WhenAll(tasks);
         }
- 
+
         /// <summary>
         /// Probes one MediaSourceNode's ORIGINAL source for its native size
         /// (needed for aspect-fit math regardless of which file ends up
@@ -85,18 +94,18 @@ namespace EditSharp.Composite
         {
             (int width, int height) = await MediaProbe.GetDimensionsAsync(media.Source.Path);
             nativeSizes[media.Id] = (width, height);
- 
+
             string? cachedPath = await TryGetSufficientCachedMediaAsync(
                 clip, media, media.Source.Path, width, height, canvasWidth, canvasHeight);
- 
+
             string decodeSourcePath = cachedPath ?? media.Source.Path;
             decodeSourcePaths[media.Id] = decodeSourcePath;
- 
+
             decodePlans[media.Id] = decodeSourcePath == media.Source.Path
                 ? await FfmpegRunner.GetDecodePlanAsync(media.Source.Path, hwAccel)
                 : DecodeHwAccelPlan.Software;
         }
- 
+
         /// <summary>
         /// The shared cache-sufficiency check: looks up an OPPORTUNISTIC
         /// (never-building) cached entry for `sourcePath`, and returns its
@@ -117,24 +126,24 @@ namespace EditSharp.Composite
             try
             {
                 OptimizedMediaEntry? cached = await OptimizedMediaCache.TryGetAsync(sourcePath);
- 
+
                 if (cached is { } entry)
                 {
                     ClipTransform transform =
                         GraphSearchHelpers.FindDownstreamTransform(clip.Graph, media)?.Transform ?? new ClipTransform();
- 
+
                     (int requiredWidth, int requiredHeight) = TransformExpressions.ComputeContentSize(
                         transform, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
- 
+
                     if (entry.Width >= requiredWidth && entry.Height >= requiredHeight)
                     {
                         EditSharpConfig.Logger.LogVerbose(
                             $"Using cached optimized media for '{sourcePath}' -> {entry.Path} " +
                             $"({entry.Width}x{entry.Height}, {entry.Codec}).");
- 
+
                         return entry.Path;
                     }
- 
+
                     EditSharpConfig.Logger.LogVerbose(
                         $"Cached optimized media for '{sourcePath}' is {entry.Width}x{entry.Height}, " +
                         $"smaller than this clip needs ({requiredWidth}x{requiredHeight}) — decoding the " +
@@ -147,10 +156,10 @@ namespace EditSharp.Composite
                     $"OptimizedMediaCache lookup failed for '{sourcePath}', decoding the " +
                     $"original source instead: {ex.Message}");
             }
- 
+
             return null;
         }
- 
+
         /// <summary>
         /// True when every Video-type MediaSourceNode across the whole
         /// timeline currently has a persistent OptimizedMediaCache entry with
@@ -163,13 +172,13 @@ namespace EditSharp.Composite
             Timeline timeline, int canvasWidth, int canvasHeight)
         {
             var checks = new List<Task<bool>>();
- 
-            foreach (Channel channel in timeline.Channels)
+
+            foreach (VideoChannel channel in timeline.VideoChannels)
             {
                 foreach (Clip clip in channel.Clips)
                 {
                     if (clip is not VideoClip video) continue;
- 
+
                     foreach (MediaSourceNode media in video.Graph.Nodes.OfType<MediaSourceNode>())
                     {
                         if (media.Source.Type != SourceType.Video) continue;
@@ -177,30 +186,30 @@ namespace EditSharp.Composite
                     }
                 }
             }
- 
+
             if (checks.Count == 0) return true;
- 
+
             bool[] results = await Task.WhenAll(checks);
- 
+
             foreach (bool result in results)
             {
                 if (!result) return false;
             }
- 
+
             return true;
- 
+
             static async Task<bool> CheckOneAsync(
                 VideoClip video, MediaSourceNode media, int canvasWidth, int canvasHeight)
             {
                 (int width, int height) = await MediaProbe.GetDimensionsAsync(media.Source.Path);
- 
+
                 string? cachedPath = await TryGetSufficientCachedMediaAsync(
                     video, media, media.Source.Path, width, height, canvasWidth, canvasHeight);
- 
+
                 return cachedPath != null;
             }
         }
- 
+
         /// <summary>
         /// The frame index at which each video clip's decoders (there may be
         /// more than one — see SkClipContentSource.ReleaseDecoder, which
@@ -212,25 +221,24 @@ namespace EditSharp.Composite
         public static Dictionary<int, List<Clip>> BuildDecoderReleaseSchedule(Timeline timeline, int fps)
         {
             var schedule = new Dictionary<int, List<Clip>>();
- 
-            foreach (Channel channel in timeline.Channels)
+
+            foreach (VideoChannel channel in timeline.VideoChannels)
             {
                 foreach (Clip clip in channel.Clips)
                 {
                     if (clip is not VideoClip video) continue;
                     if (!video.Graph.Nodes.OfType<MediaSourceNode>().Any(m => m.Source.Type == SourceType.Video)) continue;
- 
+
                     int lastVisibleFrame = Math.Max(0, (int)Math.Ceiling(clip.End.TotalSeconds * fps) - 1);
- 
+
                     if (!schedule.TryGetValue(lastVisibleFrame, out List<Clip>? list))
                         schedule[lastVisibleFrame] = list = [];
- 
+
                     list.Add(clip);
                 }
             }
- 
+
             return schedule;
         }
     }
 }
- 

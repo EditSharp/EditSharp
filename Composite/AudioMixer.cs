@@ -7,7 +7,7 @@ using EditSharp.Components;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Sources.Audio;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -40,6 +40,12 @@ namespace EditSharp.Composite
     ///
     /// A channel's index still decides what occludes what visually, and still
     /// has no meaning for sound — audio ignores channel order entirely.
+    ///
+    /// REWRITE ("channels split by kind"): iterates timeline.AudioChannels
+    /// directly now instead of timeline.Channels filtered by `is not
+    /// AudioChannel` — Timeline keeps VideoChannel and AudioChannel as two
+    /// separate lists (see Timeline.cs's own remarks), so there's no longer
+    /// a mixed list to filter here.
     /// </summary>
     internal static class AudioMixer
     {
@@ -54,36 +60,31 @@ namespace EditSharp.Composite
         {
             int totalFrames = AudioBuffer.FramesForDuration(timeline.Duration, sampleRate);
             var master = AudioBuffer.Silence(sampleRate, channels, totalFrames);
- 
-            foreach (Channel channel in timeline.Channels)
+
+            foreach (AudioChannel audioChannel in timeline.AudioChannels)
             {
-                //VideoChannel (and anything else that isn't an AudioChannel)
-                //contributes nothing — see class remarks. Not a gap: there is
-                //nothing to read from a VideoClip's graph in the first place.
-                if (channel is not AudioChannel audioChannel) continue;
- 
                 AudioBuffer channelBuffer = AudioBuffer.Silence(sampleRate, channels, totalFrames);
- 
+
                 foreach (Clip clip in audioChannel.Clips)
                 {
                     //AudioChannel.IsValidClipType already enforces this at
                     //placement time — this is belt-and-suspenders, not a
                     //real fallback path.
                     if (clip is not AudioClip audio) continue;
- 
+
                     AudioBuffer evaluated = await ComposeClipAsync(audio, sampleRate, channels, token);
- 
+
                     int startFrame = AudioBuffer.FramesForDuration(clip.Start, sampleRate);
                     channelBuffer.MixFrom(evaluated, startFrame);
                 }
- 
+
                 channelBuffer.ApplyGain(audioChannel.Volume);
                 master.MixFrom(channelBuffer, 0);
             }
- 
+
             return master;
         }
- 
+
         /// <summary>
         /// Resolves every InputNode in `clip`'s graph to its own raw
         /// AudioBuffer (already fitted to exactly `clip.Duration`), then runs
@@ -93,28 +94,28 @@ namespace EditSharp.Composite
             AudioClip clip, int sampleRate, int channels, CancellationToken token)
         {
             var resolvedInputs = new Dictionary<Guid, AudioBuffer>();
- 
+
             foreach (InputNode node in clip.Graph.Nodes.OfType<InputNode>())
             {
                 resolvedInputs[node.Id] = node switch
                 {
                     MediaAudioSourceNode media =>
                         await PcmAudioDecoder.DecodeAsync(media.Source, clip.Duration, sampleRate, channels, token),
- 
+
                     ToneGeneratorInputNode tone =>
                         SynthesizeTone(tone, clip.Duration, sampleRate, channels),
- 
+
                     TimelineAudioInputNode embed =>
                         await ResolveNestedTimelineAudioAsync(embed.Reference, clip.Duration, sampleRate, channels, token),
- 
+
                     _ => throw new NotSupportedException(
                         $"AudioMixer has no dispatch for {node.GetType().Name}."),
                 };
             }
- 
+
             return AudioEffectGraphEvaluator.Evaluate(clip.Graph, resolvedInputs);
         }
- 
+
         /// <summary>
         /// A synthesized tone — brand new content type, the audio-domain
         /// equivalent of ColorGeneratorInputNode on the video side. Frequency/
@@ -129,16 +130,16 @@ namespace EditSharp.Composite
         {
             int frameCount = AudioBuffer.FramesForDuration(duration, sampleRate);
             var samples = new float[frameCount * channels];
- 
+
             const double twoPi = 2.0 * Math.PI;
             double phase = 0.0;
- 
+
             for (int frame = 0; frame < frameCount; frame++)
             {
                 TimeSpan t = TimeSpan.FromSeconds(frame / (double)sampleRate);
                 float frequency = tone.Frequency.Evaluate(t);
                 float amplitude = tone.Amplitude.Evaluate(t);
- 
+
                 double value = tone.Waveform switch
                 {
                     Waveform.Sine => Math.Sin(phase),
@@ -147,18 +148,18 @@ namespace EditSharp.Composite
                     Waveform.Triangle => (2.0 / Math.PI) * Math.Asin(Math.Sin(phase)),
                     _ => throw new NotSupportedException($"Unknown Waveform: {tone.Waveform}"),
                 };
- 
+
                 float sample = (float)(value * amplitude);
                 int baseIdx = frame * channels;
                 for (int ch = 0; ch < channels; ch++) samples[baseIdx + ch] = sample;
- 
+
                 phase += twoPi * frequency / sampleRate;
                 if (phase > twoPi) phase %= twoPi; //keep the accumulator bounded over a long clip
             }
- 
+
             return new AudioBuffer(sampleRate, channels, samples);
         }
- 
+
         /// <summary>
         /// Gets one TimelineAudioInputNode's own raw (pre-Graph) audio:
         /// recursively mixes its embedded Timeline and windows the result per
@@ -168,20 +169,20 @@ namespace EditSharp.Composite
             TimelineReference reference, TimeSpan clipDuration, int sampleRate, int channels, CancellationToken token)
         {
             Timeline nested = reference.Timeline;
- 
+
             AudioBuffer nestedMaster = await ComposeAsync(nested, sampleRate, channels, token);
- 
+
             TimeSpan refStart = reference.Start ?? TimeSpan.Zero;
             int startFrame = AudioBuffer.FramesForDuration(refStart, sampleRate);
- 
+
             TimeSpan refDuration = reference.Duration ?? (nested.Duration - refStart);
             if (refDuration < TimeSpan.Zero) refDuration = TimeSpan.Zero;
             int refFrames = AudioBuffer.FramesForDuration(refDuration, sampleRate);
- 
+
             AudioBuffer window = nestedMaster.Slice(startFrame, refFrames);
- 
+
             int targetFrames = AudioBuffer.FramesForDuration(clipDuration, sampleRate);
- 
+
             //A nested timeline has no ffmpeg -stream_loop equivalent — it's
             //already a fixed, fully-composed in-memory buffer by the time it
             //gets here — so holding the last frame (never looping) is the
@@ -191,4 +192,3 @@ namespace EditSharp.Composite
         }
     }
 }
- 
