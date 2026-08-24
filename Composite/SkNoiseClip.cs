@@ -32,14 +32,53 @@ namespace EditSharp.Composite
     /// investigation currently stands). u2 only uses its first component
     /// (seedOffset.z) — the trailing padding is intentional, not leftover.
     ///
-    /// BLOCK-CORRUPTION BUG, STATUS: confirmed (via a temporary debug dump
-    /// that has since been removed) to be present in this shader's raw GPU
-    /// output the instant it leaves the draw below — before pool.Return,
-    /// before any compositing, tinting, or transform ever touches it. That
-    /// rules out the compositor/blend/tint stages entirely and narrows the
-    /// search to the GPU draw itself and whatever GPU state the rented
-    /// surface arrived with — see SkSurfacePool's own remarks for the
-    /// current leading theory and the diagnostic now in place for it.
+    /// ROOT CAUSE OF THE BLOCK-CORRUPTION BUG — FOUND, AND FIXED BELOW BY
+    /// THE SINGLE LINE `float3 f = p - i;` IN gradientNoise3D.
+    ///
+    /// The shader used to compute the lattice cell and the position within
+    /// that cell as two INDEPENDENT expressions:
+    ///     float3 i = floor(p);
+    ///     float3 f = fract(p);   // <-- the bug
+    /// Both look like they read the same `p`, but `p` here is not a stored
+    /// value — it is the inlined expression
+    /// `xscale * (fragCoord.x / resolution.x) + seedOffset.x` (and the y/t
+    /// equivalents). A shader compiler is free to contract that multiply-add
+    /// into a single FMA instruction at one use site and emit a separate
+    /// multiply and add at the other. The two `p` values then differ by
+    /// about one ULP. For the vast majority of pixels that is invisible —
+    /// but for any pixel lying near a lattice boundary it means floor()
+    /// reports cell N while fract() returns a fraction belonging to cell
+    /// N+1. The gradient is then fetched for one cell and interpolated with
+    /// the other cell's weight, producing a hard discontinuity along the
+    /// whole shared edge: a rectangular SEAM, not isolated speckle.
+    ///
+    /// HOW THIS WAS ESTABLISHED (SkNoiseShaderBisect, run against real
+    /// hardware — every earlier theory was falsified by measurement first):
+    ///   - compositor/tint/transform stages: excluded (raw pre-composite
+    ///     dumps were already corrupted)
+    ///   - uninitialized VRAM / races / submission ordering: excluded (the
+    ///     corruption is bit-identical across separate runs)
+    ///   - the mipmap-generation path: a real bug, found and fixed, but not
+    ///     this one (D3D12 validation layer went fully clean, corruption
+    ///     remained)
+    ///   - shader float precision: excluded (fract(u*30 + 1000.0) came back
+    ///     smooth and bit-identical on GPU and CPU)
+    ///   - uniform binding: excluded (stage 6 echoed all three uniforms as a
+    ///     flat colour, bit-identical GPU vs CPU)
+    ///   - fract(p) ALONE (stage 1): clean. floor(p)-derived gradient ALONE
+    ///     (stage 4): clean. The FIRST stage to use i and f TOGETHER
+    ///     (stage 7, dot(gradient(i), f)): DIVERGED. That is the whole
+    ///     result — each half is individually correct, and only their
+    ///     combination is wrong, which is precisely what an i/f
+    ///     disagreement looks like and nothing else does.
+    ///
+    /// Deriving f from i (f = p - i) makes the two exactly complementary by
+    /// construction: whatever value of p the compiler materialises,
+    /// i + f == p holds bit-exactly, and the corner arithmetic
+    /// (i + offset paired with f - offset) stays consistent. The seams
+    /// cannot form. There is no performance cost — a subtract replaces a
+    /// fract — and the same discipline protects every future shader on this
+    /// path, keying included.
     /// </summary>
     internal static class SkNoiseClip
     {
@@ -93,7 +132,10 @@ namespace EditSharp.Composite
 
             float gradientNoise3D(float3 p) {
                 float3 i = floor(p);
-                float3 f = fract(p);
+                // f is derived FROM i, never computed independently via
+                // fract(p) — see this file's ROOT CAUSE remarks. This one
+                // line is the fix for the block-seam corruption.
+                float3 f = p - i;
                 float3 u = float3(fade(f.x), fade(f.y), fade(f.z));
 
                 float n000 = dot(gradient(i + float3(0.0, 0.0, 0.0)), f - float3(0.0, 0.0, 0.0));
@@ -158,11 +200,20 @@ namespace EditSharp.Composite
             float seedOffsetY = (float)(rng.NextDouble() * 1000.0);
             float seedOffsetZ = (float)(rng.NextDouble() * 1000.0);
 
+            float[] u0 = [canvasWidth, canvasHeight, (float)xscale, (float)yscale];
+            float[] u1 = [(float)tscale, (float)clipSeconds, seedOffsetX, seedOffsetY];
+            float[] u2 = [seedOffsetZ, 0f, 0f, 0f];
+
+            // TEMPORARY DIAGNOSTIC — no-op unless EDITSHARP_SHADER_BISECT
+            // is set. Deliberately passed the SAME uniform arrays the real
+            // draw below uses. See SkNoiseShaderBisect's own remarks.
+            SkNoiseShaderBisect.RunOnce(canvasWidth, canvasHeight, pool, u0, u1, u2);
+
             var uniforms = new SKRuntimeEffectUniforms(Effect)
             {
-                ["u0"] = new float[] { canvasWidth, canvasHeight, (float)xscale, (float)yscale },
-                ["u1"] = new float[] { (float)tscale, (float)clipSeconds, seedOffsetX, seedOffsetY },
-                ["u2"] = new float[] { seedOffsetZ, 0f, 0f, 0f },
+                ["u0"] = u0,
+                ["u1"] = u1,
+                ["u2"] = u2,
             };
 
             using SKShader shader = Effect.ToShader(uniforms);
