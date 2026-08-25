@@ -11,13 +11,13 @@ namespace EditSharp.Components.Nodes.Sources.Video
     /// before this rewrite — no separate "ImageClip" node type). Replaces
     /// the old VideoClip.Source property directly.
     /// </summary>
-    public sealed class MediaSourceNode : InputNode, ITrimmableInput
+    public sealed class VideoSourceNode : InputNode, ITrimmableInput
     {
         public required Source Source { get; set; }
  
         private static readonly NodePort[] StaticPorts = [new("Image", PortType.Image, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
-        public override Node Duplicate() => new MediaSourceNode { Enabled = Enabled, Source = Source.Duplicate() };
+        public override Node Duplicate() => new VideoSourceNode { Enabled = Enabled, Source = Source.Duplicate() };
  
         public TimeSpan InPoint
         {

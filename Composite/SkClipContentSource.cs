@@ -97,10 +97,10 @@ namespace EditSharp.Composite
             {
                 result[node.Id] = node switch
                 {
-                    MediaSourceNode { Source.Type: SourceType.Video } media =>
+                    VideoSourceNode { Source.Type: SourceType.Video } media =>
                         (GetOrOpenDecoder(clip, media, canvasWidth, canvasHeight).NextFrame(), true),
  
-                    MediaSourceNode { Source.Type: SourceType.Image } media =>
+                    VideoSourceNode { Source.Type: SourceType.Image } media =>
                         (GetOrLoadStaticImage(media.Id, media.Source.Path), false),
  
                     TextInputNode text =>
@@ -124,7 +124,7 @@ namespace EditSharp.Composite
         }
  
         private SkSourceDecoder GetOrOpenDecoder(
-            VideoClip clip, MediaSourceNode media, int canvasWidth, int canvasHeight)
+            VideoClip clip, VideoSourceNode media, int canvasWidth, int canvasHeight)
         {
             if (_videoDecoders.TryGetValue(media.Id, out SkSourceDecoder? existing))
                 return existing;

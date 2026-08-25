@@ -65,7 +65,7 @@ namespace EditSharp.Composite
                 {
                     if (clip is not VideoClip video) continue;
 
-                    foreach (MediaSourceNode media in video.Graph.Nodes.OfType<MediaSourceNode>())
+                    foreach (VideoSourceNode media in video.Graph.Nodes.OfType<VideoSourceNode>())
                     {
                         if (media.Source.Type != SourceType.Video) continue;
 
@@ -87,7 +87,7 @@ namespace EditSharp.Composite
         /// this class's own remarks.
         /// </summary>
         private static async Task ProbeVideoAsync(
-            VideoClip clip, MediaSourceNode media, int canvasWidth, int canvasHeight, HardwareAccelerator hwAccel,
+            VideoClip clip, VideoSourceNode media, int canvasWidth, int canvasHeight, HardwareAccelerator hwAccel,
             ConcurrentDictionary<Guid, (int, int)> nativeSizes,
             ConcurrentDictionary<Guid, DecodeHwAccelPlan> decodePlans,
             ConcurrentDictionary<Guid, string> decodeSourcePaths)
@@ -120,7 +120,7 @@ namespace EditSharp.Composite
         /// one TransformNode, and exact for every "normal/default" graph.
         /// </summary>
         private static async Task<string?> TryGetSufficientCachedMediaAsync(
-            VideoClip clip, MediaSourceNode media, string sourcePath, int nativeWidth, int nativeHeight,
+            VideoClip clip, VideoSourceNode media, string sourcePath, int nativeWidth, int nativeHeight,
             int canvasWidth, int canvasHeight)
         {
             try
@@ -179,7 +179,7 @@ namespace EditSharp.Composite
                 {
                     if (clip is not VideoClip video) continue;
 
-                    foreach (MediaSourceNode media in video.Graph.Nodes.OfType<MediaSourceNode>())
+                    foreach (VideoSourceNode media in video.Graph.Nodes.OfType<VideoSourceNode>())
                     {
                         if (media.Source.Type != SourceType.Video) continue;
                         checks.Add(CheckOneAsync(video, media, canvasWidth, canvasHeight));
@@ -199,7 +199,7 @@ namespace EditSharp.Composite
             return true;
 
             static async Task<bool> CheckOneAsync(
-                VideoClip video, MediaSourceNode media, int canvasWidth, int canvasHeight)
+                VideoClip video, VideoSourceNode media, int canvasWidth, int canvasHeight)
             {
                 (int width, int height) = await MediaProbe.GetDimensionsAsync(media.Source.Path);
 
@@ -227,7 +227,7 @@ namespace EditSharp.Composite
                 foreach (Clip clip in channel.Clips)
                 {
                     if (clip is not VideoClip video) continue;
-                    if (!video.Graph.Nodes.OfType<MediaSourceNode>().Any(m => m.Source.Type == SourceType.Video)) continue;
+                    if (!video.Graph.Nodes.OfType<VideoSourceNode>().Any(m => m.Source.Type == SourceType.Video)) continue;
 
                     int lastVisibleFrame = Math.Max(0, (int)Math.Ceiling(clip.End.TotalSeconds * fps) - 1);
 

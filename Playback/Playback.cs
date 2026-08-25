@@ -667,7 +667,7 @@ namespace EditSharp.Playback
                 {
                     if (clip is not VideoClip video) continue;
 
-                    foreach (MediaSourceNode media in video.Graph.Nodes.OfType<MediaSourceNode>())
+                    foreach (VideoSourceNode media in video.Graph.Nodes.OfType<VideoSourceNode>())
                     {
                         if (media.Source.Type != SourceType.Video) continue;
 
@@ -719,7 +719,7 @@ namespace EditSharp.Playback
                 foreach (Clip clip in channel.Clips)
                 {
                     if (clip is not VideoClip video) continue;
-                    if (!video.Graph.Nodes.OfType<MediaSourceNode>().Any(m => m.Source.Type == SourceType.Video)) continue;
+                    if (!video.Graph.Nodes.OfType<VideoSourceNode>().Any(m => m.Source.Type == SourceType.Video)) continue;
                     if (position < clip.Start || position >= clip.End) continue;
 
                     offsets[clip] = position - clip.Start;

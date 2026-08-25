@@ -35,7 +35,7 @@ namespace EditSharp.Components.Clips
         // ---------------------------------------------------------------
  
         public static VideoClip CreateFromSource(Source source, TimeSpan start, TimeSpan duration) =>
-            new(Graph.CreateVideoGraph(new MediaSourceNode { Source = source })) { Start = start, Duration = duration };
+            new(Graph.CreateVideoGraph(new VideoSourceNode { Source = source })) { Start = start, Duration = duration };
  
         public static VideoClip CreateText(
             string content, TimeSpan start, TimeSpan duration,

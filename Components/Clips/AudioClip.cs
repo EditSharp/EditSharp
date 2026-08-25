@@ -24,7 +24,7 @@ namespace EditSharp.Components.Clips
         private AudioClip(Graph graph) => _graph = graph;
  
         public static AudioClip CreateFromSource(Source source, TimeSpan start, TimeSpan duration) =>
-            new(Graph.CreateAudioGraph(new MediaAudioSourceNode { Source = source })) { Start = start, Duration = duration };
+            new(Graph.CreateAudioGraph(new AudioSourceNode { Source = source })) { Start = start, Duration = duration };
  
         public static AudioClip CreateTone(
             TimeSpan start, TimeSpan duration, Waveform waveform = Waveform.Sine,

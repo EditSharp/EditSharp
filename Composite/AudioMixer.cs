@@ -99,7 +99,7 @@ namespace EditSharp.Composite
             {
                 resolvedInputs[node.Id] = node switch
                 {
-                    MediaAudioSourceNode media =>
+                    AudioSourceNode media =>
                         await PcmAudioDecoder.DecodeAsync(media.Source, clip.Duration, sampleRate, channels, token),
 
                     ToneGeneratorInputNode tone =>
