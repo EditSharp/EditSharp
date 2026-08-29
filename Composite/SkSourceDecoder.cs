@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using SkiaSharp;
 using EditSharp.Components;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -81,18 +83,70 @@ namespace EditSharp.Composite
         private readonly int _width;
         private readonly int _height;
         private readonly int _frameByteSize;
+        private readonly string _sourcePath;
+        private readonly IReadOnlyList<string> _ffmpegArgs;
         private byte[]? _lastFrameBytes;
         private bool _exhausted;
- 
-        private SkSourceDecoder(Process process, Stream stdout, int width, int height)
+
+        // Bounded capture of this decoder's own ffmpeg subprocess's stderr —
+        // see the constructor's remarks and NextFrame's "produced no frames
+        // at all" exception, which is what this exists for. Capped rather
+        // than unbounded: this process can live for a clip's whole visible
+        // duration (minutes), and -v error keeps normal output sparse, but
+        // nothing stops a pathological source from spamming per-frame
+        // decode warnings the entire time.
+        private const int MaxStderrCharsCaptured = 4096;
+        private readonly StringBuilder _stderrTail = new();
+        private readonly object _stderrLock = new();
+        private bool _stderrTruncated;
+
+        private SkSourceDecoder(
+            Process process, Stream stdout, int width, int height,
+            string sourcePath, IReadOnlyList<string> ffmpegArgs)
         {
             _process = process;
             _stdout = stdout;
             _width = width;
             _height = height;
             _frameByteSize = width * height * 4; // rgba8888 — see class remarks on format choice
+            _sourcePath = sourcePath;
+            _ffmpegArgs = ffmpegArgs;
+
+            // CAPTURING STDERR NOW, BOUNDED — this used to be deliberately
+            // skipped ("left unbuffered here rather than accumulating an
+            // unbounded StringBuilder for a long-lived process"), on the
+            // reasoning that a caller wanting stderr on failure should read
+            // process.StandardError itself. In practice nothing did, so a
+            // decode that produced zero frames threw with no way to tell
+            // "wrong path" from "corrupt/unsupported source" from "seek
+            // landed past EOF" from "filter graph rejected this input" —
+            // all four looked identical from the outside. Capping the
+            // capture (MaxStderrCharsCaptured) keeps the original memory
+            // concern addressed while still surfacing ffmpeg's own error
+            // text on the one path that actually needs it — see NextFrame.
+            _process.ErrorDataReceived += OnErrorDataReceived;
+            _process.BeginErrorReadLine();
         }
- 
+
+        private void OnErrorDataReceived(object? sender, DataReceivedEventArgs e)
+        {
+            if (e.Data == null) return;
+
+            lock (_stderrLock)
+            {
+                if (_stderrTruncated) return;
+
+                if (_stderrTail.Length >= MaxStderrCharsCaptured)
+                {
+                    _stderrTail.AppendLine("... (further ffmpeg stderr output truncated)");
+                    _stderrTruncated = true;
+                    return;
+                }
+
+                _stderrTail.AppendLine(e.Data);
+            }
+        }
+
         /// <summary>
         /// Starts decoding `sourcePath` from `sourceStartSeconds` (the
         /// clip's own trim offset into the file — ONE seek here, paid once
@@ -123,15 +177,15 @@ namespace EditSharp.Composite
         {
             plan ??= DecodeHwAccelPlan.Software;
             string filter = plan.BuildFilterGraph(fps, width, height);
- 
-            var args = new System.Collections.Generic.List<string>
+
+            var args = new List<string>
             {
                 "-y", "-v", "error",
             };
- 
+
             args.AddRange(GraphUtilities.FilterThreadingArgs());
             args.AddRange(plan.HwAccelArgs);
- 
+
             if (fastOpen)
             {
                 // See the class remarks' FAST-OPEN section. 32 KiB is
@@ -147,13 +201,13 @@ namespace EditSharp.Composite
                 args.Add("-analyzeduration");
                 args.Add("0");
             }
- 
+
             if (sourceStartSeconds > 0)
             {
                 args.Add("-ss");
                 args.Add(GraphUtilities.Num(sourceStartSeconds));
             }
- 
+
             args.AddRange(new[]
             {
                 "-i", sourcePath,
@@ -163,7 +217,7 @@ namespace EditSharp.Composite
                 "-an",
                 "pipe:1",
             });
- 
+
             var psi = new ProcessStartInfo
             {
                 FileName = EditSharpConfig.FfmpegPath,
@@ -173,11 +227,11 @@ namespace EditSharp.Composite
                 CreateNoWindow = true,
             };
             foreach (string arg in args) psi.ArgumentList.Add(arg);
- 
+
             var sw = Stopwatch.StartNew();
             var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             process.Start();
- 
+
             // TEMPORARY INSTRUMENTATION — process spawn time alone (before
             // any frame has been read), split out from NextFrame's own
             // cumulative pipe-read timing, specifically to answer "is
@@ -190,18 +244,15 @@ namespace EditSharp.Composite
                 $"SkSourceDecoder.Start('{sourcePath}', fastOpen={fastOpen}): process spawned in " +
                 $"{sw.ElapsedMilliseconds}ms (stream probing/seek/first-frame cost is NOT included — " +
                 "see NextFrame's own timing for that).");
- 
-            // Deliberately NOT reading stderr asynchronously the way
-            // NoiseRenderer/OptimizedMediaBuilder do for a short-lived
-            // build step — this process lives for the clip's whole visible
-            // duration. A caller that wants stderr surfaced on failure
-            // should read process.StandardError itself; left unbuffered
-            // here rather than accumulating an unbounded StringBuilder for
-            // a long-lived process. Flagged, not silently decided as fine
-            // for every use case.
-            return new SkSourceDecoder(process, process.StandardOutput.BaseStream, width, height);
+
+            // sourcePath and the full args list are handed to the instance
+            // purely for diagnostics — see the constructor's stderr-capture
+            // remarks and NextFrame's "produced no frames at all" exception,
+            // which is where both actually get used.
+            return new SkSourceDecoder(
+                process, process.StandardOutput.BaseStream, width, height, sourcePath, args);
         }
- 
+
         /// <summary>
         /// Advances to and returns the next frame in this clip's own
         /// sequential timeline. Must be called exactly once per output
@@ -221,7 +272,7 @@ namespace EditSharp.Composite
         // and "is decode slow overall" are visible without re-deriving from
         // a series of per-call numbers by hand.
         private TimeSpan _cumulativeReadTime = TimeSpan.Zero;
- 
+
         /// <summary>
         /// TEMPORARY INSTRUMENTATION — added specifically to isolate the
         /// video-clip blueprint's per-frame cost, which was disproportionately
@@ -247,11 +298,13 @@ namespace EditSharp.Composite
                 int totalRead = ReadFully(_stdout, buffer);
                 sw.Stop();
                 _cumulativeReadTime += sw.Elapsed;
- 
+
+                /*
                 EditSharpConfig.Logger.LogVerbose(
                     $"SkSourceDecoder: pipe read took {sw.ElapsedMilliseconds}ms this frame " +
                     $"({_cumulativeReadTime.TotalMilliseconds:F0}ms cumulative for this decoder).");
- 
+                */
+
                 if (totalRead == _frameByteSize)
                 {
                     _lastFrameBytes = buffer;
@@ -267,19 +320,68 @@ namespace EditSharp.Composite
                     _exhausted = true;
                 }
             }
- 
+
             if (_lastFrameBytes == null)
-                throw new InvalidOperationException(
-                    "SkSourceDecoder produced no frames at all — source may be " +
-                    "empty, unreadable, or the initial seek landed past its end.");
- 
+                throw new InvalidOperationException(BuildNoFramesMessage());
+
             return WrapAsImage(_lastFrameBytes);
         }
- 
+
+        /// <summary>
+        /// Builds the full diagnostic message for "produced no frames at
+        /// all" — see the constructor's remarks on why stderr capture was
+        /// added specifically for this. Everything here is information a
+        /// consumer app's own bug hunt needs and previously had no way to
+        /// get from this exception alone: which source and ffmpeg
+        /// invocation actually failed, whether the subprocess is still
+        /// running or already exited (and with what code), and whatever
+        /// ffmpeg itself said about why on stderr.
+        /// </summary>
+        private string BuildNoFramesMessage()
+        {
+            string processState;
+            try
+            {
+                processState = _process.HasExited
+                    ? $"ffmpeg exited with code {_process.ExitCode}"
+                    : "ffmpeg is still running (the pipe produced zero bytes without the process exiting — " +
+                      "likely blocked on something other than a clean EOF)";
+            }
+            catch (InvalidOperationException)
+            {
+                // HasExited/ExitCode can themselves throw in narrow race
+                // windows around process teardown — not worth failing the
+                // whole diagnostic message over.
+                processState = "ffmpeg process state unavailable";
+            }
+
+            string stderrText;
+            lock (_stderrLock)
+            {
+                stderrText = _stderrTail.Length > 0
+                    ? _stderrTail.ToString().TrimEnd()
+                    : "(no stderr output captured — ffmpeg logged nothing at -v error before this point)";
+            }
+
+            var message = new StringBuilder();
+            message.AppendLine(
+                "SkSourceDecoder produced no frames at all — source may be empty, unreadable, or " +
+                "the initial seek landed past its end.");
+            message.AppendLine($"  Source path: '{_sourcePath}'");
+            message.AppendLine($"  Decode target: {_width}x{_height} rgba8888");
+            message.AppendLine($"  Process state: {processState}");
+            message.AppendLine($"  ffmpeg args: {string.Join(' ', _ffmpegArgs)}");
+            message.AppendLine("  ffmpeg stderr:");
+            foreach (string line in stderrText.Split('\n'))
+                message.AppendLine($"    {line.TrimEnd('\r')}");
+
+            return message.ToString().TrimEnd();
+        }
+
         private SKImage WrapAsImage(byte[] pixels)
         {
             var info = new SKImageInfo(_width, _height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
- 
+
             // Copies into an SKData rather than pinning the caller's buffer
             // directly — NextFrame reuses/overwrites its buffer on the next
             // call (for non-frozen frames), so the SKImage needs its own
@@ -290,7 +392,7 @@ namespace EditSharp.Composite
             SKData data = SKData.CreateCopy(pixels);
             return SKImage.FromPixels(info, data, _width * 4);
         }
- 
+
         private static int ReadFully(Stream stream, byte[] buffer)
         {
             int offset = 0;
@@ -302,7 +404,7 @@ namespace EditSharp.Composite
             }
             return offset;
         }
- 
+
         /// <summary>
         /// Terminates the decode subprocess. Must be called once this
         /// clip's visible window ends, even if the source hadn't reached
@@ -324,10 +426,10 @@ namespace EditSharp.Composite
             }
             finally
             {
+                _process.ErrorDataReceived -= OnErrorDataReceived;
                 _stdout.Dispose();
                 _process.Dispose();
             }
         }
     }
 }
- 

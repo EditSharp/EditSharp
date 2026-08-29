@@ -6,12 +6,12 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 using EditSharp.Components;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
     /// Encoder selection for the frame-by-frame render's final mux/encode step
-    /// (see Renderer.FinalizeOutputAsync) — resolving a VideoCodec +
+    /// (see Renderer.RenderAndEncodeAsync) — resolving a VideoCodec +
     /// HardwareAccelerator into an actual ffmpeg encoder name, including
     /// hardware-encoder probing with a software fallback.
     /// </summary>
@@ -45,29 +45,29 @@ namespace EditSharp.Composite
         {
             if (codec == VideoCodec.GIF)
                 return ("gif", new List<string>());
- 
+
             if (hwAccel == HardwareAccelerator.GPU)
             {
                 if (Constants.HardwareCodecNames.TryGetValue(codec, out string[]? candidates))
                 {
                     var failures = new List<string>();
- 
+
                     foreach (string candidateName in candidates)
                     {
                         List<string> qualityArgs = GetHardwareQualityArgs(candidateName);
                         EncoderProbeResult probe = await ProbeEncoderCachedAsync(candidateName, qualityArgs);
- 
+
                         if (probe.Succeeded)
                         {
                             EditSharpConfig.Logger.Log($"Encode: using hardware encoder '{candidateName}'.");
                             return (candidateName, qualityArgs);
                         }
- 
+
                         failures.Add($"  {candidateName}: {probe.Describe()}");
                         EditSharpConfig.Logger.LogVerbose(
                             $"Encode: hardware candidate '{candidateName}' unavailable ({probe.Describe()}), trying next.");
                     }
- 
+
                     // GPU requested, but no hardware candidate for this codec
                     // worked. Report every candidate's REAL failure, not just
                     // that it "didn't work" — a wrong quality flag, a missing
@@ -86,7 +86,7 @@ namespace EditSharp.Composite
                         "defined at all (see Constants.HardwareCodecNames). Encoding on the CPU.");
                 }
             }
- 
+
             string softwareEncoderName = Constants.VideoCodecNames[codec];
             var softwareQualityArgs = new List<string> { "-crf", "21" };
             if (codec == VideoCodec.AV1)
@@ -95,10 +95,10 @@ namespace EditSharp.Composite
                 softwareQualityArgs.Add("-b:v");
                 softwareQualityArgs.Add("0");
             }
- 
+
             return (softwareEncoderName, softwareQualityArgs);
         }
- 
+
         /// <summary>
         /// Per-vendor quality-control args, keyed on the winning encoder name's
         /// own suffix (_nvenc/_qsv/_amf) rather than trying to share one flag set
@@ -129,13 +129,13 @@ namespace EditSharp.Composite
                     "-b:v", "0",
                 };
             }
- 
+
             if (encoderName.EndsWith("_qsv", StringComparison.Ordinal))
             {
                 // ICQ (Intelligent Constant Quality) mode — UNVERIFIED, see class remarks.
                 return new List<string> { "-preset", "medium", "-global_quality", "21" };
             }
- 
+
             if (encoderName.EndsWith("_amf", StringComparison.Ordinal))
             {
                 // Constant-QP mode — UNVERIFIED, see class remarks.
@@ -148,7 +148,7 @@ namespace EditSharp.Composite
                     "-qp_b", "21",
                 };
             }
- 
+
             // An encoder name that doesn't match any known vendor suffix — rather
             // than guess a THIRD time, use the encoder's own defaults and say so.
             EditSharpConfig.Logger.LogWarning(
@@ -156,7 +156,7 @@ namespace EditSharp.Composite
                 "using the encoder's own defaults instead of guessing.");
             return new List<string>();
         }
- 
+
         /// <summary>
         /// Resolves the full decode plan (hwaccel args + which scale filter to
         /// use, see DecodeHwAccelPlan) for a source, or DecodeHwAccelPlan.Software
@@ -185,11 +185,11 @@ namespace EditSharp.Composite
         {
             if (hwAccel != HardwareAccelerator.GPU)
                 return DecodeHwAccelPlan.Software;
- 
+
             foreach ((string candidate, string? outputFormat, string? scaleFilter) in Constants.DecodeHwAccelCandidates)
             {
                 var plan = new DecodeHwAccelPlan(candidate, outputFormat, scaleFilter);
- 
+
                 if (await IsDecodePlanAvailableAsync(plan, sourcePath))
                 {
                     EditSharpConfig.Logger.LogVerbose(
@@ -198,18 +198,18 @@ namespace EditSharp.Composite
                         $" for '{sourcePath}'.");
                     return plan;
                 }
- 
+
                 EditSharpConfig.Logger.LogVerbose(
                     $"Decode: candidate '{candidate}' unavailable for '{sourcePath}', trying next.");
             }
- 
+
             EditSharpConfig.Logger.LogWarning(
                 $"HardwareAccelerator.GPU requested, but no decode hwaccel works for '{sourcePath}' " +
                 "on this machine. Falling back to software decode for this source.");
- 
+
             return DecodeHwAccelPlan.Software;
         }
- 
+
         // Keyed on (candidate, sourcePath) rather than plan identity — hwaccel
         // support can legitimately differ between two sources with different
         // codecs/profiles, unlike encoder availability which only depends on the
@@ -217,11 +217,11 @@ namespace EditSharp.Composite
         // into two pieces on the timeline) doesn't re-probe.
         private static readonly ConcurrentDictionary<(string Candidate, string Path), Task<bool>>
             DecodePlanAvailabilityCache = new();
- 
+
         private static Task<bool> IsDecodePlanAvailableAsync(DecodeHwAccelPlan plan, string sourcePath) =>
             DecodePlanAvailabilityCache.GetOrAdd(
                 (plan.Candidate, sourcePath), _ => ProbeDecodePlanAsync(plan, sourcePath));
- 
+
         /// <summary>
         /// Whether ffmpeg can actually run `plan`'s REAL intended filter chain
         /// against `sourcePath` on this machine right now — a real 1-frame trial
@@ -243,16 +243,16 @@ namespace EditSharp.Composite
                     "-vf", plan.BuildFilterGraph(fps: 1, width: 320, height: 240),
                     "-frames:v", "1", "-f", "null", "-",
                 });
- 
+
                 (int exitCode, string stderr) = await RunFfmpegAsync(args);
- 
+
                 if (exitCode != 0)
                 {
                     EditSharpConfig.Logger.LogVerbose(
                         $"Decode: probe for '{plan.Candidate}' against '{sourcePath}' failed " +
                         $"(exit {exitCode}): {stderr.Trim()}");
                 }
- 
+
                 return exitCode == 0;
             }
             catch (Exception ex)
@@ -262,7 +262,7 @@ namespace EditSharp.Composite
                 return false;
             }
         }
- 
+
         /// <summary>The outcome of one encoder probe, including WHY it failed.</summary>
         private readonly record struct EncoderProbeResult(bool Succeeded, int ExitCode, string Error)
         {
@@ -273,15 +273,15 @@ namespace EditSharp.Composite
                         ? $"exit {ExitCode}, no error output"
                         : $"exit {ExitCode}: {Error.Trim()}";
         }
- 
+
         // Probing spins up a real ffmpeg process, so results are cached per encoder
         // name for the process's lifetime rather than re-probed on every render.
         private static readonly ConcurrentDictionary<string, Task<EncoderProbeResult>> EncoderProbeCache = new();
- 
+
         private static Task<EncoderProbeResult> ProbeEncoderCachedAsync(
             string encoderName, List<string> qualityArgs) =>
             EncoderProbeCache.GetOrAdd(encoderName, _ => ProbeEncoderAsync(encoderName, qualityArgs));
- 
+
         /// <summary>
         /// Whether ffmpeg can actually use the given encoder on this machine right
         /// now — a 1-frame trial encode against a trivial lavfi source, discarded
@@ -325,7 +325,7 @@ namespace EditSharp.Composite
                 };
                 args.AddRange(qualityArgs);
                 args.AddRange(new[] { "-pix_fmt", "yuv420p", "-f", "null", "-" });
- 
+
                 (int exitCode, string stderr) = await RunFfmpegAsync(args);
                 return new EncoderProbeResult(exitCode == 0, exitCode, stderr);
             }
@@ -336,7 +336,7 @@ namespace EditSharp.Composite
                 return new EncoderProbeResult(false, -1, $"probe threw: {ex.Message}");
             }
         }
- 
+
         /// <summary>
         /// Runs ffmpeg with `args` to completion, returning its exit code and
         /// captured stderr. Both redirected streams are drained concurrently with
@@ -354,16 +354,15 @@ namespace EditSharp.Composite
                 CreateNoWindow = true,
             };
             foreach (string arg in args) psi.ArgumentList.Add(arg);
- 
+
             using var process = new Process { StartInfo = psi };
             process.Start();
- 
+
             Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
             Task<string> stderrTask = process.StandardError.ReadToEndAsync();
             await Task.WhenAll(stdoutTask, stderrTask, process.WaitForExitAsync());
- 
+
             return (process.ExitCode, stderrTask.Result);
         }
     }
 }
- 

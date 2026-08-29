@@ -2,7 +2,7 @@ using EditSharp;
 using System;
 using System.Globalization;
 using System.IO;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -33,12 +33,12 @@ namespace EditSharp.Composite
     internal static class GraphUtilities
     {
         public static string Sec(TimeSpan t) => Num(t.TotalSeconds);
- 
+
         public static string Num(double v) => v.ToString("F4", CultureInfo.InvariantCulture);
- 
+
         public static double Clamp(double value, double min, double max) =>
             Math.Max(min, Math.Min(value, Math.Max(min, max)));
- 
+
         /// <summary>
         /// The GLOBAL ffmpeg options pinning libavfilter's thread count, to be
         /// added to every invocation that runs a filter graph.
@@ -96,7 +96,7 @@ namespace EditSharp.Composite
         {
             string threads = Math.Max(1, EditSharpConfig.FilterThreads)
                 .ToString(CultureInfo.InvariantCulture);
- 
+
             return
             [
                 "-filter_threads", threads,
@@ -104,7 +104,7 @@ namespace EditSharp.Composite
                 "-sws_backends", EditSharpConfig.SwsBackends,
             ];
         }
- 
+
         /// <summary>
         /// Paths for temp files, routed under EditSharpConfig.TempDirectory
         /// rather than Windows' %TEMP% — see that property's remarks for why:
@@ -125,18 +125,19 @@ namespace EditSharp.Composite
             Directory.CreateDirectory(dir);
             return Path.Combine(dir, fileName);
         }
- 
+
         public static string GetVideoTempFilePath(string fileName)
         {
             string dir = Path.Combine(EditSharpConfig.TempDirectory, "Video");
             Directory.CreateDirectory(dir);
             return Path.Combine(dir, fileName);
         }
- 
+
         /// <summary>
-        /// Scratch path for the new real-audio-pipeline's raw PCM temp files
-        /// (AudioMixer's master buffer, on its way into Renderer.FinalizeOutputAsync's
-        /// ffmpeg mux) — same lazy-subfolder convention as Image/Video above.
+        /// Scratch path for the real-audio-pipeline's raw PCM temp files
+        /// (AudioMixer's master buffer, on its way into Renderer.
+        /// RenderAndEncodeAsync's ffmpeg mux) — same lazy-subfolder convention
+        /// as Image/Video above.
         /// </summary>
         public static string GetAudioTempFilePath(string fileName)
         {
@@ -146,4 +147,3 @@ namespace EditSharp.Composite
         }
     }
 }
- 

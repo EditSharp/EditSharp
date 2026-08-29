@@ -27,14 +27,60 @@ namespace EditSharp.Render
     ///      (RenderContentPreparation). TextInputNode/ColorGeneratorInputNode/
     ///      NoiseInputNode/TimelineVideoInputNode need no such up-front prep
     ///      any more — see RenderContentPreparation's own remarks.
-    ///   2. Render every output frame SEQUENTIALLY directly against an
-    ///      in-process SKCanvas (SkFrameCompositor), appending each frame's
-    ///      raw RGBA8888 bytes to a single growing lossless accumulator
-    ///      file. A Video-type MediaSourceNode's SkSourceDecoder is opened on
-    ///      its clip's first visible frame and disposed once that clip's
-    ///      visible window ends (SkClipContentSource).
-    ///   3. Mux that accumulated video against the timeline's audio
-    ///      (FinalizeOutputAsync) and encode to Blueprint's chosen codec.
+    ///   2. Mix the timeline's audio once (AudioMixer.ComposeAsync) and spawn
+    ///      the SINGLE ffmpeg process that will do the real mux + encode for
+    ///      the whole render, with its stdin left open as a raw-video pipe.
+    ///   3. Render every output frame SEQUENTIALLY directly against an
+    ///      in-process SKCanvas (SkFrameCompositor), writing each frame's raw
+    ///      RGBA8888 bytes straight into that ffmpeg process's stdin as it's
+    ///      produced — see STREAMING REWRITE below. A Video-type
+    ///      MediaSourceNode's SkSourceDecoder is opened on its clip's first
+    ///      visible frame and disposed once that clip's visible window ends
+    ///      (SkClipContentSource).
+    ///   4. Close stdin once every frame has been written (ffmpeg's rawvideo
+    ///      demuxer treats that exactly like reaching EOF on a file) and wait
+    ///      for ffmpeg to finish encoding.
+    ///
+    /// STREAMING REWRITE — WHY THIS EXISTS: this used to append every frame's
+    /// raw, uncompressed RGBA8888 bytes to a single growing "accumulator"
+    /// temp file on disk, and only handed that file to ffmpeg for mux/encode
+    /// once every frame had already been rendered. At 1920x1080 that's
+    /// 8,294,400 bytes/frame (~7.9MiB); an 18-minute 30fps render is 32,400
+    /// frames, i.e. roughly 268GB of raw bytes hitting disk before a single
+    /// byte of that data was ever compressed — reported as "hundreds of
+    /// gigabytes of writes" and confirmed to match this arithmetic almost
+    /// exactly, not a leak or a runaway loop. Frame rendering now writes
+    /// directly into the SAME ffmpeg process's stdin pipe that does the real
+    /// mux/encode (mirroring how SkSourceDecoder already pipes raw frames IN
+    /// from an ffmpeg decode process — this is the same pattern on the encode
+    /// side), so raw video never touches disk at all: ffmpeg compresses each
+    /// frame into the target codec as it arrives instead of after the whole
+    /// timeline has already been written out losslessly. Disk usage for the
+    /// video side of a render is now effectively just the size of the final
+    /// encoded output file.
+    ///
+    /// AUDIO STILL GOES THROUGH A SMALL TEMP FILE, DELIBERATELY: the mixed
+    /// master PCM (see AudioMixer.ComposeAsync) is orders of magnitude
+    /// smaller than raw video (48kHz stereo f32 is 384,000 bytes/sec, so an
+    /// 18-minute timeline is ~414MB, not hundreds of gigabytes) and ffmpeg
+    /// needs it as a real, complete, seekable input at process-start time —
+    /// unlike the video side, it isn't produced incrementally by anything
+    /// this class does. A second OS pipe/named-pipe could avoid even that,
+    /// but isn't pursued here: it would need real cross-platform machinery
+    /// (named pipes on Windows, a FIFO on Unix) for a temp file that was
+    /// never the actual disk-usage problem.
+    ///
+    /// ONE CONSEQUENCE OF STREAMING WORTH FLAGGING: because AudioMixer.
+    /// ComposeAsync's result has to be written to that temp file and handed
+    /// to ffmpeg as an -i argument BEFORE ffmpeg can be spawned — and frame
+    /// rendering can't start streaming into ffmpeg's stdin until ffmpeg
+    /// exists — audio composition is now awaited before frame rendering
+    /// begins, rather than run concurrently with it the way this used to
+    /// work. It still overlaps content preparation and GPU/decoder setup
+    /// above it, which is normally the larger win of the two; audio mixing
+    /// itself is a one-shot in-memory computation, not a per-frame cost, so
+    /// this is expected to be a minor, not a proportional, regression versus
+    /// however long the frame-by-frame render itself takes.
     ///
     /// "CLIPS ARE GRAPHS" REWRITE: RenderContentPreparation's
     /// nativeSizes/decodePlans/decodeSourcePaths dictionaries are now keyed
@@ -43,10 +89,10 @@ namespace EditSharp.Render
     /// PrepareContentAsync used to take are both gone from that call — text
     /// rasterization now happens lazily inside SkClipContentSource itself,
     /// which owns cleaning up its own temp files on Dispose (this file's own
-    /// tempFiles bag is still used for the render's OWN temp files — the raw
-    /// video accumulator and the raw audio PCM — just no longer shared with
-    /// content preparation). FrameStateResolver.Resolve no longer takes a
-    /// nativeSizes parameter at all — see its own remarks.
+    /// tempFiles bag is now used only for the render's OWN raw audio PCM temp
+    /// file — the raw video accumulator described above is gone entirely,
+    /// see the STREAMING REWRITE remarks). FrameStateResolver.Resolve no
+    /// longer takes a nativeSizes parameter at all — see its own remarks.
     ///
     /// REWRITE ("channels split by kind"): the SkSurfacePool seed count below
     /// now uses timeline.VideoChannels.Count specifically (only a
@@ -114,13 +160,6 @@ namespace EditSharp.Render
 
             int totalFrames = Math.Max(1, (int)Math.Ceiling(timeline.Duration.TotalSeconds * fps));
 
-            string accumulatorPath = GraphUtilities.GetVideoTempFilePath($"frames_{Guid.NewGuid():N}.raw");
-            tempFiles.Add(accumulatorPath);
-
-            EditSharpConfig.Logger.Log(
-                $"Rendering {totalFrames} frame(s) at {width}x{height}@{fps}fps " +
-                "(sequential, in-process Skia compositor).");
-
             using var contentSource = new SkClipContentSource(
                 fps, hwAccel, nativeSizes, decodePlans, decodeSourcePaths: decodeSourcePaths);
 
@@ -129,26 +168,154 @@ namespace EditSharp.Render
             using var surfacePool = new SkSurfacePool(
                 gpuContext.GRContext, width, height, timeline.VideoChannels.Count);
 
-            //audio evaluation touches no GPU/Skia state at all, so it's kicked
-            //off concurrently with frame rendering rather than after it —
-            //independent work, no reason to serialize the two
-            Task<AudioBuffer> audioTask = AudioMixer.ComposeAsync(timeline, AudioSampleRate, AudioChannelCount);
+            //Audio mixing touches no GPU/Skia state at all, so nothing stops
+            //it running concurrently with the GPU/decoder setup above — but
+            //it IS awaited here, before frame rendering starts, rather than
+            //run concurrently with the frame loop the way this used to work.
+            //See this class's STREAMING REWRITE remarks for why: the ffmpeg
+            //process frame rendering streams into can't be spawned until the
+            //mixed audio has already been written to a real, complete file
+            //ffmpeg can open as an input.
+            AudioBuffer masterAudio = await AudioMixer.ComposeAsync(timeline, AudioSampleRate, AudioChannelCount);
 
-            using (var accumulator = new FileStream(
-                accumulatorPath, FileMode.Create, FileAccess.Write, FileShare.None,
-                bufferSize: 1 << 20))
+            string audioPath = GraphUtilities.GetAudioTempFilePath($"master_{Guid.NewGuid():N}.pcm");
+            await File.WriteAllBytesAsync(audioPath, masterAudio.ToFloat32Bytes());
+            tempFiles.Add(audioPath);
+
+            EditSharpConfig.Logger.Log(
+                $"Rendering {totalFrames} frame(s) at {width}x{height}@{fps}fps " +
+                "(sequential, in-process Skia compositor, streamed directly into ffmpeg — " +
+                "no raw video temp file).");
+
+            var renderSw = Stopwatch.StartNew();
+            await RenderAndEncodeAsync(
+                timeline, fps, width, height, contentSource, decoderReleaseSchedule, totalFrames,
+                surfacePool, audioPath, masterAudio, blueprint);
+            EditSharpConfig.Logger.Log($"Render + encode complete in {renderSw.ElapsedMilliseconds}ms.");
+        }
+
+        /// <summary>
+        /// Spawns the render's single ffmpeg mux/encode process up front, with
+        /// its stdin left open as a raw-video pipe (`-i pipe:0`), then renders
+        /// every output frame directly into that pipe as it's composited —
+        /// see this class's STREAMING REWRITE remarks for why. ffmpeg
+        /// compresses each frame into the target codec as it arrives rather
+        /// than waiting for the whole timeline to be written out losslessly
+        /// first, so raw video never touches disk.
+        /// </summary>
+        private static async Task RenderAndEncodeAsync(
+            Timeline timeline, int fps, int width, int height,
+            SkClipContentSource contentSource,
+            Dictionary<int, List<Clip>> decoderReleaseSchedule,
+            int totalFrames, SkSurfacePool surfacePool,
+            string audioPath, AudioBuffer masterAudio, Blueprint blueprint)
+        {
+            bool isGif = blueprint.RenderSettings.VideoCodec == VideoCodec.GIF;
+            (string videoEncoderName, List<string> videoQualityArgs) =
+                await FfmpegRunner.GetVideoEncoderSettingsAsync(
+                    blueprint.RenderSettings.VideoCodec, blueprint.RenderSettings.HardwareAccelerator);
+
+            var args = new List<string> { "-y", "-v", "error" };
+            args.AddRange(GraphUtilities.FilterThreadingArgs());
+
+            args.AddRange(
+            [
+                "-f", "rawvideo",
+                "-pix_fmt", SkOutputFormat.FfmpegPixelFormat,
+                "-s", $"{width}x{height}",
+                "-r", fps.ToString(CultureInfo.InvariantCulture),
+                //STREAMED, NOT A TEMP FILE — this process's own stdin. Frame
+                //rendering below writes directly into this pipe as each frame
+                //is composited; ffmpeg's rawvideo demuxer just reads
+                //sequentially off it exactly like it would a file, and
+                //closing the pipe (below) is what tells it input has ended,
+                //the same way reaching EOF on a file would.
+                "-i", "pipe:0",
+            ]);
+
+            if (!isGif)
+            {
+                args.AddRange(
+                [
+                    "-f", "f32le",
+                    "-ar", masterAudio.SampleRate.ToString(CultureInfo.InvariantCulture),
+                    "-ac", masterAudio.Channels.ToString(CultureInfo.InvariantCulture),
+                    "-i", audioPath,
+                ]);
+            }
+
+            args.Add("-map");
+            args.Add("0:v");
+
+            if (!isGif)
+            {
+                args.Add("-map");
+                args.Add("1:a");
+            }
+
+            if (isGif)
+            {
+                args.Add("-c:v");
+                args.Add("gif");
+            }
+            else
+            {
+                args.Add("-c:v");
+                args.Add(videoEncoderName);
+                args.AddRange(videoQualityArgs);
+
+                string audioCodecName = Constants.AudioCodecNames[blueprint.RenderSettings.AudioCodec];
+                args.Add("-c:a");
+                args.Add(audioCodecName);
+                args.Add("-b:a");
+                args.Add("192k");
+                args.Add("-shortest");
+                args.Add("-pix_fmt");
+                args.Add("yuv420p");
+            }
+
+            args.Add(blueprint.OutputDirectory);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = EditSharpConfig.FfmpegPath,
+                RedirectStandardInput = true,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (string arg in args) psi.ArgumentList.Add(arg);
+
+            using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            var stderr = new StringBuilder();
+            process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
+
+            process.Start();
+            process.BeginErrorReadLine();
+            process.BeginOutputReadLine();
+
+            Stream stdin = process.StandardInput.BaseStream;
+            try
             {
                 await RenderAllFramesAsync(
                     timeline, fps, width, height, contentSource,
-                    decoderReleaseSchedule, totalFrames, accumulator, surfacePool);
+                    decoderReleaseSchedule, totalFrames, stdin, surfacePool);
+            }
+            finally
+            {
+                //Always close stdin, even if frame rendering threw —
+                //otherwise ffmpeg blocks forever waiting for more input that
+                //will never arrive, and the process (and this render) hangs
+                //instead of surfacing the real exception.
+                stdin.Close();
             }
 
-            AudioBuffer masterAudio = await audioTask;
+            await process.WaitForExitAsync();
 
-            EditSharpConfig.Logger.Log("Finalizing output (mux + encode)...");
-            var finalizeSw = Stopwatch.StartNew();
-            await FinalizeOutputAsync(accumulatorPath, masterAudio, width, height, fps, blueprint, tempFiles);
-            EditSharpConfig.Logger.Log($"Finalize complete in {finalizeSw.ElapsedMilliseconds}ms.");
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException(
+                    $"ffmpeg exited with code {process.ExitCode} rendering output:\n{stderr}");
         }
 
         private static async Task RenderAllFramesAsync(
@@ -190,106 +357,6 @@ namespace EditSharp.Render
                     $"Rendered frame {frameIndex + 1}/{totalFrames} " +
                     $"({frameDeltaMs}ms this frame, {currentElapsedMs}ms elapsed).");
             }
-        }
-
-        /// <summary>
-        /// Muxes the accumulated lossless video against the timeline's
-        /// already fully-mixed, already graph-evaluated master AudioBuffer
-        /// and encodes to Blueprint's chosen codec. No filter_complex is
-        /// built for audio at all any more — the buffer is written to a raw
-        /// f32le temp file and mapped as a second plain input, since all the
-        /// real mixing/effects work already happened in AudioMixer.ComposeAsync.
-        /// </summary>
-        private static async Task FinalizeOutputAsync(
-            string accumulatorPath, AudioBuffer masterAudio, int width, int height, int fps,
-            Blueprint blueprint, ConcurrentBag<string> tempFiles)
-        {
-            string audioPath = GraphUtilities.GetAudioTempFilePath($"master_{Guid.NewGuid():N}.pcm");
-            await File.WriteAllBytesAsync(audioPath, masterAudio.ToFloat32Bytes());
-            tempFiles.Add(audioPath);
-
-            bool isGif = blueprint.RenderSettings.VideoCodec == VideoCodec.GIF;
-            (string videoEncoderName, List<string> videoQualityArgs) =
-                await FfmpegRunner.GetVideoEncoderSettingsAsync(
-                    blueprint.RenderSettings.VideoCodec, blueprint.RenderSettings.HardwareAccelerator);
-
-            var args = new List<string> { "-y", "-v", "error" };
-            args.AddRange(GraphUtilities.FilterThreadingArgs());
-
-            args.AddRange(new[]
-            {
-                "-f", "rawvideo",
-                "-pix_fmt", SkOutputFormat.FfmpegPixelFormat,
-                "-s", $"{width}x{height}",
-                "-r", fps.ToString(CultureInfo.InvariantCulture),
-                "-i", accumulatorPath,
-            });
-
-            if (!isGif)
-            {
-                args.AddRange(new[]
-                {
-                    "-f", "f32le",
-                    "-ar", masterAudio.SampleRate.ToString(CultureInfo.InvariantCulture),
-                    "-ac", masterAudio.Channels.ToString(CultureInfo.InvariantCulture),
-                    "-i", audioPath,
-                });
-            }
-
-            args.Add("-map");
-            args.Add("0:v");
-
-            if (!isGif)
-            {
-                args.Add("-map");
-                args.Add("1:a");
-            }
-
-            if (isGif)
-            {
-                args.Add("-c:v");
-                args.Add("gif");
-            }
-            else
-            {
-                args.Add("-c:v");
-                args.Add(videoEncoderName);
-                args.AddRange(videoQualityArgs);
-
-                string audioCodecName = Constants.AudioCodecNames[blueprint.RenderSettings.AudioCodec];
-                args.Add("-c:a");
-                args.Add(audioCodecName);
-                args.Add("-b:a");
-                args.Add("192k");
-                args.Add("-shortest");
-                args.Add("-pix_fmt");
-                args.Add("yuv420p");
-            }
-
-            args.Add(blueprint.OutputDirectory);
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = EditSharpConfig.FfmpegPath,
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            foreach (string arg in args) psi.ArgumentList.Add(arg);
-
-            using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-            var stderr = new StringBuilder();
-            process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
-
-            process.Start();
-            process.BeginErrorReadLine();
-            process.BeginOutputReadLine();
-            await process.WaitForExitAsync();
-
-            if (process.ExitCode != 0)
-                throw new InvalidOperationException(
-                    $"ffmpeg exited with code {process.ExitCode} finalizing output:\n{stderr}");
         }
 
         private static void Validate(Blueprint blueprint)
