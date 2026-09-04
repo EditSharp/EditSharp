@@ -84,59 +84,106 @@ namespace EditSharp.Playback
     ///
     /// PAUSE VS STOP (PlaybackPauseGate): genuinely different operations.
     ///
-    /// I-FRAME-ONLY SCRUB/REVERSE (KeyframeIndex / ScrubFrameSource /
-    /// SkSourceDecoder.DecodeSingleFrameAsync): ScrubToAsync and reverse
-    /// playback (Speed &lt; 0) share ONE mechanism, deliberately — both need
-    /// "show me approximately this arbitrary position, instantly, with no
-    /// buffering," which is exactly what jumping straight to the nearest
-    /// I-frame gives for free (every frame is independently seekable at
-    /// the container level; nothing else needs decoding to reach it).
-    /// Neither depends on OptimizedMediaCache/pre-built proxy media any
-    /// more — both decode straight from each clip's own original source via
-    /// a per-source keyframe-timestamp index (KeyframeIndex, one ffprobe
-    /// scan, cached) and a one-shot ffmpeg decode seeked to an exact
-    /// keyframe timestamp (SkSourceDecoder.DecodeSingleFrameAsync). The
-    /// trade-off, named not hidden: what's delivered is accurate to the
-    /// NEAREST KEYFRAME, not the exact requested frame/time — normal for a
-    /// scrub/rewind preview, and for reverse playback specifically this
-    /// means the visual character is a genuine "fast rewind" (jumps between
-    /// keyframes) rather than smooth backward motion — see
-    /// ReverseVideoLoopAsync's own remarks. Forward playback (VideoLoopAsync)
-    /// is UNCHANGED by this — it still uses SkClipContentSource's persistent
-    /// forward-only pipe (and still opportunistically benefits from
-    /// OptimizedMediaCache when one already exists), since it has no need
-    /// for arbitrary-position access at all.
+    /// SCRUB/REVERSE VIA RAW SCRUB PROXIES (ScrubProxyCache /
+    /// ScrubProxyReader / ScrubFrameSource) — REWRITTEN IN CONVERSATION,
+    /// REPLACING AN EARLIER ffmpeg-KEYFRAME-DECODE APPROACH ENTIRELY, after
+    /// two rounds of real-world testing on real hardware showed that
+    /// spawning ANY ffmpeg process per scrub tick — GPU-hwaccel or forced
+    /// software — could not be made both fast and crash-safe under a fast
+    /// scrub drag (see the two superseded rounds summarized below). Both
+    /// ScrubToAsync and reverse playback (Speed &lt; 0) share ONE mechanism,
+    /// deliberately — both need "show me approximately this arbitrary
+    /// position, instantly, with zero per-tick decode." Every video source
+    /// referenced by the Timeline gets a small, pre-built, RAW, decoder-less
+    /// scrub proxy — a fixed-size-frame file a scrub/reverse tick reads
+    /// directly (one positioned file read, no subprocess, no decode at all —
+    /// see ScrubProxyFormat's own remarks for the file shape and why). The
+    /// trade-off, named not hidden: what's delivered during scrub/reverse is
+    /// accurate to the proxy's own fixed, LOW resolution and fixed SAMPLE
+    /// RATE (EditSharpConfig.ScrubProxyTargetShortSide/ScrubProxySampleRate),
+    /// not the clip's real decode resolution or the exact requested frame —
+    /// normal for a scrub/rewind preview, wrong for a final render (this
+    /// mechanism is never used by Render/* or by VideoLoopAsync's normal
+    /// forward playback). For reverse playback specifically this means
+    /// visual character is a smooth, evenly-paced backward step every
+    /// 1/ScrubProxySampleRate seconds of content — a real improvement over
+    /// the earlier keyframe-snapped "fast rewind" look, since a proxy's
+    /// frame density is no longer tied to the source's own (often several-
+    /// seconds-apart) keyframe spacing at all.
     ///
-    /// SCRUB COALESCING ("LATEST REQUEST WINS") — FOUND IN THE FIELD, FIXED:
-    /// a fast scrub drag firing many ScrubToAsync calls used to serialize
-    /// them FIFO behind _scrubGate — every call, even one whose target
-    /// position was already stale by the time it started, ran a real ffmpeg
-    /// decode to completion before the next could even begin. Worse, the
-    /// one-time per-session setup (native size/decode-plan probing across
-    /// every video source) used to be gated by that SAME per-call
-    /// cancellation token: a request superseded mid-setup aborted setup
-    /// entirely, and the next request restarted it from scratch — under a
-    /// fast enough drag, setup could keep getting killed and restarted
-    /// forever, completing NEVER, which is what actually froze the whole
-    /// pipeline (spinning on setup, delivering nothing) rather than merely
-    /// looking sluggish. Fixed with two independent pieces:
-    ///   1. ScrubToAsync now cancels any still-in-flight/queued PREVIOUS
-    ///      scrub request the moment a new one arrives (_scrubSupersedeCts),
+    /// WHY NO ffmpeg PROCESS EVER RUNS DURING A SCRUB/REVERSE TICK, AND WHY
+    /// THAT MATTERS BEYOND SPEED: it also means the persistent GPU decoder
+    /// backing REAL forward playback (SkSourceDecoder.Start/NextFrame, and
+    /// its GpuContext) is never touched, paused, or contended for while a
+    /// scrub/reverse session is active — it can stay warm and simply resume
+    /// smoothly the moment scrubbing ends, since nothing about scrubbing
+    /// ever shared a process, a decode session, or a GPU context with it in
+    /// the first place.
+    ///
+    /// TWO SUPERSEDED ROUNDS OF FIXES, KEPT HERE AS HISTORY SINCE THE
+    /// LESSON EACH ONE TAUGHT SHAPED THIS DESIGN — the mechanism itself (an
+    /// ffmpeg one-shot decode per tick) is gone, but the request-coalescing
+    /// fix from round 1 is NOT superseded and is still exactly how
+    /// ScrubToAsync behaves (see SCRUB COALESCING below):
+    ///   ROUND 1 (fixed, real bug): a fast scrub drag firing many
+    ///   ScrubToAsync calls used to serialize them FIFO — every call ran a
+    ///   real ffmpeg decode to completion for a frame nobody wanted by the
+    ///   time it finished. Worse, the one-time per-session setup used to be
+    ///   gated by each call's own cancellation token, so a request
+    ///   superseded mid-setup killed setup itself and the next request
+    ///   restarted it from scratch — under fast enough scrubbing setup could
+    ///   never finish at all. Fixed with "latest request wins" coalescing
+    ///   plus memoized setup — see SCRUB COALESCING below, which still
+    ///   applies unchanged to this rewrite.
+    ///   ROUND 2 (found after round 1, itself now superseded by this
+    ///   rewrite, not by a further tweak of the same mechanism): even with
+    ///   coalescing fixed, each SURVIVING scrub/reverse tick was still slow
+    ///   ("wait a few seconds") and a fast enough drag could still lock the
+    ///   whole process up irrecoverably. Root cause was GPU-hwaccel context/
+    ///   session overhead paid per one-shot tick (and a real risk of
+    ///   exhausting the GPU's own concurrent decode-session budget under
+    ///   rapid concurrent one-shot GPU decodes — a driver-level hang outside
+    ///   any cancellation/process-kill this process could reach). The fix
+    ///   tried was forcing SOFTWARE decode for every tick instead — which,
+    ///   per direct real-hardware feedback, was NOT the right fix: CPU
+    ///   decode of the clip's real native resolution is orders of magnitude
+    ///   slower than GPU decode (established earlier, during this project's
+    ///   own GPU migration work), so forcing it per-tick just traded one
+    ///   flavor of slow/unstable for another (this time crashing outright
+    ///   under load, rather than merely locking up). The actual fix wasn't
+    ///   "which decode backend runs per tick" at all — it was removing the
+    ///   per-tick decode requirement entirely, which is this rewrite.
+    ///
+    /// SCRUB COALESCING ("LATEST REQUEST WINS") — STILL IN EFFECT, UNCHANGED
+    /// BY THE PROXY REWRITE: a fast scrub drag firing many ScrubToAsync
+    /// calls still coalesces to only the latest one actually completing —
+    /// even a proxy read is not literally free (a file read plus a full
+    /// frame composite), and there is no reason to do that work for a
+    /// position that's already stale by the time it would finish.
+    ///   1. ScrubToAsync cancels any still-in-flight/queued PREVIOUS scrub
+    ///      request the moment a new one arrives (_scrubSupersedeCts),
     ///      linked with the caller's own `ct` — a superseded request's
     ///      OperationCanceledException is swallowed (not the caller's own
-    ///      cancellation, so nothing to propagate), and its cancellation now
-    ///      genuinely kills any in-flight ffmpeg process (see
-    ///      SkSourceDecoder.DecodeSingleFrameAsync's own remarks) instead of
-    ///      leaving it to run to completion for a frame nobody wants anymore.
-    ///   2. The one-time scrub-session setup is now MEMOIZED
-    ///      (_scrubSetupTask, mirroring KeyframeIndex's own cached-Task
-    ///      pattern) rather than being started fresh — and abortable —
-    ///      inside every call. Once started it always runs to completion
-    ///      regardless of which caller kicked it off or whether that caller
-    ///      later gets superseded; every call just awaits (cancellably, via
-    ///      WaitAsync) whatever the current attempt is. This is exactly the
-    ///      same "cancel the WAIT, not the shared WORK" split
-    ///      KeyframeIndex.GetAsync already uses for its own cached probe.
+    ///      cancellation, so nothing to propagate).
+    ///   2. The one-time scrub-session setup — now a real PROXY BUILD for
+    ///      any source that doesn't have one cached yet, via
+    ///      PrepareScrubProxiesAsync/ScrubProxyCache.GetOrBuildAsync, a
+    ///      genuinely slower one-time cost than the old native-size-only
+    ///      probe it replaces — is MEMOIZED (_scrubSetupTask, mirroring
+    ///      ScrubProxyCache's own cached-Task build coalescing) rather than
+    ///      restarted inside every call. Once started it always runs to
+    ///      completion regardless of which caller kicked it off or whether
+    ///      that caller is later superseded; every call just awaits
+    ///      (cancellably, via WaitAsync) whatever the current attempt is —
+    ///      the same "cancel the wait, not the shared work" split
+    ///      ScrubProxyCache.GetOrBuildAsync itself already uses.
+    ///
+    /// PrewarmScrubProxiesAsync — the opt-in "generate proxies beforehand"
+    /// entry point: builds every video source's scrub proxy ahead of need
+    /// (e.g. right after a project loads), so the FIRST scrub/reverse
+    /// session doesn't pay any build cost at all. Entirely optional — the
+    /// first scrub/reverse session builds whatever's still missing on
+    /// demand either way (see EnsureScrubSessionBaseAsync).
     ///
     /// REVERSE PLAYBACK (Speed &lt; 0): Play() branches to
     /// ReverseVideoLoopAsync instead of VideoLoopAsync. Audio never
@@ -152,24 +199,24 @@ namespace EditSharp.Playback
     /// persistent, content-addressed proxy instead of the clip's true
     /// original source file, whenever RenderContentPreparation.
     /// ProbeVideoAsync finds one already built and big enough. Scrubbing and
-    /// reverse playback no longer consult this cache at all — see
-    /// I-FRAME-ONLY SCRUB/REVERSE above.
+    /// reverse playback consult a COMPLETELY SEPARATE cache
+    /// (ScrubProxyCache) instead — see the section above.
     ///
     /// KNOWN GAPS — tracked, not hidden:
     ///   1. REVERSE AUDIO is not implemented — reverse is video-only, see
-    ///      REVERSE PLAYBACK above. Video itself IS supported (I-frame-only).
+    ///      REVERSE PLAYBACK above. Video itself IS supported.
     ///   2. ARBITRARY SPEED (audio tracking Speed != 1, Speed &gt; 0) remains
     ///      a MUST-HAVE, not deferred-maybe.
     ///   3. Seeking to a nonzero start position may need the audio
     ///      composition itself to carry a seek offset.
     ///   4. TRUE FRAME-SKIPPING remains open.
     ///   5. PlaybackMode WIRING — CLOSED (SyncToAudio/EveryFrame both real).
-    ///   6. SCRUBBING — CLOSED, and no longer conditional on optimized media
-    ///      at all (see I-FRAME-ONLY SCRUB/REVERSE) — SupportsScrubbing is
-    ///      always true now; the property/RefreshScrubbingSupportAsync are
-    ///      kept only for API compatibility with existing callers. Rapid
-    ///      scrub requests are coalesced ("latest wins" — see SCRUB
-    ///      COALESCING above), not queued.
+    ///   6. SCRUBBING — CLOSED; SupportsScrubbing is always true now, the
+    ///      property/RefreshScrubbingSupportAsync kept only for API
+    ///      compatibility. Rapid scrub requests are coalesced ("latest
+    ///      wins" — see SCRUB COALESCING above), and every surviving tick
+    ///      reads a pre-built raw scrub proxy with zero per-tick decode —
+    ///      see SCRUB/REVERSE VIA RAW SCRUB PROXIES above.
     /// </summary>
     public class Playback : IDisposable
     {
@@ -189,10 +236,10 @@ namespace EditSharp.Playback
 
         public bool IsPaused => _pauseGate?.IsPaused ?? false;
 
-        // Always true now — see class remarks, I-FRAME-ONLY SCRUB/REVERSE.
-        // Kept (rather than removed) purely for API compatibility with
-        // existing callers that gate ScrubToAsync on this; safe to stop
-        // checking it.
+        // Always true now — see class remarks, SCRUB/REVERSE VIA RAW SCRUB
+        // PROXIES. Kept (rather than removed) purely for API compatibility
+        // with existing callers that gate ScrubToAsync on this; safe to
+        // stop checking it.
         public bool SupportsScrubbing { get; private set; } = true;
 
         public event EventHandler<AudioSampleEventArgs>? AudioSample;
@@ -233,8 +280,7 @@ namespace EditSharp.Playback
         private readonly SemaphoreSlim _scrubGate = new(1, 1);
         private GpuContext? _scrubGpuContext;
         private SkSurfacePool? _scrubSurfacePool;
-        private ConcurrentDictionary<Guid, (int, int)>? _scrubNativeSizes;
-        private ConcurrentDictionary<Guid, DecodeHwAccelPlan>? _scrubDecodePlans;
+        private ConcurrentDictionary<Guid, ScrubProxyEntry>? _scrubProxies;
         private ScrubFrameSource? _scrubContentSource;
 
         // Memoized one-time scrub-session setup — see class remarks, SCRUB
@@ -380,15 +426,31 @@ namespace EditSharp.Playback
         }
 
         /// <summary>
-        /// Always succeeds now — see class remarks, I-FRAME-ONLY SCRUB/
-        /// REVERSE. Kept for API compatibility with existing callers that
-        /// gate ScrubToAsync on this; safe to stop calling.
+        /// Always succeeds now — see class remarks, SCRUB/REVERSE VIA RAW
+        /// SCRUB PROXIES. Kept for API compatibility with existing callers
+        /// that gate ScrubToAsync on this; safe to stop calling.
         /// </summary>
         public Task<bool> RefreshScrubbingSupportAsync(CancellationToken ct = default)
         {
             SupportsScrubbing = true;
             return Task.FromResult(true);
         }
+
+        /// <summary>
+        /// Builds every video source referenced by Timeline's own scrub
+        /// proxy ahead of need, so a later scrub/reverse session's own
+        /// setup (EnsureScrubSessionBaseAsync) finds everything already
+        /// cached and pays no build cost at all — the opt-in "generate
+        /// proxies beforehand" entry point (see class remarks). Entirely
+        /// optional: a scrub/reverse session builds whatever's still
+        /// missing on demand either way. Safe to call at any time,
+        /// including while a scrub session is already active or playback
+        /// is running — it only ever reads/builds via ScrubProxyCache, it
+        /// never touches this instance's own scrub-session state.
+        /// </summary>
+        public Task PrewarmScrubProxiesAsync(CancellationToken ct = default) =>
+            Task.WhenAll(EnumerateVideoSourcePaths(Timeline)
+                .Select(path => ScrubProxyCache.PrewarmAsync(path, RenderSettings.HardwareAccelerator, ct)));
 
         /// <summary>
         /// Renders and delivers one frame at `position`, via VideoFrame.
@@ -468,12 +530,13 @@ namespace EditSharp.Playback
 
         /// <summary>
         /// Resolves the FrameState at `position`, prefetches every visible
-        /// VideoClip through `contentSource` (see ScrubFrameSource's own
-        /// remarks on why prefetching is a separate async step from the
-        /// synchronous composite below), then composites exactly one frame.
-        /// Shared by ScrubToAsync (on demand) and ReverseVideoLoopAsync (on
-        /// its own pacing timer) — both are, mechanically, "compose one
-        /// frame at an arbitrary position, instantly."
+        /// VideoClip through `contentSource` (kept as an async step for
+        /// call-site stability — see ScrubFrameSource's own remarks on why
+        /// it's fully synchronous under the hood now), then composites
+        /// exactly one frame. Shared by ScrubToAsync (on demand) and
+        /// ReverseVideoLoopAsync (on its own pacing timer) — both are,
+        /// mechanically, "compose one frame at an arbitrary position,
+        /// instantly."
         /// </summary>
         private async Task<(byte[] Buffer, int Length)> ComposeInstantFrameAsync(
             ScrubFrameSource contentSource, SkSurfacePool pool,
@@ -516,16 +579,13 @@ namespace EditSharp.Playback
 
         private async Task BuildScrubSessionAsync(int width, int height)
         {
-            var nativeSizes = new ConcurrentDictionary<Guid, (int, int)>();
-            var decodePlans = new ConcurrentDictionary<Guid, DecodeHwAccelPlan>();
+            var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
 
-            await PrepareScrubNativeInfoAsync(
-                Timeline, RenderSettings.HardwareAccelerator, nativeSizes, decodePlans);
+            await PrepareScrubProxiesAsync(Timeline, RenderSettings.HardwareAccelerator, proxies);
 
-            _scrubNativeSizes = nativeSizes;
-            _scrubDecodePlans = decodePlans;
+            _scrubProxies = proxies;
             _scrubContentSource = new ScrubFrameSource(
-                RenderSettings.Framerate, RenderSettings.HardwareAccelerator, nativeSizes, decodePlans);
+                RenderSettings.Framerate, RenderSettings.HardwareAccelerator, proxies);
 
             _scrubGpuContext = GpuContext.Create(
                 RenderSettings.HardwareAccelerator, RenderSettings.GpuAdapterIndex);
@@ -556,8 +616,7 @@ namespace EditSharp.Playback
                 _scrubGpuContext?.Dispose();
                 _scrubGpuContext = null;
 
-                _scrubNativeSizes = null;
-                _scrubDecodePlans = null;
+                _scrubProxies = null;
             }
             finally
             {
@@ -566,19 +625,18 @@ namespace EditSharp.Playback
         }
 
         /// <summary>
-        /// Native size + decode-hwaccel-plan probing for scrubbing/reverse
-        /// playback — deliberately NOT RenderContentPreparation.
-        /// PrepareContentAsync, which also consults OptimizedMediaCache.
-        /// Scrubbing/reverse always decode straight from each clip's own
-        /// original source now (see class remarks, I-FRAME-ONLY SCRUB/
-        /// REVERSE) — this only probes what ScrubFrameSource actually needs
-        /// (native dimensions, for aspect-fit math, and a decode plan), with
-        /// no cache lookup at all.
+        /// Resolves (building on a cache miss — BLOCKING; see class remarks,
+        /// SCRUB/REVERSE VIA RAW SCRUB PROXIES) every video source
+        /// referenced by `timeline`'s own scrub proxy via ScrubProxyCache.
+        /// Deliberately NOT RenderContentPreparation.PrepareContentAsync,
+        /// which probes native size/decode plan and consults
+        /// OptimizedMediaCache — none of that applies here at all any more;
+        /// this only needs each source's already-resolved-or-built
+        /// ScrubProxyEntry.
         /// </summary>
-        private static async Task PrepareScrubNativeInfoAsync(
+        private static async Task PrepareScrubProxiesAsync(
             Timeline timeline, HardwareAccelerator hwAccel,
-            ConcurrentDictionary<Guid, (int, int)> nativeSizes,
-            ConcurrentDictionary<Guid, DecodeHwAccelPlan> decodePlans)
+            ConcurrentDictionary<Guid, ScrubProxyEntry> proxies)
         {
             var tasks = new List<Task>();
 
@@ -591,20 +649,28 @@ namespace EditSharp.Playback
                     foreach (VideoSourceNode media in video.Graph.Nodes.OfType<VideoSourceNode>())
                     {
                         if (media.Source.Type != SourceType.Video) continue;
-                        tasks.Add(ProbeOneAsync(media));
+                        tasks.Add(ResolveOneAsync(media));
                     }
                 }
             }
 
             await Task.WhenAll(tasks);
 
-            async Task ProbeOneAsync(VideoSourceNode media)
+            async Task ResolveOneAsync(VideoSourceNode media)
             {
-                (int width, int height) = await MediaProbe.GetDimensionsAsync(media.Source.Path);
-                nativeSizes[media.Id] = (width, height);
-                decodePlans[media.Id] = await FfmpegRunner.GetDecodePlanAsync(media.Source.Path, hwAccel);
+                proxies[media.Id] = await ScrubProxyCache.GetOrBuildAsync(media.Source.Path, hwAccel);
             }
         }
+
+        /// <summary>Every distinct Video-type source path referenced by `timeline` — used by PrewarmScrubProxiesAsync.</summary>
+        private static IEnumerable<string> EnumerateVideoSourcePaths(Timeline timeline) =>
+            timeline.VideoChannels
+                .SelectMany(channel => channel.Clips)
+                .OfType<VideoClip>()
+                .SelectMany(video => video.Graph.Nodes.OfType<VideoSourceNode>())
+                .Where(media => media.Source.Type == SourceType.Video)
+                .Select(media => media.Source.Path)
+                .Distinct();
 
         /// <summary>
         /// BUG FOUND IN THE FIELD (fixed here): setup (PrepareContentAsync,
@@ -785,12 +851,12 @@ namespace EditSharp.Playback
 
         /// <summary>
         /// REVERSE PLAYBACK (Speed &lt; 0): steps backward through the
-        /// timeline at I-FRAME GRANULARITY — reuses the exact same instant,
-        /// keyframe-snapped decode ScrubToAsync uses (ScrubFrameSource /
-        /// KeyframeIndex / SkSourceDecoder.DecodeSingleFrameAsync), NOT the
-        /// persistent forward-only SkSourceDecoder pipe VideoLoopAsync uses,
-        /// which structurally cannot move backward at all. See Playback's
-        /// class remarks, I-FRAME-ONLY SCRUB/REVERSE.
+        /// timeline, reusing the exact same instant, decoder-less raw scrub
+        /// proxy read ScrubToAsync uses (ScrubFrameSource / ScrubProxyCache
+        /// / ScrubProxyReader), NOT the persistent forward-only
+        /// SkSourceDecoder pipe VideoLoopAsync uses, which structurally
+        /// cannot move backward at all. See Playback's class remarks,
+        /// SCRUB/REVERSE VIA RAW SCRUB PROXIES.
         ///
         /// Audio never participates here — Play() already gates audio to
         /// Speed == 1 (audioParticipates), which negative Speed never
@@ -803,16 +869,14 @@ namespace EditSharp.Playback
         /// indices DOWN instead of up. Every step recomposes a full frame at
         /// its own arbitrary TimeSpan position via ComposeInstantFrameAsync,
         /// passing `token` through so Stop()/Dispose() cancels any in-flight
-        /// decode promptly (same cancellation plumbing ScrubToAsync uses —
+        /// work promptly (same cancellation plumbing ScrubToAsync uses —
         /// see class remarks, SCRUB COALESCING).
         ///
-        /// VISUAL CHARACTER, NAMED NOT HIDDEN: because only I-frames are
-        /// ever decoded, positions that fall within the same GOP as the
-        /// last-rendered one land on the SAME cached keyframe image (see
-        /// ScrubFrameSource's own remarks) — reverse playback looks like a
-        /// fast rewind (jumps between keyframes, typically a few seconds
-        /// apart) rather than smooth backward motion. That's the deliberate
-        /// trade-off behind "instant, no buffering, no persistent decoder."
+        /// VISUAL CHARACTER: every step reads its OWN scrub-proxy frame at
+        /// its own exact position — see class remarks for why this now
+        /// looks like a smooth, evenly-paced backward step at the proxy's
+        /// own fixed sample rate, not the earlier keyframe-snapped "fast
+        /// rewind" jumpiness.
         /// </summary>
         private async Task ReverseVideoLoopAsync(
             CancellationToken token, TimeSpan startPosition,
@@ -828,14 +892,12 @@ namespace EditSharp.Playback
             {
                 try
                 {
-                    var nativeSizes = new ConcurrentDictionary<Guid, (int, int)>();
-                    var decodePlans = new ConcurrentDictionary<Guid, DecodeHwAccelPlan>();
+                    var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
 
-                    await PrepareScrubNativeInfoAsync(
-                        Timeline, RenderSettings.HardwareAccelerator, nativeSizes, decodePlans);
+                    await PrepareScrubProxiesAsync(Timeline, RenderSettings.HardwareAccelerator, proxies);
 
                     using var contentSource = new ScrubFrameSource(
-                        fps, RenderSettings.HardwareAccelerator, nativeSizes, decodePlans);
+                        fps, RenderSettings.HardwareAccelerator, proxies);
 
                     using GpuContext gpuContext = GpuContext.Create(
                         RenderSettings.HardwareAccelerator, RenderSettings.GpuAdapterIndex);

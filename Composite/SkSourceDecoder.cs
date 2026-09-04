@@ -47,7 +47,10 @@ namespace EditSharp.Composite
     /// frame-duplication/drop logic — not reimplemented here). Once decode
     /// fps matches render fps exactly, "the next rawvideo frame in the
     /// pipe" IS "the next output frame index" — a straight sequential read,
-    /// no per-frame timestamp matching needed in C# at all.
+    /// no per-frame timestamp matching needed in C# at all. ScrubProxyCache.
+    /// EncodeAsync (EditSharp.Composite) reuses this exact same trick,
+    /// deliberately, to resample a source to a scrub proxy's own fixed low
+    /// sample rate — see that method's own remarks.
     ///
     /// TRADE-OFF, named not hidden: optimized media also did double duty as
     /// a place to pre-bake PreTransform effects and pre-scale oversized
@@ -75,28 +78,23 @@ namespace EditSharp.Composite
     /// actually being opened is an OptimizedMediaCache entry, never the
     /// clip's own original source).
     ///
-    /// DecodeSingleFrameAsync (added for I-FRAME-ONLY SCRUB/REVERSE — see
-    /// Playback and ScrubFrameSource's own remarks): a SEPARATE, one-shot
-    /// decode path deliberately NOT built on Start/NextFrame's persistent-
-    /// pipe machinery. Start/NextFrame's whole contract assumes a single
-    /// long-lived process consumed strictly forward, once per output frame
-    /// — the opposite of what scrubbing/reverse need, which is "decode
-    /// exactly one frame at this arbitrary position, then throw the process
-    /// away." Sharing fastOpen's minimal-probing trick (always on here,
-    /// since a one-shot decode never benefits from deeper stream analysis —
-    /// only one frame is ever read regardless of what that analysis would
-    /// find) and `-frames:v 1` to guarantee ffmpeg exits after exactly one
-    /// frame instead of this class having to kill a still-running process.
-    ///
-    /// CANCELLATION (added after a real bug: a fast scrub drag firing many
-    /// requests could serialize behind each other, every one running a real
-    /// ffmpeg process to completion for a frame nobody wanted by the time it
-    /// finished — see Playback.ScrubToAsync's own remarks on the "latest
-    /// request wins" fix). `ct` is honored two ways together: the pipe read
-    /// itself observes it (a cancelled ReadAsync throws immediately without
-    /// waiting on ffmpeg), and a registration KILLS the subprocess outright
-    /// so a cancelled request doesn't leave orphaned ffmpeg processes
-    /// running to completion in the background for no reason.
+    /// DecodeSingleFrameAsync — NO LONGER USED BY SCRUB/REVERSE, FLAGGED
+    /// NOT REMOVED: originally added for an ffmpeg-keyframe-decode approach
+    /// to scrubbing/reverse playback, and went through two further rounds of
+    /// tuning after real-world testing (a GPU-hwaccel-per-tick fix, then a
+    /// forced-software-decode fix) before that whole approach was replaced
+    /// with a decoder-less raw scrub-proxy format (see Playback's class
+    /// remarks, SCRUB/REVERSE VIA RAW SCRUB PROXIES, and ScrubProxyFormat/
+    /// ScrubProxyCache/ScrubProxyReader) — a fast scrub drag turned out to
+    /// be unable to tolerate ANY per-tick ffmpeg process, regardless of
+    /// which decode backend it used. This method is kept, unchanged in
+    /// shape, as a general-purpose one-shot "decode exactly one frame at an
+    /// arbitrary seek position" utility — still potentially useful for
+    /// something like a one-off poster-thumbnail generator — but nothing in
+    /// this codebase currently calls it. If it stays unused, a future pass
+    /// is free to remove it; kept here for now rather than guessing at
+    /// removal without the go-ahead to delete a still-generically-useful
+    /// primitive.
     /// </summary>
     internal sealed class SkSourceDecoder : IDisposable
     {
@@ -192,6 +190,15 @@ namespace EditSharp.Composite
         /// SKSurface/SKImage consumes directly with no extra conversion
         /// step. This anticipates item 12's likely direction without fully
         /// deciding bit depth here — flagged, not silently assumed final.
+        ///
+        /// ALSO USED, UNMODIFIED, BY ScrubProxyCache.EncodeAsync to build a
+        /// scrub proxy's raw frame sequence — see that method's own remarks
+        /// and Playback's class remarks, SCRUB/REVERSE VIA RAW SCRUB
+        /// PROXIES. That caller passes a low `fps`/`width`/`height` (the
+        /// proxy's own fixed sample rate/resolution) and reads each
+        /// resulting frame via NextFrame() exactly like real forward
+        /// playback does — this method itself needed no changes to serve
+        /// both use cases.
         /// </summary>
         public static SkSourceDecoder Start(
             string sourcePath, double sourceStartSeconds, int fps, int width, int height,
@@ -256,8 +263,8 @@ namespace EditSharp.Composite
 
             // TEMPORARY INSTRUMENTATION — process spawn time alone (before
             // any frame has been read), split out from NextFrame's own
-            // cumulative pipe-read timing, specifically to answer "is
-            // ScrubToAsync's per-tick cost dominated by spawning ffmpeg
+            // cumulative pipe-read timing, specifically to answer "is a
+            // session's per-source setup cost dominated by spawning ffmpeg
             // itself, or by everything after (stream probing, seek, first
             // decode)" — added after direct feedback that scrubbing was as
             // slow as a fresh session start. Remove once fastOpen/+faststart
@@ -278,41 +285,38 @@ namespace EditSharp.Composite
         /// <summary>
         /// One-shot instant decode, deliberately NOT built on Start/
         /// NextFrame — see the class remarks' DecodeSingleFrameAsync
-        /// section. Seeks directly to `seekSeconds` (fast, keyframe-snapped
-        /// ffmpeg seek via -ss BEFORE -i) and reads exactly one frame, then
-        /// tears the whole process down. Callers (ScrubFrameSource) are
-        /// expected to pass an EXACT keyframe timestamp from KeyframeIndex
-        /// rather than an arbitrary target — landing on a known-exact
-        /// timestamp rather than relying on ffmpeg's own fast-seek heuristic
-        /// to land where the caller expects.
+        /// section for why it's currently unused. Seeks directly to
+        /// `seekSeconds` (fast ffmpeg seek via -ss BEFORE -i) and reads
+        /// exactly one frame, then tears the whole process down.
         ///
         /// `ct` cancellation KILLS the subprocess (see class remarks,
-        /// CANCELLATION) — a superseded scrub/reverse request should not
-        /// keep an ffmpeg process running to completion for a frame that's
-        /// already stale by the time it would finish.
+        /// CANCELLATION) — a cancelled request should not keep an ffmpeg
+        /// process running to completion for a frame nobody wants.
         /// </summary>
         public static async Task<SKImage> DecodeSingleFrameAsync(
             string sourcePath, double seekSeconds, int width, int height,
             DecodeHwAccelPlan? plan = null, CancellationToken ct = default)
         {
             plan ??= DecodeHwAccelPlan.Software;
-            // The fps argument only shapes a `fps=` conform filter stage —
-            // irrelevant for a single decoded frame, so any positive value
-            // works; 1 keeps the built filter string minimal.
-            string filter = plan.BuildFilterGraph(1, width, height);
+
+            // Minimal filter graph for a single extracted frame — no `fps=`
+            // conform stage (meaningless for one frame, and not free);
+            // everything else mirrors DecodeHwAccelPlan.BuildFilterGraph's
+            // own GPU-scale/hwdownload handling.
+            string scale = plan.UsesGpuScale
+                ? $"{plan.ScaleFilterName}={width}:{height}"
+                : $"scale={width}:{height}";
+            string download = plan.UsesGpuScale ? ",hwdownload,format=nv12" : "";
+            string filter = $"{scale}{download},format=rgba";
 
             var args = new List<string> { "-y", "-v", "error" };
             args.AddRange(GraphUtilities.FilterThreadingArgs());
             args.AddRange(plan.HwAccelArgs);
 
-            // Always on here — see the class remarks' DecodeSingleFrameAsync
-            // section: a one-shot decode never benefits from ffmpeg's
-            // default deeper stream analysis, since only one frame is ever
-            // read regardless of what that analysis would have found.
-            args.Add("-probesize");
-            args.Add("32k");
-            args.Add("-analyzeduration");
-            args.Add("0");
+            // No forced -probesize/-analyzeduration here — see fastOpen's
+            // own FAST-OPEN remarks: that trick is only safe against
+            // known-good, small, faststart-remuxed files this codebase
+            // built itself, not an arbitrary caller-supplied source.
 
             if (seekSeconds > 0)
             {
@@ -348,7 +352,7 @@ namespace EditSharp.Composite
             process.Start();
             process.BeginErrorReadLine();
 
-            // See class remarks, CANCELLATION — a superseded request kills
+            // See class remarks, CANCELLATION — a cancelled request kills
             // this specific process rather than letting it run to
             // completion. `process` (not a closure over local state) is
             // passed as the registration's state so no allocation happens

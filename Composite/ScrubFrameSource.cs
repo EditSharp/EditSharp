@@ -14,48 +14,63 @@ namespace EditSharp.Composite
     /// <summary>
     /// Resolves one frame's content for an ARBITRARY, non-sequential
     /// timeline position — the engine behind Playback.ScrubToAsync and
-    /// reverse playback (see Playback's class remarks, "I-FRAME-ONLY
-    /// SCRUB/REVERSE").
+    /// reverse playback (see Playback's class remarks).
     ///
-    /// DELIBERATELY NOT SkClipContentSource: that class's video path
-    /// (SkSourceDecoder.Start/NextFrame) is a persistent, forward-only pipe
-    /// — exactly wrong for "jump to an arbitrary position right now," which
-    /// is the whole point here. Instead, every Video-type VideoSourceNode is
-    /// decoded with a fresh ONE-SHOT ffmpeg process seeked directly to the
-    /// nearest preceding I-frame (KeyframeIndex + SkSourceDecoder.
-    /// DecodeSingleFrameAsync) — no persistent decoder, no forward-stepping
-    /// buffer, genuinely O(1) regardless of how far the jump is. The
-    /// trade-off, named not hidden: the delivered frame is only ACCURATE TO
-    /// THE NEAREST KEYFRAME, not the exact requested frame — expected for a
-    /// scrub/rewind preview, wrong for a final render (this class is never
-    /// used by Render/*).
+    /// REWRITTEN TO USE ScrubProxyReader, NOT ffmpeg, AT ALL (decided in
+    /// conversation, after two rounds of real-world testing showed ANY
+    /// per-tick ffmpeg process — GPU or software — could not be made both
+    /// fast and crash-safe under a fast scrub drag): every Video-type
+    /// VideoSourceNode's frame now comes from a small, PRE-BUILT, raw,
+    /// decoder-less scrub proxy (see ScrubProxyFormat/ScrubProxyReader) —
+    /// a direct positioned file read, no subprocess, no decode, no GOP/
+    /// keyframe concept, genuinely O(1) and safe to call as fast as a
+    /// caller likes. DELIBERATELY NOT SkClipContentSource: that class's
+    /// video path (SkSourceDecoder.Start/NextFrame) is a persistent,
+    /// forward-only pipe — exactly wrong for "jump to an arbitrary
+    /// position right now." The trade-off, named not hidden: what's
+    /// delivered is accurate to the proxy's own fixed SAMPLE RATE and low
+    /// fixed RESOLUTION (EditSharpConfig.ScrubProxySampleRate/
+    /// ScrubProxyTargetShortSide), not the exact requested frame or the
+    /// clip's real decode resolution — expected for a scrub/rewind
+    /// preview, wrong for a final render (this class is never used by
+    /// Render/*).
     ///
-    /// A small per-node cache remembers the LAST keyframe decoded (its own
-    /// seek timestamp + the resulting image) so repeated calls landing in
-    /// the same GOP — scrubbing back and forth by a few frames, or reverse
-    /// playback ticking faster than the keyframe interval — reuse it
-    /// instead of re-spawning ffmpeg.
+    /// NO PER-NODE "LAST FRAME" CACHE ANY MORE — unlike the previous ffmpeg-
+    /// backed version, a proxy read is already so cheap (one positioned
+    /// read of a few hundred KB, no process) that caching the result across
+    /// calls buys nothing worth the complexity; every call just reads fresh.
     ///
-    /// CANCELLATION (`ct` on PrefetchAsync): threaded through to
-    /// KeyframeIndex.GetAsync (via WaitAsync — see that call site's own
-    /// remarks on why the shared keyframe scan itself is NOT cancelled,
-    /// only this caller's wait on it) and to SkSourceDecoder.
-    /// DecodeSingleFrameAsync (which DOES fully cancel/kill its own
-    /// one-shot ffmpeg process — see that method's own remarks). This is
-    /// what lets Playback.ScrubToAsync's "latest request wins" coalescing
-    /// actually stop in-flight work promptly instead of only stopping
-    /// queued-but-not-yet-started work.
+    /// PROXY RESOLUTION IS THE CALLER'S JOB, NOT THIS CLASS'S: `proxies`
+    /// (keyed by VideoSourceNode Id) is handed in fully resolved — Playback
+    /// builds/looks up every referenced source's scrub proxy (via
+    /// ScrubProxyCache, blocking on any missing build) as part of scrub/
+    /// reverse SESSION setup, once, before this class is ever asked for a
+    /// frame — see Playback.PrepareScrubProxiesAsync. A VideoSourceNode
+    /// with no entry here is a caller bug, not a runtime fallback case (see
+    /// GetOrOpenReader).
     ///
-    /// PREFETCH / GetContent SPLIT, DELIBERATE: IClipContentSource.GetContent
-    /// must be synchronous (SkFrameCompositor calls it mid-composite, with
-    /// no async path down that call stack), but the real work here — the
-    /// keyframe lookup and decode — is genuinely async. Rather than block on
-    /// the async work from inside a sync call (a real deadlock risk in a
-    /// host app with a synchronization context), every visible clip for the
-    /// frame being composed is resolved ahead of time via PrefetchAsync, and
-    /// GetContent just serves what was already resolved. Callers (Playback)
-    /// are expected to PrefetchAsync every VideoClip a FrameState says is
-    /// visible before handing this source to SkFrameCompositor.
+    /// ScrubProxyReader INSTANCES ARE OWNED AND CACHED HERE, ONE PER SOURCE,
+    /// OPENED LAZILY ON FIRST USE, AND DISPOSED WITH THIS CLASS — opening a
+    /// proxy file is itself cheap (one small header read) but there's no
+    /// reason to pay it more than once per source per scrub/reverse session.
+    ///
+    /// CANCELLATION (`ct` on PrefetchAsync): kept on the signature for
+    /// interface stability with Playback.ComposeInstantFrameAsync and in
+    /// case a future InputNode type needs real async work, but nothing in
+    /// this class's own dispatch does any I/O wait worth cancelling any
+    /// more — a ScrubProxyReader read is a single fast positioned read, not
+    /// a subprocess. PrefetchAsync is therefore fully synchronous under the
+    /// hood now (see its own remarks) despite the async-looking signature.
+    ///
+    /// PREFETCH / GetContent SPLIT, KEPT FOR NOW even though the video path
+    /// no longer strictly needs it (IClipContentSource.GetContent must be
+    /// synchronous — SkFrameCompositor calls it mid-composite with no async
+    /// path down that call stack — and every dispatch here already is
+    /// synchronous). Kept because TimelineVideoInputNode's nested-renderer
+    /// path and the overall PrefetchAsync/GetContent contract are shared
+    /// with SkClipContentSource's interface shape; splitting it out again
+    /// if/when nothing async-shaped remains at all is a reasonable future
+    /// simplification, not done here to keep this change focused.
     ///
     /// STATIC CONTENT (images, rasterized text) and GENERATOR/NOISE nodes
     /// are already random-access by construction — dispatches the same way
@@ -66,35 +81,27 @@ namespace EditSharp.Composite
     {
         private readonly int _fps;
         private readonly HardwareAccelerator _hwAccel;
-        private readonly IReadOnlyDictionary<Guid, (int Width, int Height)> _nativeSizes;
-        private readonly IReadOnlyDictionary<Guid, DecodeHwAccelPlan> _decodePlans;
+        private readonly IReadOnlyDictionary<Guid, ScrubProxyEntry> _proxies;
 
+        private readonly Dictionary<Guid, ScrubProxyReader> _proxyReaders = new();
         private readonly Dictionary<Guid, SKImage> _staticContent = new();
         private readonly Dictionary<Guid, string> _ownedTempFiles = new();
         private readonly Dictionary<Guid, NestedTimelineRenderer> _nestedRenderers = new();
 
-        // Per Video-type VideoSourceNode: the last keyframe timestamp
-        // decoded and its image — kept alive across calls (owned by this
-        // class, never disposed by a caller) so repeated scrub/reverse ticks
-        // landing in the same GOP reuse it. See class remarks.
-        private readonly Dictionary<Guid, (double SeekSeconds, SKImage Image)> _lastKeyframe = new();
-
         // Resolved content for the frame currently being composed —
-        // populated by PrefetchAsync (does the real async decode work),
-        // consumed by GetContent (sync, satisfies IClipContentSource). See
-        // class remarks on why this split exists.
+        // populated by PrefetchAsync, consumed by GetContent (sync,
+        // satisfies IClipContentSource). See class remarks on why this
+        // split is kept even though PrefetchAsync is fully synchronous now.
         private readonly Dictionary<Clip, IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)>> _prefetched = new();
 
         public ScrubFrameSource(
             int fps,
             HardwareAccelerator hwAccel,
-            IReadOnlyDictionary<Guid, (int Width, int Height)> nativeSizes,
-            IReadOnlyDictionary<Guid, DecodeHwAccelPlan> decodePlans)
+            IReadOnlyDictionary<Guid, ScrubProxyEntry> proxies)
         {
             _fps = fps;
             _hwAccel = hwAccel;
-            _nativeSizes = nativeSizes;
-            _decodePlans = decodePlans;
+            _proxies = proxies;
         }
 
         /// <summary>
@@ -103,8 +110,12 @@ namespace EditSharp.Composite
         /// GetContent call for the same clip. Must be called for every
         /// VideoClip a FrameState reports visible, before that FrameState is
         /// handed to SkFrameCompositor.
+        ///
+        /// Fully synchronous under the hood now — see class remarks on
+        /// CANCELLATION — but keeps a Task-returning signature for call-site
+        /// stability with Playback.ComposeInstantFrameAsync.
         /// </summary>
-        public async Task PrefetchAsync(
+        public Task PrefetchAsync(
             VideoClip clip, double clipSeconds, int canvasWidth, int canvasHeight, SkSurfacePool pool,
             CancellationToken ct = default)
         {
@@ -115,7 +126,7 @@ namespace EditSharp.Composite
                 result[node.Id] = node switch
                 {
                     VideoSourceNode { Source.Type: SourceType.Video } media =>
-                        (await GetKeyframeAsync(clip, media, clipSeconds, canvasWidth, canvasHeight, ct), false),
+                        (GetProxyFrame(media, clipSeconds), false),
 
                     VideoSourceNode { Source.Type: SourceType.Image } media =>
                         (GetOrLoadStaticImage(media.Id, media.Source.Path), false),
@@ -138,6 +149,7 @@ namespace EditSharp.Composite
             }
 
             _prefetched[clip] = result;
+            return Task.CompletedTask;
         }
 
         public IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> GetContent(
@@ -154,63 +166,32 @@ namespace EditSharp.Composite
 
         /// <summary>
         /// Clears this frame's resolved-content lookup (NOT the persistent
-        /// keyframe/static/nested caches — see class remarks). Call once a
-        /// frame has been fully composited so a clip that's no longer
+        /// proxy-reader/static/nested caches — see class remarks). Call once
+        /// a frame has been fully composited so a clip that's no longer
         /// visible next tick can't be looked up by accident.
         /// </summary>
         public void ClearPrefetch() => _prefetched.Clear();
 
-        private async Task<SKImage> GetKeyframeAsync(
-            VideoClip clip, VideoSourceNode media, double clipSeconds, int canvasWidth, int canvasHeight,
-            CancellationToken ct)
+        private SKImage GetProxyFrame(VideoSourceNode media, double clipSeconds)
         {
             double targetSeconds = (media.Source.Start ?? TimeSpan.Zero).TotalSeconds + Math.Max(0, clipSeconds);
+            return GetOrOpenReader(media).GetFrameAt(targetSeconds);
+        }
 
-            // .WaitAsync(ct) makes THIS caller's wait cancellable without
-            // cancelling the underlying scan itself — KeyframeIndex.GetAsync
-            // is a shared, cached Task per source path, and a source's first
-            // scan can take real time on a long file; if a superseded scrub
-            // request cancelled the scan outright, the NEXT request would
-            // have to restart it from scratch, and under a fast scrub drag
-            // that scan could keep getting killed and restarted forever
-            // without ever finishing — see Playback's own remarks on this
-            // exact failure mode.
-            IReadOnlyList<double> keyframes = await KeyframeIndex.GetAsync(media.Source.Path).WaitAsync(ct);
-            double seekSeconds = KeyframeIndex.FindAtOrBefore(keyframes, targetSeconds);
+        private ScrubProxyReader GetOrOpenReader(VideoSourceNode media)
+        {
+            if (_proxyReaders.TryGetValue(media.Id, out ScrubProxyReader? existing))
+                return existing;
 
-            if (_lastKeyframe.TryGetValue(media.Id, out var cached) && cached.SeekSeconds == seekSeconds)
-                return cached.Image;
-
-            (int nativeWidth, int nativeHeight) = _nativeSizes.TryGetValue(media.Id, out var size)
-                ? size
-                : (0, 0);
-
-            if (nativeWidth <= 0 || nativeHeight <= 0)
+            if (!_proxies.TryGetValue(media.Id, out ScrubProxyEntry entry))
                 throw new InvalidOperationException(
-                    "No native size registered for a VideoSourceNode — the caller must probe native sizes " +
-                    "before scrubbing/reverse playback (see Playback.PrepareScrubNativeInfoAsync).");
+                    "No scrub proxy registered for a VideoSourceNode — the caller must resolve/build every " +
+                    "referenced source's scrub proxy before scrubbing/reverse playback (see " +
+                    "Playback.PrepareScrubProxiesAsync).");
 
-            ClipTransform transform =
-                GraphSearchHelpers.FindDownstreamTransform(clip.Graph, media)?.Transform ?? new ClipTransform();
-
-            (int desiredWidth, int desiredHeight) = TransformExpressions.ComputeContentSize(
-                transform, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
-
-            int decodeWidth = Math.Min(desiredWidth, nativeWidth);
-            int decodeHeight = Math.Min(desiredHeight, nativeHeight);
-
-            DecodeHwAccelPlan plan = _decodePlans.TryGetValue(media.Id, out DecodeHwAccelPlan? resolvedPlan)
-                ? resolvedPlan
-                : DecodeHwAccelPlan.Software;
-
-            SKImage image = await SkSourceDecoder.DecodeSingleFrameAsync(
-                media.Source.Path, seekSeconds, decodeWidth, decodeHeight, plan, ct);
-
-            if (_lastKeyframe.TryGetValue(media.Id, out var previous))
-                previous.Image.Dispose();
-
-            _lastKeyframe[media.Id] = (seekSeconds, image);
-            return image;
+            ScrubProxyReader reader = ScrubProxyReader.Open(entry.Path);
+            _proxyReaders[media.Id] = reader;
+            return reader;
         }
 
         private SKImage GetOrLoadStaticImage(Guid nodeId, string path)
@@ -253,8 +234,8 @@ namespace EditSharp.Composite
         {
             _prefetched.Clear();
 
-            foreach ((double _, SKImage image) in _lastKeyframe.Values) image.Dispose();
-            _lastKeyframe.Clear();
+            foreach (ScrubProxyReader reader in _proxyReaders.Values) reader.Dispose();
+            _proxyReaders.Clear();
 
             foreach (SKImage image in _staticContent.Values) image.Dispose();
             _staticContent.Clear();
