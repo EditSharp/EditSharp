@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using SkiaSharp;
 using EditSharp.Components;
 
@@ -68,13 +70,33 @@ namespace EditSharp.Composite
     /// analyzing). It is pure waste for a file THIS codebase built itself
     /// via OptimizedMediaCache — single all-intra video stream, no audio,
     /// known container, already probed once at build time — and it's paid
-    /// again on every fresh open, which for scrubbing means every single
-    /// ScrubToAsync tick (see that method's own remarks on why it can't
-    /// reuse one open decoder). `fastOpen` shrinks -probesize/-analyzeduration
-    /// down to the minimum for exactly that known-good case; see
-    /// SkClipContentSource.GetOrOpenDecoder for how it decides when to pass
-    /// this (true only when the file actually being opened is an
-    /// OptimizedMediaCache entry, never the clip's own original source).
+    /// again on every fresh open; see SkClipContentSource.GetOrOpenDecoder
+    /// for how it decides when to pass this (true only when the file
+    /// actually being opened is an OptimizedMediaCache entry, never the
+    /// clip's own original source).
+    ///
+    /// DecodeSingleFrameAsync (added for I-FRAME-ONLY SCRUB/REVERSE — see
+    /// Playback and ScrubFrameSource's own remarks): a SEPARATE, one-shot
+    /// decode path deliberately NOT built on Start/NextFrame's persistent-
+    /// pipe machinery. Start/NextFrame's whole contract assumes a single
+    /// long-lived process consumed strictly forward, once per output frame
+    /// — the opposite of what scrubbing/reverse need, which is "decode
+    /// exactly one frame at this arbitrary position, then throw the process
+    /// away." Sharing fastOpen's minimal-probing trick (always on here,
+    /// since a one-shot decode never benefits from deeper stream analysis —
+    /// only one frame is ever read regardless of what that analysis would
+    /// find) and `-frames:v 1` to guarantee ffmpeg exits after exactly one
+    /// frame instead of this class having to kill a still-running process.
+    ///
+    /// CANCELLATION (added after a real bug: a fast scrub drag firing many
+    /// requests could serialize behind each other, every one running a real
+    /// ffmpeg process to completion for a frame nobody wanted by the time it
+    /// finished — see Playback.ScrubToAsync's own remarks on the "latest
+    /// request wins" fix). `ct` is honored two ways together: the pipe read
+    /// itself observes it (a cancelled ReadAsync throws immediately without
+    /// waiting on ffmpeg), and a registration KILLS the subprocess outright
+    /// so a cancelled request doesn't leave orphaned ffmpeg processes
+    /// running to completion in the background for no reason.
     /// </summary>
     internal sealed class SkSourceDecoder : IDisposable
     {
@@ -254,6 +276,120 @@ namespace EditSharp.Composite
         }
 
         /// <summary>
+        /// One-shot instant decode, deliberately NOT built on Start/
+        /// NextFrame — see the class remarks' DecodeSingleFrameAsync
+        /// section. Seeks directly to `seekSeconds` (fast, keyframe-snapped
+        /// ffmpeg seek via -ss BEFORE -i) and reads exactly one frame, then
+        /// tears the whole process down. Callers (ScrubFrameSource) are
+        /// expected to pass an EXACT keyframe timestamp from KeyframeIndex
+        /// rather than an arbitrary target — landing on a known-exact
+        /// timestamp rather than relying on ffmpeg's own fast-seek heuristic
+        /// to land where the caller expects.
+        ///
+        /// `ct` cancellation KILLS the subprocess (see class remarks,
+        /// CANCELLATION) — a superseded scrub/reverse request should not
+        /// keep an ffmpeg process running to completion for a frame that's
+        /// already stale by the time it would finish.
+        /// </summary>
+        public static async Task<SKImage> DecodeSingleFrameAsync(
+            string sourcePath, double seekSeconds, int width, int height,
+            DecodeHwAccelPlan? plan = null, CancellationToken ct = default)
+        {
+            plan ??= DecodeHwAccelPlan.Software;
+            // The fps argument only shapes a `fps=` conform filter stage —
+            // irrelevant for a single decoded frame, so any positive value
+            // works; 1 keeps the built filter string minimal.
+            string filter = plan.BuildFilterGraph(1, width, height);
+
+            var args = new List<string> { "-y", "-v", "error" };
+            args.AddRange(GraphUtilities.FilterThreadingArgs());
+            args.AddRange(plan.HwAccelArgs);
+
+            // Always on here — see the class remarks' DecodeSingleFrameAsync
+            // section: a one-shot decode never benefits from ffmpeg's
+            // default deeper stream analysis, since only one frame is ever
+            // read regardless of what that analysis would have found.
+            args.Add("-probesize");
+            args.Add("32k");
+            args.Add("-analyzeduration");
+            args.Add("0");
+
+            if (seekSeconds > 0)
+            {
+                args.Add("-ss");
+                args.Add(GraphUtilities.Num(seekSeconds));
+            }
+
+            args.AddRange(new[]
+            {
+                "-i", sourcePath,
+                "-filter:v", filter,
+                "-frames:v", "1",
+                "-f", "rawvideo",
+                "-pix_fmt", "rgba",
+                "-an",
+                "pipe:1",
+            });
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = EditSharpConfig.FfmpegPath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (string arg in args) psi.ArgumentList.Add(arg);
+
+            using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            var stderr = new StringBuilder();
+            process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
+
+            process.Start();
+            process.BeginErrorReadLine();
+
+            // See class remarks, CANCELLATION — a superseded request kills
+            // this specific process rather than letting it run to
+            // completion. `process` (not a closure over local state) is
+            // passed as the registration's state so no allocation happens
+            // when `ct` is never cancelled (the overwhelmingly common case).
+            using CancellationTokenRegistration killRegistration = ct.Register(static state =>
+            {
+                var p = (Process)state!;
+                try { if (!p.HasExited) p.Kill(entireProcessTree: true); }
+                catch (InvalidOperationException) { /* already exited — fine */ }
+            }, process);
+
+            int frameByteSize = width * height * 4;
+            byte[] buffer = new byte[frameByteSize];
+            int totalRead = await ReadFullyAsync(process.StandardOutput.BaseStream, buffer, ct);
+
+            await process.WaitForExitAsync(ct);
+
+            if (totalRead != frameByteSize)
+                throw new InvalidOperationException(
+                    $"SkSourceDecoder.DecodeSingleFrameAsync produced no frame for '{sourcePath}' at " +
+                    $"{seekSeconds}s (read {totalRead}/{frameByteSize} bytes, ffmpeg exit " +
+                    $"{process.ExitCode}). ffmpeg stderr:{Environment.NewLine}{stderr}");
+
+            var info = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+            SKData data = SKData.CreateCopy(buffer);
+            return SKImage.FromPixels(info, data, width * 4);
+        }
+
+        private static async Task<int> ReadFullyAsync(Stream stream, byte[] buffer, CancellationToken ct = default)
+        {
+            int offset = 0;
+            while (offset < buffer.Length)
+            {
+                int read = await stream.ReadAsync(buffer.AsMemory(offset, buffer.Length - offset), ct);
+                if (read == 0) break; // real EOF
+                offset += read;
+            }
+            return offset;
+        }
+
+        /// <summary>
         /// Advances to and returns the next frame in this clip's own
         /// sequential timeline. Must be called exactly once per output
         /// frame this clip is visible on, in increasing order — this is
@@ -299,11 +435,9 @@ namespace EditSharp.Composite
                 sw.Stop();
                 _cumulativeReadTime += sw.Elapsed;
 
-                /*
                 EditSharpConfig.Logger.LogVerbose(
                     $"SkSourceDecoder: pipe read took {sw.ElapsedMilliseconds}ms this frame " +
                     $"({_cumulativeReadTime.TotalMilliseconds:F0}ms cumulative for this decoder).");
-                */
 
                 if (totalRead == _frameByteSize)
                 {

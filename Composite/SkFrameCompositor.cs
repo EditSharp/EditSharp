@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using SkiaSharp;
 using EditSharp.Components.Clips;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -13,14 +13,22 @@ namespace EditSharp.Composite
     /// warp) is NOT reimplemented here — that's SkiaClipCompositorSketch.Composite
     /// (-> EffectGraphEvaluatorSk), called once per clip below. This file's own
     /// job is everything above a single clip: fetching that clip's pixel
-    /// content for this frame (SkClipContentSource), handling a two-clip
+    /// content for this frame (IClipContentSource), handling a two-clip
     /// transition (SkTransitionCompositor), blending a channel onto the
     /// accumulator (SkChannelCompositor), and flattening onto black at the end.
+    ///
+    /// CONTENT SOURCE IS AN INTERFACE (IClipContentSource), NOT A CONCRETE
+    /// TYPE: this file composites identically regardless of whether frames
+    /// come from SkClipContentSource's persistent forward-only decode
+    /// (Render, forward Playback) or ScrubFrameSource's one-shot arbitrary-
+    /// position I-frame decode (Playback.ScrubToAsync, reverse playback) —
+    /// see IClipContentSource's own remarks. This file never needed to know
+    /// which one it's talking to.
     ///
     /// "CLIPS ARE GRAPHS" REWRITE:
     ///   - FrameClip no longer carries Transform/NativeWidth/NativeHeight (see
     ///     FrameFilterChain.cs's own remarks) — DrawClip fetches a dictionary
-    ///     of per-InputNode content from SkClipContentSource keyed by node Id
+    ///     of per-InputNode content from the content source keyed by node Id
     ///     and hands the WHOLE dictionary to SkiaClipCompositorSketch.Composite,
     ///     rather than a single pre-resolved image.
     ///   - The single top-level RenderFrame (raw RGBA8888 bytes, for the
@@ -39,13 +47,13 @@ namespace EditSharp.Composite
         /// it, on every path including error.
         /// </summary>
         public static (byte[] Buffer, int Length) RenderFrame(
-            FrameState frame, SkClipContentSource contentSource,
+            FrameState frame, IClipContentSource contentSource,
             int canvasWidth, int canvasHeight, int fps, SkSurfacePool pool)
         {
             using SKImage flattened = ComposeFrameImage(frame, contentSource, canvasWidth, canvasHeight, fps, pool);
             return ReadRgba8888(flattened, canvasWidth, canvasHeight);
         }
- 
+
         /// <summary>
         /// Renders one output frame and returns it as an opaque (flattened
         /// onto black), canvas-sized SKImage — the OWNER is the caller, who
@@ -55,7 +63,7 @@ namespace EditSharp.Composite
         /// with no intermediate byte round-trip).
         /// </summary>
         public static SKImage ComposeFrameImage(
-            FrameState frame, SkClipContentSource contentSource,
+            FrameState frame, IClipContentSource contentSource,
             int canvasWidth, int canvasHeight, int fps, SkSurfacePool pool)
         {
             SKSurface accumulator = pool.Rent(canvasWidth, canvasHeight);
@@ -63,23 +71,23 @@ namespace EditSharp.Composite
             try
             {
                 accumulator.Canvas.Clear(SKColors.Transparent);
- 
+
                 foreach (FrameChannel channel in frame.Channels)
                 {
                     SKImage? drawn = ComposeChannel(channel, contentSource, canvasWidth, canvasHeight, fps, pool);
                     if (drawn == null) continue;
- 
+
                     using (drawn)
                         SkChannelCompositor.Draw(accumulator.Canvas, drawn, channel.BlendMode);
                 }
- 
+
                 composite = accumulator.Snapshot();
             }
             finally
             {
                 pool.Return(accumulator, canvasWidth, canvasHeight);
             }
- 
+
             //drop the composite onto opaque black — deliberately the very
             //last step, so every blend mode and every transition above sees
             //real transparency to work with rather than a channel that was
@@ -88,10 +96,10 @@ namespace EditSharp.Composite
             try
             {
                 flattened.Canvas.Clear(SKColors.Black);
- 
+
                 using (composite)
                     flattened.Canvas.DrawImage(composite, 0, 0);
- 
+
                 return flattened.Snapshot();
             }
             finally
@@ -99,7 +107,7 @@ namespace EditSharp.Composite
                 pool.Return(flattened, canvasWidth, canvasHeight);
             }
         }
- 
+
         /// <summary>
         /// One channel's clips for this frame, transitioned together if a
         /// transition is mid-flight. Each clip is drawn onto its OWN
@@ -108,20 +116,20 @@ namespace EditSharp.Composite
         /// onto the accumulator.
         /// </summary>
         private static SKImage? ComposeChannel(
-            FrameChannel channel, SkClipContentSource contentSource,
+            FrameChannel channel, IClipContentSource contentSource,
             int canvasWidth, int canvasHeight, int fps, SkSurfacePool pool)
         {
             var rendered = new List<SKImage>(channel.Clips.Count);
- 
+
             foreach (FrameClip clip in channel.Clips)
             {
                 SKSurface clipSurface = pool.Rent(canvasWidth, canvasHeight);
                 try
                 {
                     clipSurface.Canvas.Clear(SKColors.Transparent);
- 
+
                     DrawClip(clipSurface.Canvas, clip, contentSource, canvasWidth, canvasHeight, fps, pool);
- 
+
                     rendered.Add(clipSurface.Snapshot());
                 }
                 finally
@@ -129,10 +137,10 @@ namespace EditSharp.Composite
                     pool.Return(clipSurface, canvasWidth, canvasHeight);
                 }
             }
- 
+
             if (rendered.Count == 0) return null;
             if (rendered.Count == 1) return rendered[0];
- 
+
             using (rendered[0])
             using (rendered[1])
             {
@@ -141,35 +149,35 @@ namespace EditSharp.Composite
                     canvasWidth, canvasHeight, pool);
             }
         }
- 
+
         /// <summary>
         /// Fetches this clip's content for this frame — one resolved image
-        /// per InputNode in its graph (SkClipContentSource.GetContent) — and
+        /// per InputNode in its graph (IClipContentSource.GetContent) — and
         /// hands the whole graph off to SkiaClipCompositorSketch.Composite for
         /// evaluation, then disposes whichever of those resolved images were
-        /// transient (see SkClipContentSource's own Transient contract).
+        /// transient (see IClipContentSource's own Transient contract).
         ///
         /// FrameClip.Clip is guaranteed to be a VideoClip — only VideoChannels
         /// (and therefore only VideoClip) are ever resolved into a
         /// FrameChannel — see FrameStateResolver.
         /// </summary>
         private static void DrawClip(
-            SKCanvas canvas, FrameClip frameClip, SkClipContentSource contentSource,
+            SKCanvas canvas, FrameClip frameClip, IClipContentSource contentSource,
             int canvasWidth, int canvasHeight, int fps, SkSurfacePool pool)
         {
             if (frameClip.Clip is not VideoClip clip) return; //defensive — see class remarks
- 
+
             IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> resolved =
                 contentSource.GetContent(clip, frameClip.ClipSeconds, canvasWidth, canvasHeight, pool);
- 
+
             var plain = new Dictionary<Guid, SKImage>(resolved.Count);
             foreach (KeyValuePair<Guid, (SKImage Image, bool Transient)> entry in resolved)
                 plain[entry.Key] = entry.Value.Image;
- 
+
             try
             {
                 var context = new SkClipChainContext(canvasWidth, canvasHeight, fps, 1.0 / fps);
- 
+
                 SkiaClipCompositorSketch.Composite(
                     canvas, clip, plain, frameClip.ClipSeconds, context, pool);
             }
@@ -181,7 +189,7 @@ namespace EditSharp.Composite
                 }
             }
         }
- 
+
         /// <summary>
         /// Copies `surface`'s pixels out as tightly-packed RGBA8888 bytes (no
         /// row padding), matching exactly what ffmpeg's rawvideo demuxer
@@ -193,7 +201,7 @@ namespace EditSharp.Composite
         {
             int expectedBytes = width * height * SkOutputFormat.BytesPerPixel;
             byte[] buffer = ArrayPool<byte>.Shared.Rent(expectedBytes);
- 
+
             try
             {
                 GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
@@ -201,10 +209,10 @@ namespace EditSharp.Composite
                 {
                     var dstInfo = new SKImageInfo(
                         width, height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
- 
+
                     bool ok = image.ReadPixels(
                         dstInfo, handle.AddrOfPinnedObject(), width * SkOutputFormat.BytesPerPixel);
- 
+
                     if (!ok)
                         throw new InvalidOperationException(
                             "Failed to read the composited frame's pixel data.");
@@ -219,11 +227,11 @@ namespace EditSharp.Composite
                 ArrayPool<byte>.Shared.Return(buffer);
                 throw;
             }
- 
+
             return (buffer, expectedBytes);
         }
     }
- 
+
     /// <summary>
     /// The pixel format the accumulator and the final ffmpeg mux/encode step
     /// both agree on. 8-bit RGBA for the whole Skia compositor.
@@ -234,4 +242,3 @@ namespace EditSharp.Composite
         public const int BytesPerPixel = 4;
     }
 }
- 

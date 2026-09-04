@@ -7,7 +7,7 @@ namespace EditSharp.Composite
 {
     /// <summary>
     /// Small shared graph-walking helper used by both RenderContentPreparation
-    /// (deciding a MediaSourceNode's decode target size) and SkClipContentSource
+    /// (deciding a VideoSourceNode's decode target size) and SkClipContentSource
     /// (the same decision, at decoder-open time). Not part of Graph itself
     /// — this is a RENDER-side heuristic, not a structural graph invariant.
     ///
@@ -15,7 +15,7 @@ namespace EditSharp.Composite
     /// lives on the node itself rather than on a owning VisualClip, and a graph
     /// can have more than one TransformNode (e.g. one per branch before a
     /// MergeNode). Deciding which TransformNode "belongs" to a given
-    /// MediaSourceNode for sizing purposes is therefore ambiguous in a fully
+    /// VideoSourceNode for sizing purposes is therefore ambiguous in a fully
     /// general multi-branch graph. The approximation taken here — first
     /// TransformNode reachable by walking forward from the InputNode — is
     /// exactly correct for every "normal/default" graph (CreateVideoGraph's

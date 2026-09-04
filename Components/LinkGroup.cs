@@ -248,7 +248,7 @@ namespace EditSharp.Components
         //
         // REWRITE ("clips are graphs"): VideoClip/AudioClip are built via
         // their own static factory methods now, not object initializers —
-        // see VideoClip.cs/AudioClip.cs. A MediaSourceNode/MediaAudioSourceNode
+        // see VideoClip.cs/AudioClip.cs. A VideoSourceNode/AudioSourceNode
         // gets ITS OWN duplicated Source (not a shared reference) for the
         // same reason as before this rewrite: trimming one clip's head
         // independently of the other (see the schema doc's Move section —

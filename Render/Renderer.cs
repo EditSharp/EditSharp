@@ -21,7 +21,7 @@ namespace EditSharp.Render
     /// an actual end-to-end render.
     ///
     /// Shape of a render:
-    ///   1. Probe every Video-type MediaSourceNode's native size (MediaProbe)
+    ///   1. Probe every Video-type VideoSourceNode's native size (MediaProbe)
     ///      across the whole timeline — everything about a video clip's media
     ///      inputs that's constant across its whole life, done once up front
     ///      (RenderContentPreparation). TextInputNode/ColorGeneratorInputNode/
@@ -34,7 +34,7 @@ namespace EditSharp.Render
     ///      in-process SKCanvas (SkFrameCompositor), writing each frame's raw
     ///      RGBA8888 bytes straight into that ffmpeg process's stdin as it's
     ///      produced — see STREAMING REWRITE below. A Video-type
-    ///      MediaSourceNode's SkSourceDecoder is opened on its clip's first
+    ///      VideoSourceNode's SkSourceDecoder is opened on its clip's first
     ///      visible frame and disposed once that clip's visible window ends
     ///      (SkClipContentSource).
     ///   4. Close stdin once every frame has been written (ffmpeg's rawvideo
@@ -85,7 +85,7 @@ namespace EditSharp.Render
     /// "CLIPS ARE GRAPHS" REWRITE: RenderContentPreparation's
     /// nativeSizes/decodePlans/decodeSourcePaths dictionaries are now keyed
     /// by InputNode Id (Guid), not by Clip — a VideoClip's graph can contain
-    /// more than one MediaSourceNode. staticImagePaths and the tempFiles bag
+    /// more than one VideoSourceNode. staticImagePaths and the tempFiles bag
     /// PrepareContentAsync used to take are both gone from that call — text
     /// rasterization now happens lazily inside SkClipContentSource itself,
     /// which owns cleaning up its own temp files on Dispose (this file's own

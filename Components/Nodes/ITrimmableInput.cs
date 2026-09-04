@@ -9,7 +9,7 @@ namespace EditSharp.Components.Nodes
     /// multi-input-trim rule ("shift them all together, clamped by whichever
     /// one has the least room left").
     ///
-    /// Implemented by MediaSourceNode/MediaAudioSourceNode (wrapping
+    /// Implemented by VideoSourceNode/AudioSourceNode (wrapping
     /// Source.Start) and TimelineVideoInputNode/TimelineAudioInputNode
     /// (wrapping TimelineReference.Start). Generator/procedural/text input
     /// nodes (ColorGeneratorInputNode, NoiseInputNode, TextInputNode,

@@ -9,7 +9,7 @@ namespace EditSharp.Components.Nodes.Effects
     /// branches, effect each differently, recombine) that justifies a graph
     /// over a flat stack in the first place. Also the canonical way to
     /// combine TWO InputNodes in one graph now that a graph can have more
-    /// than one (e.g. two MediaSourceNodes composited together).
+    /// than one (e.g. two VideoSourceNodes composited together).
     /// </summary>
     public sealed class MergeNode : Node
     {

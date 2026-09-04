@@ -16,7 +16,7 @@ namespace EditSharp.Composite
     /// clip's transform" — TransformNode carries its own ClipTransform data,
     /// and a graph can have more than one TransformNode. There is no longer
     /// one single "the clip's native size" either — a graph can have more
-    /// than one InputNode (MediaSourceNode/TextInputNode/etc.), each with its
+    /// than one InputNode (VideoSourceNode/TextInputNode/etc.), each with its
     /// OWN native size, and TransformNode now derives its native size
     /// directly from whatever image is actually upstream of it at evaluation
     /// time (see EffectGraphEvaluatorSk's own remarks) rather than from a

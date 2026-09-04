@@ -25,12 +25,12 @@ namespace EditSharp.Playback
     /// "CLIPS ARE GRAPHS" REWRITE: RenderContentPreparation's
     /// nativeSizes/decodePlans/decodeSourcePaths dictionaries are now keyed
     /// by InputNode Id (Guid), not by Clip — a VideoClip's graph can contain
-    /// more than one MediaSourceNode; staticImagePaths is gone entirely (text
+    /// more than one VideoSourceNode; staticImagePaths is gone entirely (text
     /// rasterization moved into SkClipContentSource itself). The two
     /// pattern-match sites that used to match `VideoClip { Source.Type:
     /// SourceType.Video }` directly (AllVideoClipsRedirectedToCache,
     /// ComputeSeekOffsets) now walk each VideoClip's own graph for its
-    /// Video-type MediaSourceNode(s) instead, since Source no longer lives
+    /// Video-type VideoSourceNode(s) instead, since Source no longer lives
     /// directly on VideoClip. FrameStateResolver.Resolve no longer takes a
     /// nativeSizes parameter — see its own remarks.
     ///
@@ -39,7 +39,7 @@ namespace EditSharp.Playback
     /// than timeline.Channels filtered by `is not VideoClip` — Timeline keeps
     /// VideoChannel and AudioChannel as two separate lists (see Timeline.cs's
     /// own remarks). The two SkSurfacePool seedCount call sites below
-    /// (VideoLoopAsync, EnsureScrubSessionBaseAsync) now seed off
+    /// (VideoLoopAsync, ReverseVideoLoopAsync) now seed off
     /// Timeline.VideoChannels.Count specifically rather than the old mixed
     /// Timeline.Channels.Count — an AudioChannel never needs a GPU-backed
     /// canvas surface, so counting it toward the warm-start heuristic never
@@ -78,30 +78,98 @@ namespace EditSharp.Playback
     /// shared PlaybackReferenceClock. The other stream (if any) is the
     /// FOLLOWER — instead of its own Stopwatch, it polls the reference
     /// clock and only delivers once the leader has actually reached that
-    /// content position.
+    /// content position. Reverse playback never has a follower — audio never
+    /// participates in a reverse session (see REVERSE PLAYBACK below), so
+    /// ReverseVideoLoopAsync is always the sole leader of its own session.
     ///
     /// PAUSE VS STOP (PlaybackPauseGate): genuinely different operations.
     ///
-    /// OPTIMIZED-MEDIA CACHE (OptimizedMediaCache, EditSharp.Composite): a
-    /// video clip's decoder here may open against a persistent, content-
-    /// addressed proxy instead of the clip's true original source file,
-    /// whenever RenderContentPreparation.ProbeVideoAsync finds one already
-    /// built and big enough.
+    /// I-FRAME-ONLY SCRUB/REVERSE (KeyframeIndex / ScrubFrameSource /
+    /// SkSourceDecoder.DecodeSingleFrameAsync): ScrubToAsync and reverse
+    /// playback (Speed &lt; 0) share ONE mechanism, deliberately — both need
+    /// "show me approximately this arbitrary position, instantly, with no
+    /// buffering," which is exactly what jumping straight to the nearest
+    /// I-frame gives for free (every frame is independently seekable at
+    /// the container level; nothing else needs decoding to reach it).
+    /// Neither depends on OptimizedMediaCache/pre-built proxy media any
+    /// more — both decode straight from each clip's own original source via
+    /// a per-source keyframe-timestamp index (KeyframeIndex, one ffprobe
+    /// scan, cached) and a one-shot ffmpeg decode seeked to an exact
+    /// keyframe timestamp (SkSourceDecoder.DecodeSingleFrameAsync). The
+    /// trade-off, named not hidden: what's delivered is accurate to the
+    /// NEAREST KEYFRAME, not the exact requested frame/time — normal for a
+    /// scrub/rewind preview, and for reverse playback specifically this
+    /// means the visual character is a genuine "fast rewind" (jumps between
+    /// keyframes) rather than smooth backward motion — see
+    /// ReverseVideoLoopAsync's own remarks. Forward playback (VideoLoopAsync)
+    /// is UNCHANGED by this — it still uses SkClipContentSource's persistent
+    /// forward-only pipe (and still opportunistically benefits from
+    /// OptimizedMediaCache when one already exists), since it has no need
+    /// for arbitrary-position access at all.
     ///
-    /// SCRUBBING (SupportsScrubbing / RefreshScrubbingSupportAsync /
-    /// ScrubToAsync / EndScrubbing): a second, separate playback surface
-    /// for "render me one frame at this arbitrary position, right now."
+    /// SCRUB COALESCING ("LATEST REQUEST WINS") — FOUND IN THE FIELD, FIXED:
+    /// a fast scrub drag firing many ScrubToAsync calls used to serialize
+    /// them FIFO behind _scrubGate — every call, even one whose target
+    /// position was already stale by the time it started, ran a real ffmpeg
+    /// decode to completion before the next could even begin. Worse, the
+    /// one-time per-session setup (native size/decode-plan probing across
+    /// every video source) used to be gated by that SAME per-call
+    /// cancellation token: a request superseded mid-setup aborted setup
+    /// entirely, and the next request restarted it from scratch — under a
+    /// fast enough drag, setup could keep getting killed and restarted
+    /// forever, completing NEVER, which is what actually froze the whole
+    /// pipeline (spinning on setup, delivering nothing) rather than merely
+    /// looking sluggish. Fixed with two independent pieces:
+    ///   1. ScrubToAsync now cancels any still-in-flight/queued PREVIOUS
+    ///      scrub request the moment a new one arrives (_scrubSupersedeCts),
+    ///      linked with the caller's own `ct` — a superseded request's
+    ///      OperationCanceledException is swallowed (not the caller's own
+    ///      cancellation, so nothing to propagate), and its cancellation now
+    ///      genuinely kills any in-flight ffmpeg process (see
+    ///      SkSourceDecoder.DecodeSingleFrameAsync's own remarks) instead of
+    ///      leaving it to run to completion for a frame nobody wants anymore.
+    ///   2. The one-time scrub-session setup is now MEMOIZED
+    ///      (_scrubSetupTask, mirroring KeyframeIndex's own cached-Task
+    ///      pattern) rather than being started fresh — and abortable —
+    ///      inside every call. Once started it always runs to completion
+    ///      regardless of which caller kicked it off or whether that caller
+    ///      later gets superseded; every call just awaits (cancellably, via
+    ///      WaitAsync) whatever the current attempt is. This is exactly the
+    ///      same "cancel the WAIT, not the shared WORK" split
+    ///      KeyframeIndex.GetAsync already uses for its own cached probe.
+    ///
+    /// REVERSE PLAYBACK (Speed &lt; 0): Play() branches to
+    /// ReverseVideoLoopAsync instead of VideoLoopAsync. Audio never
+    /// participates (audioParticipates requires Speed == 1, which negative
+    /// Speed never satisfies) — reverse is video-only for now; revisit once
+    /// arbitrary-speed forward audio exists and there's a real reversed-PCM
+    /// delivery path to build on. Speed == 0 remains unsupported (that's
+    /// Pause()/Stop(), not a playback rate) — only that one case still
+    /// throws from Play(); any negative Speed is now a normal input.
+    ///
+    /// OPTIMIZED-MEDIA CACHE (OptimizedMediaCache, EditSharp.Composite): a
+    /// video clip's decoder in the FORWARD playback path may open against a
+    /// persistent, content-addressed proxy instead of the clip's true
+    /// original source file, whenever RenderContentPreparation.
+    /// ProbeVideoAsync finds one already built and big enough. Scrubbing and
+    /// reverse playback no longer consult this cache at all — see
+    /// I-FRAME-ONLY SCRUB/REVERSE above.
     ///
     /// KNOWN GAPS — tracked, not hidden:
-    ///   1. SPEED &lt;= 0 (reverse playback) is NOT supported yet.
-    ///   2. ARBITRARY SPEED (audio tracking Speed != 1) is a MUST-HAVE, not
-    ///      deferred-maybe.
+    ///   1. REVERSE AUDIO is not implemented — reverse is video-only, see
+    ///      REVERSE PLAYBACK above. Video itself IS supported (I-frame-only).
+    ///   2. ARBITRARY SPEED (audio tracking Speed != 1, Speed &gt; 0) remains
+    ///      a MUST-HAVE, not deferred-maybe.
     ///   3. Seeking to a nonzero start position may need the audio
     ///      composition itself to carry a seek offset.
     ///   4. TRUE FRAME-SKIPPING remains open.
     ///   5. PlaybackMode WIRING — CLOSED (SyncToAudio/EveryFrame both real).
-    ///   6. SCRUBBING — CLOSED for the all-optimized-media, forward-or-
-    ///      small-jump case.
+    ///   6. SCRUBBING — CLOSED, and no longer conditional on optimized media
+    ///      at all (see I-FRAME-ONLY SCRUB/REVERSE) — SupportsScrubbing is
+    ///      always true now; the property/RefreshScrubbingSupportAsync are
+    ///      kept only for API compatibility with existing callers. Rapid
+    ///      scrub requests are coalesced ("latest wins" — see SCRUB
+    ///      COALESCING above), not queued.
     /// </summary>
     public class Playback : IDisposable
     {
@@ -121,7 +189,11 @@ namespace EditSharp.Playback
 
         public bool IsPaused => _pauseGate?.IsPaused ?? false;
 
-        public bool SupportsScrubbing { get; private set; }
+        // Always true now — see class remarks, I-FRAME-ONLY SCRUB/REVERSE.
+        // Kept (rather than removed) purely for API compatibility with
+        // existing callers that gate ScrubToAsync on this; safe to stop
+        // checking it.
+        public bool SupportsScrubbing { get; private set; } = true;
 
         public event EventHandler<AudioSampleEventArgs>? AudioSample;
 
@@ -158,20 +230,24 @@ namespace EditSharp.Playback
         private PlaybackAudioEngine? _audioEngine;
         private PlaybackPauseGate? _pauseGate;
 
-        private const int ScrubForwardStepBudgetFrames = 15;
-
         private readonly SemaphoreSlim _scrubGate = new(1, 1);
         private GpuContext? _scrubGpuContext;
         private SkSurfacePool? _scrubSurfacePool;
         private ConcurrentDictionary<Guid, (int, int)>? _scrubNativeSizes;
         private ConcurrentDictionary<Guid, DecodeHwAccelPlan>? _scrubDecodePlans;
-        private ConcurrentDictionary<Guid, string>? _scrubDecodeSourcePaths;
-        private Dictionary<int, List<Clip>>? _scrubDecoderReleaseSchedule;
+        private ScrubFrameSource? _scrubContentSource;
 
-        private SkClipContentSource? _scrubContentSource;
-        private int? _scrubLastFrameIndex;
-        private byte[]? _scrubLastDeliveredBuffer;
-        private int _scrubLastDeliveredLength;
+        // Memoized one-time scrub-session setup — see class remarks, SCRUB
+        // COALESCING. Started at most once; every ScrubToAsync call awaits
+        // whichever attempt is current rather than starting its own.
+        private Task? _scrubSetupTask;
+
+        // The most recent ScrubToAsync call's own supersession token — see
+        // class remarks, SCRUB COALESCING. Cancelled (and replaced) every
+        // time a new ScrubToAsync call arrives, so an older, now-stale
+        // request stops waiting/decoding promptly instead of queueing
+        // behind _scrubGate.
+        private CancellationTokenSource? _scrubSupersedeCts;
 
         public void Play(TimeSpan? startPosition = null)
         {
@@ -191,10 +267,10 @@ namespace EditSharp.Playback
             {
                 if (_isPlaying) return;
 
-                if (Speed <= 0f)
+                if (Speed == 0f)
                     throw new NotSupportedException(
-                        "Playback.Speed <= 0 (reverse or stopped-via-speed) is not supported yet " +
-                        "— see Playback's class remarks, gap 1.");
+                        "Playback.Speed cannot be 0 — that's Pause()/Stop(), not a playback rate. " +
+                        "Negative Speed (reverse) is supported — see Playback's class remarks.");
 
                 if (Timeline.Channels.Count == 0)
                     throw new ArgumentException("Timeline must contain at least one Channel.");
@@ -204,6 +280,8 @@ namespace EditSharp.Playback
                 if (resolvedStart < TimeSpan.Zero || resolvedStart > Timeline.Duration)
                     throw new ArgumentOutOfRangeException(nameof(startPosition),
                         $"startPosition must be within [0, {Timeline.Duration}].");
+
+                bool reverse = Speed < 0f;
 
                 _isPlaying = true;
                 _cts = new CancellationTokenSource();
@@ -216,6 +294,9 @@ namespace EditSharp.Playback
                 referenceClock.Report(resolvedStart);
                 _referenceClock = referenceClock;
 
+                // Reverse never participates with audio — see class remarks,
+                // REVERSE PLAYBACK. Math.Abs(Speed - 1f) is never < 0.0001f
+                // for a negative Speed, so this falls out naturally.
                 bool audioParticipates = Math.Abs(Speed - 1f) < 0.0001f;
 
                 bool videoFollows = audioParticipates && PlaybackMode == PlaybackMode.SyncToAudio;
@@ -226,7 +307,9 @@ namespace EditSharp.Playback
                     onReleased: () => OnPlaybackStarted(EventArgs.Empty));
 
                 _videoTask = Task.Run(
-                    () => VideoLoopAsync(token, resolvedStart, startGate, pauseGate, referenceClock, videoFollows),
+                    () => reverse
+                        ? ReverseVideoLoopAsync(token, resolvedStart, startGate, pauseGate, referenceClock)
+                        : VideoLoopAsync(token, resolvedStart, startGate, pauseGate, referenceClock, videoFollows),
                     token);
 
                 if (audioParticipates)
@@ -251,7 +334,7 @@ namespace EditSharp.Playback
                 {
                     EditSharpConfig.Logger.LogVerbose(
                         $"Speed={Speed} != 1 — audio is not played this session (see Playback's " +
-                        "class remarks, gap 2).");
+                        "class remarks, gap 2 / REVERSE PLAYBACK).");
                 }
             }
         }
@@ -296,25 +379,29 @@ namespace EditSharp.Playback
             _videoTask = null;
         }
 
-        public async Task<bool> RefreshScrubbingSupportAsync(CancellationToken ct = default)
+        /// <summary>
+        /// Always succeeds now — see class remarks, I-FRAME-ONLY SCRUB/
+        /// REVERSE. Kept for API compatibility with existing callers that
+        /// gate ScrubToAsync on this; safe to stop calling.
+        /// </summary>
+        public Task<bool> RefreshScrubbingSupportAsync(CancellationToken ct = default)
         {
-            bool supported = await RenderContentPreparation.AllVideoSourcesHaveSufficientCachedMediaAsync(
-                Timeline, (int)RenderSettings.Resolution.X, (int)RenderSettings.Resolution.Y);
-
-            ct.ThrowIfCancellationRequested();
-
-            SupportsScrubbing = supported;
-            return supported;
+            SupportsScrubbing = true;
+            return Task.FromResult(true);
         }
 
+        /// <summary>
+        /// Renders and delivers one frame at `position`, via VideoFrame.
+        /// SAFE TO CALL RAPIDLY — e.g. once per pointer-move during a
+        /// scrubber drag: each call supersedes (cancels) whatever previous
+        /// call hasn't finished yet, so only the LATEST requested position
+        /// ever actually completes and gets delivered — see class remarks,
+        /// SCRUB COALESCING. A superseded call's Task completes normally
+        /// (no exception) rather than throwing — only `ct` (if the CALLER
+        /// explicitly cancels it) propagates as a real cancellation.
+        /// </summary>
         public async Task ScrubToAsync(TimeSpan position, CancellationToken ct = default)
         {
-            if (!SupportsScrubbing)
-                throw new InvalidOperationException(
-                    "ScrubToAsync requires SupportsScrubbing — not every video source in Timeline " +
-                    "currently has sufficient cached optimized media. Prewarm the missing sources " +
-                    "via OptimizedMediaCache.PrewarmAsync and call RefreshScrubbingSupportAsync again.");
-
             lock (_stateLock)
             {
                 if (_isPlaying && !(_pauseGate?.IsPaused ?? false))
@@ -326,119 +413,119 @@ namespace EditSharp.Playback
                 throw new ArgumentOutOfRangeException(nameof(position),
                     $"position must be within [0, {Timeline.Duration}].");
 
+            var supersedeCts = new CancellationTokenSource();
+            CancellationTokenSource? previous = Interlocked.Exchange(ref _scrubSupersedeCts, supersedeCts);
+            if (previous != null)
+            {
+                previous.Cancel();
+                previous.Dispose();
+            }
+
+            using CancellationTokenSource linkedCts =
+                CancellationTokenSource.CreateLinkedTokenSource(ct, supersedeCts.Token);
+            CancellationToken linked = linkedCts.Token;
+
             int width = (int)RenderSettings.Resolution.X;
             int height = (int)RenderSettings.Resolution.Y;
             int fps = RenderSettings.Framerate;
 
-            await _scrubGate.WaitAsync(ct);
             try
             {
-                await EnsureScrubSessionBaseAsync(width, height, ct);
-
-                int targetFrameIndex = (int)(position.TotalSeconds * fps);
-
-                if (targetFrameIndex == _scrubLastFrameIndex && _scrubLastDeliveredBuffer != null)
+                await _scrubGate.WaitAsync(linked);
+                try
                 {
-                    OnVideoFrame(new VideoFrameEventArgs(
-                        _scrubLastDeliveredBuffer, _scrubLastDeliveredLength, width, height, position));
-                    return;
-                }
+                    // .WaitAsync(linked) — cancellable WAITING only, never
+                    // cancels the shared setup itself. See class remarks,
+                    // SCRUB COALESCING, point 2.
+                    await EnsureScrubSessionBaseAsync(width, height).WaitAsync(linked);
 
-                bool needsReopen =
-                    _scrubContentSource == null ||
-                    _scrubLastFrameIndex == null ||
-                    targetFrameIndex < _scrubLastFrameIndex.Value ||
-                    targetFrameIndex - _scrubLastFrameIndex.Value > ScrubForwardStepBudgetFrames;
+                    (byte[] buffer, int length) = await ComposeInstantFrameAsync(
+                        _scrubContentSource!, _scrubSurfacePool!, position, width, height, fps, linked);
 
-                int fromFrameIndex;
-
-                if (needsReopen)
-                {
-                    _scrubContentSource?.Dispose();
-
-                    Dictionary<Clip, TimeSpan> seekOffsets = ComputeSeekOffsets(Timeline, position);
-
-                    _scrubContentSource = new SkClipContentSource(
-                        fps, RenderSettings.HardwareAccelerator,
-                        _scrubNativeSizes!, _scrubDecodePlans!,
-                        seekOffsets, _scrubDecodeSourcePaths!);
-
-                    fromFrameIndex = targetFrameIndex;
-                }
-                else
-                {
-                    fromFrameIndex = _scrubLastFrameIndex!.Value + 1;
-                }
-
-                SkClipContentSource contentSource = _scrubContentSource;
-
-                byte[]? pooledBuffer = null;
-                int length = 0;
-
-                for (int frameIndex = fromFrameIndex; frameIndex <= targetFrameIndex; frameIndex++)
-                {
-                    FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps);
-
-                    (byte[] buffer, int bufLength) = SkFrameCompositor.RenderFrame(
-                        state, contentSource, width, height, fps, _scrubSurfacePool!);
-
-                    if (frameIndex == targetFrameIndex)
+                    try
                     {
-                        pooledBuffer = buffer;
-                        length = bufLength;
+                        OnVideoFrame(new VideoFrameEventArgs(buffer, length, width, height, position));
                     }
-                    else
+                    finally
                     {
                         ArrayPool<byte>.Shared.Return(buffer);
                     }
 
-                    if (_scrubDecoderReleaseSchedule!.TryGetValue(frameIndex, out List<Clip>? finished))
-                    {
-                        foreach (Clip clip in finished) contentSource.ReleaseDecoder(clip);
-                    }
-                }
-
-                _scrubLastFrameIndex = targetFrameIndex;
-
-                try
-                {
-                    _scrubLastDeliveredBuffer = pooledBuffer![..length];
-                    _scrubLastDeliveredLength = length;
-
-                    OnVideoFrame(new VideoFrameEventArgs(pooledBuffer, length, width, height, position));
+                    lock (_stateLock) { _lastKnownPosition = position; }
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(pooledBuffer!);
+                    _scrubGate.Release();
                 }
-
-                lock (_stateLock) { _lastKnownPosition = position; }
             }
-            finally
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
-                _scrubGate.Release();
+                // Superseded by a newer ScrubToAsync call — not the
+                // caller's own cancellation, so nothing to propagate. See
+                // class remarks, SCRUB COALESCING.
             }
         }
 
-        private async Task EnsureScrubSessionBaseAsync(int width, int height, CancellationToken ct)
+        /// <summary>
+        /// Resolves the FrameState at `position`, prefetches every visible
+        /// VideoClip through `contentSource` (see ScrubFrameSource's own
+        /// remarks on why prefetching is a separate async step from the
+        /// synchronous composite below), then composites exactly one frame.
+        /// Shared by ScrubToAsync (on demand) and ReverseVideoLoopAsync (on
+        /// its own pacing timer) — both are, mechanically, "compose one
+        /// frame at an arbitrary position, instantly."
+        /// </summary>
+        private async Task<(byte[] Buffer, int Length)> ComposeInstantFrameAsync(
+            ScrubFrameSource contentSource, SkSurfacePool pool,
+            TimeSpan position, int width, int height, int fps, CancellationToken ct = default)
         {
-            if (_scrubGpuContext != null) return;
+            int frameIndex = (int)(position.TotalSeconds * fps);
+            FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps);
 
+            foreach (FrameChannel channel in state.Channels)
+            {
+                foreach (FrameClip frameClip in channel.Clips)
+                {
+                    if (frameClip.Clip is VideoClip videoClip)
+                    {
+                        await contentSource.PrefetchAsync(
+                            videoClip, frameClip.ClipSeconds, width, height, pool, ct);
+                    }
+                }
+            }
+
+            (byte[] buffer, int length) = SkFrameCompositor.RenderFrame(
+                state, contentSource, width, height, fps, pool);
+
+            contentSource.ClearPrefetch();
+
+            return (buffer, length);
+        }
+
+        /// <summary>
+        /// Kicks off the one-time scrub-session setup at most once
+        /// (_scrubSetupTask, memoized) and returns whatever attempt is
+        /// current — see class remarks, SCRUB COALESCING, point 2. Callers
+        /// wrap the returned Task in their own cancellable WaitAsync rather
+        /// than this method taking a CancellationToken itself: the setup
+        /// must always run to completion once started, regardless of which
+        /// caller triggered it or whether that caller is later superseded.
+        /// </summary>
+        private Task EnsureScrubSessionBaseAsync(int width, int height) =>
+            _scrubSetupTask ??= BuildScrubSessionAsync(width, height);
+
+        private async Task BuildScrubSessionAsync(int width, int height)
+        {
             var nativeSizes = new ConcurrentDictionary<Guid, (int, int)>();
             var decodePlans = new ConcurrentDictionary<Guid, DecodeHwAccelPlan>();
-            var decodeSourcePaths = new ConcurrentDictionary<Guid, string>();
 
-            await RenderContentPreparation.PrepareContentAsync(
-                Timeline, width, height, RenderSettings.HardwareAccelerator,
-                nativeSizes, decodePlans, decodeSourcePaths);
-
-            ct.ThrowIfCancellationRequested();
+            await PrepareScrubNativeInfoAsync(
+                Timeline, RenderSettings.HardwareAccelerator, nativeSizes, decodePlans);
 
             _scrubNativeSizes = nativeSizes;
             _scrubDecodePlans = decodePlans;
-            _scrubDecodeSourcePaths = decodeSourcePaths;
-            _scrubDecoderReleaseSchedule =
-                RenderContentPreparation.BuildDecoderReleaseSchedule(Timeline, RenderSettings.Framerate);
+            _scrubContentSource = new ScrubFrameSource(
+                RenderSettings.Framerate, RenderSettings.HardwareAccelerator, nativeSizes, decodePlans);
 
             _scrubGpuContext = GpuContext.Create(
                 RenderSettings.HardwareAccelerator, RenderSettings.GpuAdapterIndex);
@@ -451,11 +538,17 @@ namespace EditSharp.Playback
             _scrubGate.Wait();
             try
             {
+                CancellationTokenSource? pending = Interlocked.Exchange(ref _scrubSupersedeCts, null);
+                if (pending != null)
+                {
+                    pending.Cancel();
+                    pending.Dispose();
+                }
+
+                _scrubSetupTask = null;
+
                 _scrubContentSource?.Dispose();
                 _scrubContentSource = null;
-                _scrubLastFrameIndex = null;
-                _scrubLastDeliveredBuffer = null;
-                _scrubLastDeliveredLength = 0;
 
                 _scrubSurfacePool?.Dispose();
                 _scrubSurfacePool = null;
@@ -465,12 +558,51 @@ namespace EditSharp.Playback
 
                 _scrubNativeSizes = null;
                 _scrubDecodePlans = null;
-                _scrubDecodeSourcePaths = null;
-                _scrubDecoderReleaseSchedule = null;
             }
             finally
             {
                 _scrubGate.Release();
+            }
+        }
+
+        /// <summary>
+        /// Native size + decode-hwaccel-plan probing for scrubbing/reverse
+        /// playback — deliberately NOT RenderContentPreparation.
+        /// PrepareContentAsync, which also consults OptimizedMediaCache.
+        /// Scrubbing/reverse always decode straight from each clip's own
+        /// original source now (see class remarks, I-FRAME-ONLY SCRUB/
+        /// REVERSE) — this only probes what ScrubFrameSource actually needs
+        /// (native dimensions, for aspect-fit math, and a decode plan), with
+        /// no cache lookup at all.
+        /// </summary>
+        private static async Task PrepareScrubNativeInfoAsync(
+            Timeline timeline, HardwareAccelerator hwAccel,
+            ConcurrentDictionary<Guid, (int, int)> nativeSizes,
+            ConcurrentDictionary<Guid, DecodeHwAccelPlan> decodePlans)
+        {
+            var tasks = new List<Task>();
+
+            foreach (VideoChannel channel in timeline.VideoChannels)
+            {
+                foreach (Clip clip in channel.Clips)
+                {
+                    if (clip is not VideoClip video) continue;
+
+                    foreach (VideoSourceNode media in video.Graph.Nodes.OfType<VideoSourceNode>())
+                    {
+                        if (media.Source.Type != SourceType.Video) continue;
+                        tasks.Add(ProbeOneAsync(media));
+                    }
+                }
+            }
+
+            await Task.WhenAll(tasks);
+
+            async Task ProbeOneAsync(VideoSourceNode media)
+            {
+                (int width, int height) = await MediaProbe.GetDimensionsAsync(media.Source.Path);
+                nativeSizes[media.Id] = (width, height);
+                decodePlans[media.Id] = await FfmpegRunner.GetDecodePlanAsync(media.Source.Path, hwAccel);
             }
         }
 
@@ -508,8 +640,6 @@ namespace EditSharp.Playback
                     await RenderContentPreparation.PrepareContentAsync(
                         Timeline, width, height, RenderSettings.HardwareAccelerator,
                         nativeSizes, decodePlans, decodeSourcePaths);
-
-                    SupportsScrubbing = AllVideoClipsRedirectedToCache(Timeline, decodeSourcePaths);
 
                     Dictionary<Clip, TimeSpan> seekOffsets = ComputeSeekOffsets(Timeline, startPosition);
 
@@ -654,30 +784,158 @@ namespace EditSharp.Playback
         }
 
         /// <summary>
-        /// Cheap, no-I/O check: true when every Video-type MediaSourceNode
-        /// across every VideoClip in `timeline` was redirected in
-        /// `decodeSourcePaths`.
+        /// REVERSE PLAYBACK (Speed &lt; 0): steps backward through the
+        /// timeline at I-FRAME GRANULARITY — reuses the exact same instant,
+        /// keyframe-snapped decode ScrubToAsync uses (ScrubFrameSource /
+        /// KeyframeIndex / SkSourceDecoder.DecodeSingleFrameAsync), NOT the
+        /// persistent forward-only SkSourceDecoder pipe VideoLoopAsync uses,
+        /// which structurally cannot move backward at all. See Playback's
+        /// class remarks, I-FRAME-ONLY SCRUB/REVERSE.
+        ///
+        /// Audio never participates here — Play() already gates audio to
+        /// Speed == 1 (audioParticipates), which negative Speed never
+        /// satisfies — so this loop is always the sole leader of its own
+        /// session; there is no reference-clock-follow branch to consider,
+        /// unlike VideoLoopAsync.
+        ///
+        /// PACING mirrors VideoLoopAsync's own leader pacing (a Stopwatch,
+        /// content-time-offset-scaled-by-1/|Speed|) just walking frame
+        /// indices DOWN instead of up. Every step recomposes a full frame at
+        /// its own arbitrary TimeSpan position via ComposeInstantFrameAsync,
+        /// passing `token` through so Stop()/Dispose() cancels any in-flight
+        /// decode promptly (same cancellation plumbing ScrubToAsync uses —
+        /// see class remarks, SCRUB COALESCING).
+        ///
+        /// VISUAL CHARACTER, NAMED NOT HIDDEN: because only I-frames are
+        /// ever decoded, positions that fall within the same GOP as the
+        /// last-rendered one land on the SAME cached keyframe image (see
+        /// ScrubFrameSource's own remarks) — reverse playback looks like a
+        /// fast rewind (jumps between keyframes, typically a few seconds
+        /// apart) rather than smooth backward motion. That's the deliberate
+        /// trade-off behind "instant, no buffering, no persistent decoder."
         /// </summary>
-        private static bool AllVideoClipsRedirectedToCache(
-            Timeline timeline, IReadOnlyDictionary<Guid, string> decodeSourcePaths)
+        private async Task ReverseVideoLoopAsync(
+            CancellationToken token, TimeSpan startPosition,
+            PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
+            PlaybackReferenceClock referenceClock)
         {
-            foreach (VideoChannel channel in timeline.VideoChannels)
+            int width = (int)RenderSettings.Resolution.X;
+            int height = (int)RenderSettings.Resolution.Y;
+            int fps = RenderSettings.Framerate;
+            double speedMagnitude = Math.Abs(Speed);
+
+            try
             {
-                foreach (Clip clip in channel.Clips)
+                try
                 {
-                    if (clip is not VideoClip video) continue;
+                    var nativeSizes = new ConcurrentDictionary<Guid, (int, int)>();
+                    var decodePlans = new ConcurrentDictionary<Guid, DecodeHwAccelPlan>();
 
-                    foreach (VideoSourceNode media in video.Graph.Nodes.OfType<VideoSourceNode>())
+                    await PrepareScrubNativeInfoAsync(
+                        Timeline, RenderSettings.HardwareAccelerator, nativeSizes, decodePlans);
+
+                    using var contentSource = new ScrubFrameSource(
+                        fps, RenderSettings.HardwareAccelerator, nativeSizes, decodePlans);
+
+                    using GpuContext gpuContext = GpuContext.Create(
+                        RenderSettings.HardwareAccelerator, RenderSettings.GpuAdapterIndex);
+                    using var surfacePool = new SkSurfacePool(
+                        gpuContext.GRContext, width, height, Timeline.VideoChannels.Count);
+
+                    int startFrame = (int)(startPosition.TotalSeconds * fps);
+
+                    (byte[] warmupBuffer, int warmupLength) = await ComposeInstantFrameAsync(
+                        contentSource, surfacePool, startPosition, width, height, fps, token);
+                    EditSharpConfig.Logger.LogVerbose("Reverse video warm-up frame rendered.");
+
+                    await startGate.ReadyAndWaitAsync(token);
+
+                    var clock = Stopwatch.StartNew();
+                    EditSharpConfig.Logger.LogVerbose("Reverse video pacing clock started.");
+
+                    referenceClock.Report(startPosition);
+                    try
                     {
-                        if (media.Source.Type != SourceType.Video) continue;
-
-                        if (!decodeSourcePaths.TryGetValue(media.Id, out string? decodePath)) return false;
-                        if (decodePath == media.Source.Path) return false;
+                        OnVideoFrame(new VideoFrameEventArgs(warmupBuffer, warmupLength, width, height, startPosition));
                     }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(warmupBuffer);
+                    }
+
+                    if (startFrame <= 0)
+                    {
+                        TearDownAfterNaturalEnd();
+                        OnEndReached(EventArgs.Empty);
+                        return;
+                    }
+
+                    for (int frameIndex = startFrame - 1; frameIndex >= 0; frameIndex--)
+                    {
+                        TimeSpan frameOffset = TimeSpan.FromSeconds((startFrame - frameIndex) / (double)fps);
+                        TimeSpan framePosition = startPosition - frameOffset;
+                        if (framePosition < TimeSpan.Zero) framePosition = TimeSpan.Zero;
+
+                        while (true)
+                        {
+                            if (token.IsCancellationRequested) return;
+
+                            if (pauseGate.IsPaused)
+                            {
+                                clock.Stop();
+                                try { await pauseGate.WaitIfPausedAsync(token); }
+                                catch (OperationCanceledException) { return; }
+                                clock.Start();
+                                continue;
+                            }
+
+                            break;
+                        }
+
+                        TimeSpan targetElapsed = TimeSpan.FromSeconds(frameOffset.TotalSeconds / speedMagnitude);
+                        TimeSpan actualElapsed = clock.Elapsed;
+
+                        if (targetElapsed > actualElapsed)
+                        {
+                            try { await Task.Delay(targetElapsed - actualElapsed, token); }
+                            catch (OperationCanceledException) { return; }
+                        }
+
+                        (byte[] buffer, int length) = await ComposeInstantFrameAsync(
+                            contentSource, surfacePool, framePosition, width, height, fps, token);
+
+                        referenceClock.Report(framePosition);
+
+                        try
+                        {
+                            OnVideoFrame(new VideoFrameEventArgs(buffer, length, width, height, framePosition));
+                        }
+                        finally
+                        {
+                            ArrayPool<byte>.Shared.Return(buffer);
+                        }
+
+                        if (framePosition == TimeSpan.Zero) break;
+                    }
+
+                    TearDownAfterNaturalEnd();
+
+                    OnEndReached(EventArgs.Empty);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    startGate.Fault(ex);
+                    throw;
                 }
             }
-
-            return true;
+            finally
+            {
+                lock (_stateLock) { _isPlaying = false; }
+            }
         }
 
         private void TearDownAfterNaturalEnd()

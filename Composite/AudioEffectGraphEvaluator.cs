@@ -19,7 +19,7 @@ namespace EditSharp.Composite
     /// "CLIPS ARE GRAPHS" REWRITE:
     ///   - There is no longer a single fixed AudioSourceNode anchor seeded
     ///     with one externally-decoded `content` buffer. An Audio-domain
-    ///     graph can have ANY NUMBER of InputNodes (MediaAudioSourceNode/
+    ///     graph can have ANY NUMBER of InputNodes (AudioSourceNode/
     ///     ToneGeneratorInputNode/TimelineAudioInputNode), each already
     ///     resolved to a raw AudioBuffer by the caller (AudioMixer — see its
     ///     own remarks on per-InputNode-type dispatch) and handed in here as

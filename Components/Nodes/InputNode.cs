@@ -17,10 +17,10 @@ namespace EditSharp.Components.Nodes
     /// with more than one InputNode, no different in kind from one with a
     /// single InputNode.
     ///
-    /// Concrete video-domain InputNodes: MediaSourceNode, TextInputNode,
+    /// Concrete video-domain InputNodes: VideoSourceNode, TextInputNode,
     /// ColorGeneratorInputNode, NoiseInputNode, TimelineVideoInputNode (see
     /// EditSharp.Components.Nodes.Sources.Video). Concrete audio-domain
-    /// InputNodes: MediaAudioSourceNode, ToneGeneratorInputNode,
+    /// InputNodes: AudioSourceNode, ToneGeneratorInputNode,
     /// TimelineAudioInputNode (see EditSharp.Components.Nodes.Sources.Audio).
     /// These are what replaced the old VideoClip.Source-is-the-whole-clip /
     /// TextClip / GeneratorClip / NoiseClip / TimelineVideoClip /

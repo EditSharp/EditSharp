@@ -109,7 +109,7 @@ namespace EditSharp.Components.Nodes
  
         /// <summary>
         /// A "normal/default" video clip: a single InputNode you supply
-        /// (a MediaSourceNode wrapping a Source, in the common case, but
+        /// (a VideoSourceNode wrapping a Source, in the common case, but
         /// any InputNode works — see VideoClip's own static factories),
         /// wired through the two nodes every visual clip gets by default:
         /// TintNode (what replaced the old flat Modulate/tint-and-opacity
@@ -136,7 +136,7 @@ namespace EditSharp.Components.Nodes
  
         /// <summary>
         /// A "normal/default" audio clip: a single InputNode you supply
-        /// (a MediaAudioSourceNode wrapping a Source, in the common case —
+        /// (a AudioSourceNode wrapping a Source, in the common case —
         /// see AudioClip's own static factories), wired through GainNode —
         /// what replaced the old flat AudioClip.Volume field, unchanged
         /// from before this rewrite.

@@ -17,7 +17,7 @@ namespace EditSharp.Composite
     ///
     /// "CLIPS ARE GRAPHS" REWRITE — this class shrank a lot:
     ///   - Keyed by INPUT NODE Id (Guid), not by Clip. A VideoClip's graph
-    ///     can now contain any number of MediaSourceNodes, each with its own
+    ///     can now contain any number of VideoSourceNodes, each with its own
     ///     native size / decode plan / decode source path — there's no
     ///     longer a single "the clip's source" to key a Dictionary&lt;Clip,...&gt;
     ///     by.
@@ -31,11 +31,11 @@ namespace EditSharp.Composite
     ///     whatever image is ACTUALLY upstream of it at evaluation time (see
     ///     EffectGraphEvaluatorSk's own remarks), not from a value this class
     ///     precomputed.
-    ///   - A MediaSourceNode with Source.Type == Image similarly needs no
+    ///   - A VideoSourceNode with Source.Type == Image similarly needs no
     ///     prep: SkClipContentSource just loads it directly and caches the
     ///     decoded SKImage in memory, with no path lookup required.
     ///   - The ONLY thing that genuinely still benefits from being probed
-    ///     once, up front, is a Video-type MediaSourceNode: its native
+    ///     once, up front, is a Video-type VideoSourceNode: its native
     ///     dimensions (needed to size an ffmpeg decode target and to judge
     ///     OptimizedMediaCache sufficiency) and which file its decoder
     ///     should actually open.
@@ -80,7 +80,7 @@ namespace EditSharp.Composite
         }
 
         /// <summary>
-        /// Probes one MediaSourceNode's ORIGINAL source for its native size
+        /// Probes one VideoSourceNode's ORIGINAL source for its native size
         /// (needed for aspect-fit math regardless of which file ends up
         /// actually decoded), then decides which file
         /// SkClipContentSource.GetOrOpenDecoder should actually open — see
@@ -109,7 +109,7 @@ namespace EditSharp.Composite
         /// <summary>
         /// The shared cache-sufficiency check: looks up an OPPORTUNISTIC
         /// (never-building) cached entry for `sourcePath`, and returns its
-        /// Path only when it has enough resolution for this MediaSourceNode's
+        /// Path only when it has enough resolution for this VideoSourceNode's
         /// own largest on-screen size. Returns null on a cache miss, an
         /// insufficient entry, or any lookup failure — callers fall back to
         /// the original source in every one of those cases.
@@ -161,7 +161,7 @@ namespace EditSharp.Composite
         }
 
         /// <summary>
-        /// True when every Video-type MediaSourceNode across the whole
+        /// True when every Video-type VideoSourceNode across the whole
         /// timeline currently has a persistent OptimizedMediaCache entry with
         /// enough resolution for its own on-screen size — what
         /// Playback.SupportsScrubbing is computed from. A timeline with no
@@ -213,7 +213,7 @@ namespace EditSharp.Composite
         /// <summary>
         /// The frame index at which each video clip's decoders (there may be
         /// more than one — see SkClipContentSource.ReleaseDecoder, which
-        /// releases every Video-type MediaSourceNode's decoder for a clip at
+        /// releases every Video-type VideoSourceNode's decoder for a clip at
         /// once) can be torn down — the LAST frame that clip is visible on.
         /// Still keyed by Clip, not by node — a clip's decoders all share the
         /// clip's own visible window regardless of how many it has.

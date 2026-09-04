@@ -10,7 +10,7 @@ using EditSharp.Components;
 namespace EditSharp.Composite
 {
     /// <summary>
-    /// Decodes a MediaAudioSourceNode's Source directly to an in-memory AudioBuffer,
+    /// Decodes a AudioSourceNode's Source directly to an in-memory AudioBuffer,
     /// already fitted to exactly the clip's own timeline Duration (trimmed,
     /// looped, or held, same semantics ClipContentBuilder's old ffmpeg
     /// atrim/apad/stream_loop filter lines used to produce) — this is the
@@ -36,7 +36,7 @@ namespace EditSharp.Composite
         /// Decodes `source`'s audio and fits it to exactly `clipDuration` at
         /// `sampleRate`/`channels`. Throws if the source has no audio stream at
         /// all — the caller (AudioMixer) is expected to have already established
-        /// this is a MediaAudioSourceNode whose Source is meant to provide sound.
+        /// this is a AudioSourceNode whose Source is meant to provide sound.
         /// </summary>
         public static async Task<AudioBuffer> DecodeAsync(
             Source source, TimeSpan clipDuration, int sampleRate, int channels,

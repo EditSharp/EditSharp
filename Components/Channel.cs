@@ -301,7 +301,7 @@ namespace EditSharp.Components
         /// rather than raw Start/Duration field assignment specifically so
         /// OnHeadInPointShift runs on the tail fragment — that's what
         /// correctly advances every trimmable input node's own in-point
-        /// (MediaSourceNode.Source.Start, TimelineVideoInputNode.Reference.Start,
+        /// (VideoSourceNode.Source.Start, TimelineVideoInputNode.Reference.Start,
         /// etc.) to match where the tail fragment now actually starts
         /// reading from. Raw field assignment would leave a split tail
         /// silently pointing at the wrong in-point.

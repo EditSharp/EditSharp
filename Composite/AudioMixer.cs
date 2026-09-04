@@ -17,7 +17,7 @@ namespace EditSharp.Composite
     /// TimelineAudioClip shapes are gone. AudioClip is now the only concrete
     /// audible Clip type, and what used to distinguish "a real audio file"
     /// from "an embedded nested timeline" is now just which InputNode(s) its
-    /// single Graph happens to contain — MediaAudioSourceNode,
+    /// single Graph happens to contain — AudioSourceNode,
     /// ToneGeneratorInputNode (brand new — there was no synthesized-tone clip
     /// type before this), or TimelineAudioInputNode. ComposeClipAsync
     /// resolves EVERY InputNode in a clip's graph to its own raw AudioBuffer
@@ -30,7 +30,7 @@ namespace EditSharp.Composite
     /// ONLY AudioChannels ARE EVEN CONSIDERED HERE, UNCONDITIONALLY — not a
     /// "known gap": a VideoChannel's clips are all VideoClip, and per the
     /// schema a VideoClip NEVER represents or contributes audio to a render,
-    /// full stop. A VideoClip's MediaSourceNode.Source may well have its own
+    /// full stop. A VideoClip's VideoSourceNode.Source may well have its own
     /// audio track in the underlying file, but that track is never read,
     /// never mixed, and never surfaced anywhere in this pipeline. Getting a
     /// video file's sound onto the timeline means pairing a VideoClip with an

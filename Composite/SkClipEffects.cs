@@ -20,7 +20,7 @@ namespace EditSharp.Composite
     /// change:
     ///   - There is no longer a single fixed ImageSourceNode anchor seeded
     ///     with one externally-decoded `content` image. A graph can have
-    ///     ANY NUMBER of InputNodes (MediaSourceNode/TextInputNode/
+    ///     ANY NUMBER of InputNodes (VideoSourceNode/TextInputNode/
     ///     ColorGeneratorInputNode/NoiseInputNode/TimelineVideoInputNode),
     ///     each already resolved to a raw SKImage by the caller
     ///     (SkClipContentSource — see its own remarks on per-InputNode-type
