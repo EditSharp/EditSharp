@@ -7,7 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using EditSharp;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
@@ -92,7 +92,7 @@ namespace EditSharp.Composite
         /// values elsewhere.
         /// </summary>
         private const int SampleCount = 8;
- 
+
         /// <summary>
         /// Size of each sampled chunk — 64 KiB. Large enough that a chunk
         /// captures real structure (not just a handful of bytes that could
@@ -100,7 +100,7 @@ namespace EditSharp.Composite
         /// (512 KiB total) stays trivial to read even on a slow disk.
         /// </summary>
         private const int SampleChunkSize = 64 * 1024;
- 
+
         /// <summary>
         /// Below this size, sampling would already touch a large fraction
         /// of the file anyway (and risks overlapping chunks — see
@@ -110,18 +110,18 @@ namespace EditSharp.Composite
         /// thing here.
         /// </summary>
         private const long FullHashThreshold = SampleCount * SampleChunkSize;
- 
+
         private readonly record struct CacheKey(string Path, long Length, long LastWriteTimeUtcTicks);
- 
+
         private sealed class SidecarEntry
         {
             public long Length { get; set; }
             public long LastWriteTimeUtcTicks { get; set; }
             public string Hash { get; set; } = "";
         }
- 
+
         private static readonly ConcurrentDictionary<CacheKey, string> _inMemory = new();
- 
+
         // Guards the on-disk sidecar index against concurrent read/write from
         // multiple hash requests in the same process. Cross-PROCESS races on
         // the same index file are resolved by "last writer wins" on save,
@@ -130,7 +130,7 @@ namespace EditSharp.Composite
         // atomically via a temp file + File.Move, never edited in place.
         private static readonly SemaphoreSlim _sidecarGate = new(1, 1);
         private static Dictionary<string, SidecarEntry>? _sidecar;
- 
+
         /// <summary>
         /// Lower-case hex SHA-256 over `path`'s length and a small, fixed
         /// set of sampled byte ranges (see the class remarks for why this
@@ -146,33 +146,33 @@ namespace EditSharp.Composite
             var info = new FileInfo(path);
             if (!info.Exists)
                 throw new FileNotFoundException($"Cannot hash '{path}' — file not found.", path);
- 
+
             var key = new CacheKey(NormalizePath(path), info.Length, info.LastWriteTimeUtc.Ticks);
- 
+
             if (_inMemory.TryGetValue(key, out string? cached))
                 return cached;
- 
+
             string? fromSidecar = await TryReadSidecarAsync(key, ct);
             if (fromSidecar != null)
             {
                 _inMemory[key] = fromSidecar;
                 return fromSidecar;
             }
- 
+
             string hash = await HashFileAsync(path, info.Length, ct);
- 
+
             _inMemory[key] = hash;
             await WriteSidecarAsync(key, hash, ct);
- 
+
             return hash;
         }
- 
+
         private static async Task<string> HashFileAsync(string path, long length, CancellationToken ct)
         {
             using var stream = new FileStream(
                 path, FileMode.Open, FileAccess.Read, FileShare.Read,
                 bufferSize: 1 << 16, useAsync: true);
- 
+
             if (length <= FullHashThreshold)
             {
                 // Small file — sampling would overlap itself and buys
@@ -182,9 +182,9 @@ namespace EditSharp.Composite
                 byte[] wholeFileHash = await SHA256.HashDataAsync(stream, ct);
                 return Convert.ToHexString(wholeFileHash).ToLowerInvariant();
             }
- 
+
             using var sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
- 
+
             // Length goes into the hash FIRST and explicitly — two files
             // that happen to agree at every sampled offset but differ in
             // overall size (e.g. one is a truncated/extended copy of the
@@ -192,15 +192,15 @@ namespace EditSharp.Composite
             // sampled bytes would be compared and a length difference
             // outside the sampled ranges could go unnoticed.
             sha256.AppendData(BitConverter.GetBytes(length));
- 
+
             byte[] buffer = new byte[SampleChunkSize];
- 
+
             foreach (long offset in SampleOffsets(length))
             {
                 stream.Seek(offset, SeekOrigin.Begin);
- 
+
                 int read = await ReadFullyAsync(stream, buffer, SampleChunkSize, ct);
- 
+
                 // The offset itself is also part of the hashed data (not
                 // just the bytes read from it) — otherwise two files whose
                 // content is simply shifted relative to each other (the
@@ -209,11 +209,11 @@ namespace EditSharp.Composite
                 sha256.AppendData(BitConverter.GetBytes(offset));
                 sha256.AppendData(buffer, 0, read);
             }
- 
+
             byte[] hashBytes = sha256.GetHashAndReset();
             return Convert.ToHexString(hashBytes).ToLowerInvariant();
         }
- 
+
         /// <summary>
         /// SampleCount offsets spread evenly from byte 0 to `length -
         /// SampleChunkSize` inclusive — the first sample always starts at
@@ -233,7 +233,7 @@ namespace EditSharp.Composite
         private static IEnumerable<long> SampleOffsets(long length)
         {
             long maxOffset = length - SampleChunkSize;
- 
+
             for (int i = 0; i < SampleCount; i++)
             {
                 // Integer math ordered to avoid overflow on a very large
@@ -245,11 +245,11 @@ namespace EditSharp.Composite
                 long offset = SampleCount == 1
                     ? 0
                     : (long)((double)i / (SampleCount - 1) * maxOffset);
- 
+
                 yield return offset;
             }
         }
- 
+
         /// <summary>
         /// Reads up to `count` bytes into `buffer`, looping until either
         /// `count` bytes have been read or the stream ends — a single
@@ -269,7 +269,7 @@ namespace EditSharp.Composite
             }
             return total;
         }
- 
+
         private static string NormalizePath(string path) =>
             // Windows paths are case-insensitive, and this project's own
             // GpuContext remarks call out the actual target machine as
@@ -278,14 +278,14 @@ namespace EditSharp.Composite
             // silently missing the in-process/sidecar cache for a path that
             // only differs in case.
             Path.GetFullPath(path).ToLowerInvariant();
- 
+
         private static string SidecarPath =>
             Path.Combine(EditSharpConfig.OptimizedMediaDirectory, "hash-index-v2.json");
- 
+
         private static async Task EnsureSidecarLoadedAsync(CancellationToken ct)
         {
             if (_sidecar != null) return;
- 
+
             if (File.Exists(SidecarPath))
             {
                 try
@@ -305,24 +305,24 @@ namespace EditSharp.Composite
                         $"MediaHasher: hash sidecar unreadable, rebuilding: {ex.Message}");
                 }
             }
- 
+
             _sidecar = new Dictionary<string, SidecarEntry>();
         }
- 
+
         private static async Task<string?> TryReadSidecarAsync(CacheKey key, CancellationToken ct)
         {
             await _sidecarGate.WaitAsync(ct);
             try
             {
                 await EnsureSidecarLoadedAsync(ct);
- 
+
                 if (_sidecar!.TryGetValue(key.Path, out SidecarEntry? entry) &&
                     entry.Length == key.Length &&
                     entry.LastWriteTimeUtcTicks == key.LastWriteTimeUtcTicks)
                 {
                     return entry.Hash;
                 }
- 
+
                 return null;
             }
             finally
@@ -330,28 +330,28 @@ namespace EditSharp.Composite
                 _sidecarGate.Release();
             }
         }
- 
+
         private static async Task WriteSidecarAsync(CacheKey key, string hash, CancellationToken ct)
         {
             await _sidecarGate.WaitAsync(ct);
             try
             {
                 await EnsureSidecarLoadedAsync(ct);
- 
+
                 _sidecar![key.Path] = new SidecarEntry
                 {
                     Length = key.Length,
                     LastWriteTimeUtcTicks = key.LastWriteTimeUtcTicks,
                     Hash = hash,
                 };
- 
+
                 Directory.CreateDirectory(EditSharpConfig.OptimizedMediaDirectory);
                 string tempPath = Path.Combine(
                     Path.GetDirectoryName(SidecarPath) ?? "",
                     $"{Path.GetFileName(SidecarPath)}.tmp-{Guid.NewGuid():N}");
- 
+
                 await File.WriteAllTextAsync(tempPath, JsonSerializer.Serialize(_sidecar), ct);
- 
+
                 // Atomic on the same volume — never leaves the sidecar file
                 // itself half-written for a concurrent reader to trip over.
                 File.Move(tempPath, SidecarPath, overwrite: true);
@@ -374,4 +374,3 @@ namespace EditSharp.Composite
         }
     }
 }
- 

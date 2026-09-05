@@ -95,9 +95,40 @@ namespace EditSharp.Composite
     /// is free to remove it; kept here for now rather than guessing at
     /// removal without the go-ahead to delete a still-generically-useful
     /// primitive.
+    ///
+    /// Dispose() ACTUALLY WAITS FOR THE KILLED PROCESS TO EXIT (fixed here,
+    /// real bug — found via Playback's own eager-release-on-pause work):
+    /// Kill() only SENDS the termination signal — it does not block until
+    /// the OS has actually reaped the process, and for a GPU-hwaccel decode
+    /// in particular, driver-side teardown of its decode session can take a
+    /// real, user-visible amount of time (reported on real hardware: a
+    /// switch between playback and scrubbing hung unless the user
+    /// deliberately waited a few seconds after pausing first, and the
+    /// symptom tracked exactly with "the ffmpeg processes haven't
+    /// terminated yet"). Dispose() previously returned the instant Kill()
+    /// was called, so a caller that disposes a decoder and immediately does
+    /// something GPU-related (stand up a new GpuContext, spawn a new
+    /// GPU-hwaccel decode) could race the OLD process's still-in-progress
+    /// driver teardown. This matters more than it used to now that
+    /// Playback's VideoLoopAsync/ReverseVideoLoopAsync eagerly dispose their
+    /// own decoders (via SkClipContentSource, via VideoLoopResources) the
+    /// moment a pause is noticed, then immediately try to build fresh GPU
+    /// resources on resume or reacquire — see Playback's own class remarks,
+    /// NO TWO LIVE GPU CONTEXTS. Fixed by having Dispose() block on
+    /// WaitForExit (bounded by DisposeWaitForExitTimeout) after Kill(),
+    /// so a decoder is only actually considered "gone" — and safe to be
+    /// followed by new GPU work — once the OS confirms it.
     /// </summary>
     internal sealed class SkSourceDecoder : IDisposable
     {
+        // Bound on how long Dispose() blocks waiting for a killed process to
+        // actually exit — see the class remarks just above. Kill() itself is
+        // near-instant; this timeout only matters if the OS/driver teardown
+        // is unusually slow, and exists purely so a pathological hang can't
+        // turn Dispose() into an infinite block. Hitting it is logged, not
+        // thrown — Dispose() must not throw.
+        private static readonly TimeSpan DisposeWaitForExitTimeout = TimeSpan.FromSeconds(10);
+
         private readonly Process _process;
         private readonly Stream _stdout;
         private readonly int _width;
@@ -544,18 +575,41 @@ namespace EditSharp.Composite
         }
 
         /// <summary>
-        /// Terminates the decode subprocess. Must be called once this
-        /// clip's visible window ends, even if the source hadn't reached
-        /// EOF yet (clip shorter than its source) — an ffmpeg process piping
-        /// to a pipe nobody is draining anymore will otherwise sit blocked
-        /// on a full pipe buffer indefinitely rather than exiting on its own.
+        /// Terminates the decode subprocess AND WAITS FOR IT TO ACTUALLY
+        /// EXIT (see the class remarks just above this class's own summary
+        /// for why the wait was added — Kill() alone only sends the signal,
+        /// it doesn't block until the OS/driver have actually finished
+        /// tearing the process down). Must be called once this clip's
+        /// visible window ends, even if the source hadn't reached EOF yet
+        /// (clip shorter than its source) — an ffmpeg process piping to a
+        /// pipe nobody is draining anymore will otherwise sit blocked on a
+        /// full pipe buffer indefinitely rather than exiting on its own.
+        ///
+        /// Bounded by DisposeWaitForExitTimeout rather than waiting
+        /// unconditionally — Dispose() must never be able to hang forever;
+        /// a timeout is logged (not thrown) and Dispose() still proceeds to
+        /// release its own managed handles either way. Hitting the timeout
+        /// in practice would mean the OS/driver itself is stuck tearing
+        /// this process down, which no amount of additional waiting here
+        /// would fix.
         /// </summary>
         public void Dispose()
         {
             try
             {
                 if (!_process.HasExited)
+                {
                     _process.Kill(entireProcessTree: true);
+
+                    if (!_process.WaitForExit(DisposeWaitForExitTimeout))
+                    {
+                        EditSharpConfig.Logger.Log(
+                            $"SkSourceDecoder.Dispose('{_sourcePath}'): killed ffmpeg process did not exit " +
+                            $"within {DisposeWaitForExitTimeout.TotalSeconds:F0}s — proceeding anyway. If this " +
+                            "recurs, a caller doing GPU work immediately after disposing a decoder may still " +
+                            "race this process's own teardown.");
+                    }
+                }
             }
             catch (InvalidOperationException)
             {
