@@ -214,6 +214,23 @@ namespace EditSharp.Components.Clips
             TimeSpan end = End < other.End ? End : other.End;
             return end > start ? end - start : TimeSpan.Zero;
         }
+
+        public TimeSpan DistanceFrom(Clip other) 
+        {
+            // if clips intersect at all, immediately return zero distance
+            if (IntersectionWith(other) > TimeSpan.Zero) return TimeSpan.Zero;
+
+            // this clip comes before the other clip
+            if (End < other.Start) 
+            {
+                return other.Start - End;
+            }
+            // this clip comes after the other clip
+            else 
+            {
+                return Start - other.End;
+            }
+        }
     }
 }
  
