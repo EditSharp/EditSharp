@@ -67,7 +67,9 @@ namespace EditSharp.Playback
     /// only the locally-held fallback — see SCRUBBING WHILE PAUSED UPDATES
     /// Position below. A scrub taken while paused is no longer just a
     /// preview, either — see SCRUB DURING PAUSE FORCES A REAL SEEK ON RESUME
-    /// below for how a subsequent Play() actually resumes from it now.
+    /// below for how a subsequent Play() actually resumes from it now. AND
+    /// a scrub call sets Position FIRST, before it does anything else at
+    /// all — see SCRUB SETS POSITION FIRST, UNCONDITIONALLY below.
     ///
     /// SYNCHRONIZED STARTUP (PlaybackStartGate): the video loop and the
     /// audio engine each need real setup time before either can start
@@ -359,31 +361,30 @@ namespace EditSharp.Playback
     /// actually makes a paused scrub "count" the next time Play() is
     /// called.
     ///
-    /// SCRUB DURING PAUSE FORCES A REAL SEEK ON RESUME (NEW FIX — root
-    /// cause of two reported bugs, both now fixed): previously, a scrub
-    /// taken while paused updated `_referenceClock`/Position (see directly
-    /// above) but NOTHING ELSE — the video loop's persistent decode pipe
-    /// (SkClipContentSource/SkSourceDecoder, which can only move FORWARD)
-    /// and the audio engine's own byte-offset pump both kept whatever
-    /// position they were at before the pause, completely unaware a scrub
-    /// had ever happened. A plain Play() resume just released the pause
-    /// gate and resumed the wall clock in place, so BOTH streams simply
-    /// continued from the PRE-scrub position — the scrub was a preview
-    /// only, never an actual seek (bug 1: "scrubbing should change
-    /// playback position, but it doesn't"). Worse, the stale
-    /// `_referenceClock` value left behind by the scrub caused a SEPARATE,
-    /// visible symptom for a follower stream: PlaybackReferenceClock.
-    /// Position resumes extrapolating forward, in real time, from wherever
-    /// it was last Report()'d — if a scrub landed EARLIER than the actual
-    /// pre-pause stopped position, that value starts BELOW the follower's
-    /// own fixed target position, so the follower's `gap = target -
-    /// referenceClock.Position` computes a large POSITIVE gap and sleeps
-    /// (in one big Task.Delay, not a poll loop — see VideoLoopAsync's/
-    /// PlaybackAudioEngine.PumpAsync's own wait logic) for approximately
-    /// the real-time distance between the scrub position and the actual
-    /// resume position, before the leader's own next report ever gets a
-    /// chance to correct it — a real, reproducible multi-second stall
-    /// between the leader (audio, in the default SyncToAudio mode)
+    /// SCRUB DURING PAUSE FORCES A REAL SEEK ON RESUME (root cause of two
+    /// reported bugs, both fixed): previously, a scrub taken while paused
+    /// updated `_referenceClock`/Position (see directly above) but NOTHING
+    /// ELSE — the video loop's persistent decode pipe (SkClipContentSource/
+    /// SkSourceDecoder, which can only move FORWARD) and the audio engine's
+    /// own byte-offset pump both kept whatever position they were at before
+    /// the pause, completely unaware a scrub had ever happened. A plain
+    /// Play() resume just released the pause gate and resumed the wall
+    /// clock in place, so BOTH streams simply continued from the PRE-scrub
+    /// position — the scrub was a preview only, never an actual seek (bug
+    /// 1: "scrubbing should change playback position, but it doesn't").
+    /// Worse, the stale `_referenceClock` value left behind by the scrub
+    /// caused a SEPARATE, visible symptom for a follower stream:
+    /// PlaybackReferenceClock.Position resumes extrapolating forward, in
+    /// real time, from wherever it was last Report()'d — if a scrub landed
+    /// EARLIER than the actual pre-pause stopped position, that value
+    /// starts BELOW the follower's own fixed target position, so the
+    /// follower's `gap = target - referenceClock.Position` computes a large
+    /// POSITIVE gap and sleeps (in one big Task.Delay, not a poll loop —
+    /// see VideoLoopAsync's/PlaybackAudioEngine.PumpAsync's own wait logic)
+    /// for approximately the real-time distance between the scrub position
+    /// and the actual resume position, before the leader's own next report
+    /// ever gets a chance to correct it — a real, reproducible multi-second
+    /// stall between the leader (audio, in the default SyncToAudio mode)
     /// resuming essentially immediately and the follower (video) resuming
     /// only after that stale gap has fully elapsed (bug 2: "significant
     /// delay between audio starting back up and video starting back up ...
@@ -394,14 +395,13 @@ namespace EditSharp.Playback
     /// "earlier" case and an instant (but still wrong-position, per bug 1)
     /// resume for the "later" case: both symptoms trace to this one gap.
     ///
-    /// FIX: `_scrubGeneration` (bumped by ScrubToAsync under `_stateLock`,
-    /// alongside its Report() call) and `_scrubGenerationAtPause` (a
-    /// snapshot of `_scrubGeneration` taken by Pause()) together detect
-    /// "did an actual scrub happen since this pause started" — a plain
-    /// int-equality check, immune to any timing race with the leader's own
-    /// periodic Report() calls (which never touch `_scrubGeneration`).
-    /// Play()'s resume branch (`_isPlaying &amp;&amp; startPosition == null`)
-    /// now checks this first:
+    /// FIX: `_scrubGeneration` (bumped by ScrubToAsync under `_stateLock`)
+    /// and `_scrubGenerationAtPause` (a snapshot of `_scrubGeneration` taken
+    /// by Pause()) together detect "did an actual scrub happen since this
+    /// pause started" — a plain int-equality check, immune to any timing
+    /// race with the leader's own periodic Report() calls (which never
+    /// touch `_scrubGeneration`). Play()'s resume branch (`_isPlaying &amp;&amp;
+    /// startPosition == null`) now checks this first:
     ///   - NO scrub happened (generations match): unchanged, cheap,
     ///     instant in-place resume — `_pauseGate.Resume()` +
     ///     `_referenceClock.ResumeWallClock()`, exactly as before this fix.
@@ -425,6 +425,54 @@ namespace EditSharp.Playback
     ///     is completely unaffected and stays exactly as cheap as it always
     ///     was; this is a narrowly-scoped fix, not a reintroduction of
     ///     EAGER RELEASE ON PAUSE, REVERTED above.
+    ///
+    /// SCRUB SETS POSITION FIRST, UNCONDITIONALLY (fixed here, a SEPARATE
+    /// bug from SCRUB DURING PAUSE FORCES A REAL SEEK ON RESUME above):
+    /// ScrubToAsync used to update `_lastKnownPosition`/`_referenceClock`/
+    /// `_scrubGeneration` only AFTER a frame had successfully rendered and
+    /// been delivered — meaning a scrub that failed to build/render for any
+    /// reason (a proxy build error, a superseded/cancelled render, or even
+    /// just calling ScrubToAsync before Play() has EVER been called once)
+    /// left Position completely unmoved, silently. Position now updates as
+    /// the FIRST thing ScrubToAsync does, right after validating the
+    /// requested position is in range and BEFORE any of the session-setup/
+    /// rendering machinery runs — a caller's scrub request is reflected in
+    /// Position immediately and unconditionally, whether or not a visible
+    /// frame ever actually renders for it. This also means Position now
+    /// moves even on a session that has never played once — previously
+    /// Position could only ever be driven by a successful render, which
+    /// (see the gap below) tended to silently fail on a first-ever scrub
+    /// against an empty proxy cache in some configurations.
+    ///
+    /// SCRUB FAILURES ARE NOW LOGGED, NOT SILENT (fixed here): ScrubToAsync
+    /// is, in practice, a FIRE-AND-FORGET API for most real callers (the
+    /// Godot consumer app calls it from a Slider.ValueChanged handler with
+    /// no `await` at all) — before this fix, the only exception type this
+    /// method ever caught was a superseded-request OperationCanceledException;
+    /// any OTHER exception (a scrub-proxy build failure, a corrupt/missing
+    /// source, anything thrown out of BuildScrubSessionAsync or the actual
+    /// composite) propagated straight out of the async method as a faulted
+    /// Task that a fire-and-forget caller never observes — completely
+    /// silent, no log line, no visible symptom beyond "nothing rendered."
+    /// This is very likely what was actually happening in the reported "an
+    /// empty scrub proxy cache builds the containing folder but never the
+    /// actual .esrp file, and scrubbing shows no video, with no error
+    /// displayed" bug — BuildAsync creates the target directory before it
+    /// ever calls EncodeAsync, so a failure partway through encoding leaves
+    /// exactly that signature (folder exists, temp file cleaned up by
+    /// BuildAsync's own catch, real exception never seen by anyone). FIX:
+    /// ScrubToAsync now has a catch-all for any exception that ISN'T the
+    /// caller's own cancellation, and logs it via
+    /// EditSharpConfig.Logger.LogError with the full exception detail
+    /// before swallowing it (deliberately not rethrown — there is no
+    /// synchronous caller left by the time this runs to catch it, and an
+    /// unobserved faulted Task's finalization can itself crash a process
+    /// via TaskScheduler.UnobservedTaskException in some hosts, which
+    /// swallowing here avoids). Position has already been set (see SCRUB
+    /// SETS POSITION FIRST, UNCONDITIONALLY above) regardless of whether
+    /// this catch ever fires, so a logged-and-swallowed failure here only
+    /// means no new frame rendered for that request, not that Position
+    /// silently failed to move too.
     ///
     /// KNOWN GAPS — tracked, not hidden:
     ///   1. REVERSE AUDIO is not implemented — reverse is video-only, see
@@ -450,9 +498,10 @@ namespace EditSharp.Playback
     ///      above. Resuming playback after scrubbing while paused now
     ///      actually resumes from the scrubbed position, and the A/V
     ///      startup-delay artifact that came along with the old bug is
-    ///      gone too. NOT YET CONFIRMED ON REAL HARDWARE — reported as
-    ///      believed-fixed pending the user's own testing, same as every
-    ///      other fix in this file.
+    ///      gone too. NOT YET CONFIRMED ON REAL HARDWARE.
+    ///   8. CLOSED — see SCRUB SETS POSITION FIRST, UNCONDITIONALLY and
+    ///      SCRUB FAILURES ARE NOW LOGGED, NOT SILENT above. NOT YET
+    ///      CONFIRMED ON REAL HARDWARE.
     /// </summary>
     public class Playback : IDisposable
     {
@@ -514,13 +563,13 @@ namespace EditSharp.Playback
         private PlaybackPauseGate? _pauseGate;
 
         // See class remarks, SCRUB DURING PAUSE FORCES A REAL SEEK ON
-        // RESUME. `_scrubGeneration` is bumped once per successful
-        // ScrubToAsync delivery (under `_stateLock`, alongside its
-        // `_referenceClock.Report(position)` call); `_scrubGenerationAtPause`
-        // is a snapshot of it taken by Pause(). Play()'s resume branch
-        // compares the two to decide whether an actual scrub — not just the
-        // leader's own periodic position reports — happened since the
-        // session was paused.
+        // RESUME. `_scrubGeneration` is bumped once per ScrubToAsync call
+        // that gets far enough to validate its position (under
+        // `_stateLock`, alongside its `_referenceClock.Report(position)`
+        // call); `_scrubGenerationAtPause` is a snapshot of it taken by
+        // Pause(). Play()'s resume branch compares the two to decide
+        // whether an actual scrub — not just the leader's own periodic
+        // position reports — happened since the session was paused.
         private int _scrubGeneration;
         private int _scrubGenerationAtPause;
 
@@ -752,11 +801,14 @@ namespace EditSharp.Playback
         /// (no exception) rather than throwing — only `ct` (if the CALLER
         /// explicitly cancels it) propagates as a real cancellation.
         ///
-        /// Also updates Position (both `_lastKnownPosition` and, when a
-        /// session is active/paused, the shared PlaybackReferenceClock),
-        /// and bumps `_scrubGeneration` — see class remarks, SCRUBBING
-        /// WHILE PAUSED UPDATES Position and SCRUB DURING PAUSE FORCES A
-        /// REAL SEEK ON RESUME.
+        /// SETS Position (both `_lastKnownPosition` and, when a session is
+        /// active/paused, the shared PlaybackReferenceClock), AND bumps
+        /// `_scrubGeneration`, AS THE VERY FIRST THING THIS METHOD DOES —
+        /// before session setup, before rendering, unconditionally — see
+        /// class remarks, SCRUB SETS POSITION FIRST, UNCONDITIONALLY. Any
+        /// failure in the render/session-setup work that follows is caught
+        /// and logged rather than left to vanish into an unobserved Task —
+        /// see class remarks, SCRUB FAILURES ARE NOW LOGGED, NOT SILENT.
         /// </summary>
         public async Task ScrubToAsync(TimeSpan position, CancellationToken ct = default)
         {
@@ -770,6 +822,20 @@ namespace EditSharp.Playback
             if (position < TimeSpan.Zero || position > Timeline.Duration)
                 throw new ArgumentOutOfRangeException(nameof(position),
                     $"position must be within [0, {Timeline.Duration}].");
+
+            // See class remarks, SCRUB SETS POSITION FIRST, UNCONDITIONALLY.
+            // This is deliberately the very next thing that happens after
+            // the two validation checks above — before the supersede/
+            // cancellation plumbing, before session setup, before any
+            // rendering — so Position always reflects the latest requested
+            // scrub regardless of whether that scrub's own render ever
+            // actually completes.
+            lock (_stateLock)
+            {
+                _lastKnownPosition = position;
+                _referenceClock?.Report(position);
+                _scrubGeneration++;
+            }
 
             var supersedeCts = new CancellationTokenSource();
             CancellationTokenSource? previous = Interlocked.Exchange(ref _scrubSupersedeCts, supersedeCts);
@@ -813,27 +879,6 @@ namespace EditSharp.Playback
                     {
                         ArrayPool<byte>.Shared.Return(buffer);
                     }
-
-                    lock (_stateLock)
-                    {
-                        _lastKnownPosition = position;
-
-                        // See class remarks, SCRUBBING WHILE PAUSED UPDATES
-                        // Position: _referenceClock stays non-null (and is
-                        // what the public Position getter actually reads)
-                        // for the whole lifetime of a session, paused
-                        // included — without this, scrubbing while paused
-                        // silently updated a value nothing ever read.
-                        _referenceClock?.Report(position);
-
-                        // See class remarks, SCRUB DURING PAUSE FORCES A
-                        // REAL SEEK ON RESUME: this is the ONLY place
-                        // `_scrubGeneration` is bumped, and it happens
-                        // under the same lock/same moment as the Report()
-                        // call above so Play()'s resume-branch comparison
-                        // can never observe one without the other.
-                        _scrubGeneration++;
-                    }
                 }
                 finally
                 {
@@ -845,6 +890,26 @@ namespace EditSharp.Playback
                 // Superseded by a newer ScrubToAsync call — not the
                 // caller's own cancellation, so nothing to propagate. See
                 // class remarks, SCRUB COALESCING.
+            }
+            catch (OperationCanceledException)
+            {
+                // The caller's own cancellation (ct) — propagate normally,
+                // same as always. Position was already set above regardless.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // See class remarks, SCRUB FAILURES ARE NOW LOGGED, NOT
+                // SILENT: most real callers never await this method, so an
+                // exception that isn't logged here is never seen by
+                // anyone. Deliberately swallowed rather than rethrown —
+                // there is no synchronous caller left by now to catch it,
+                // and letting a fire-and-forget Task end up faulted risks
+                // an unobserved-exception crash in some hosts on
+                // finalization. Position has already moved regardless of
+                // this failure — only the rendered frame is missing.
+                EditSharpConfig.Logger.LogError(
+                    $"ScrubToAsync({position}) failed to render a frame: {ex}");
             }
         }
 
