@@ -25,6 +25,8 @@ namespace EditSharp.Components.Clips
     /// </summary>
     public abstract class Clip : ITimelineEditable
     {
+        public string Name { get; set; } = "Clip";
+
         public TimeSpan Start { get; set; }
         public TimeSpan Duration { get; set; }
         public TimeSpan End => Start + Duration;
