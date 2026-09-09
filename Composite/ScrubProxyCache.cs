@@ -84,12 +84,7 @@ namespace EditSharp.Composite
     /// `ReadOnlySpan` local touching a decoded frame's raw pixels is always
     /// unambiguously safe there regardless of language version; EncodeAsync
     /// itself only ever holds the RETURNED `byte[]` (never a ref struct)
-    /// across its own awaits. WITH GPU ENCODE (see below), EncodeFramePixels
-    /// still never holds a ref struct across an await ITSELF — the GPU
-    /// attempt it may make is a fully blocking call
-    /// (`gpuThread.RunAsync(...).GetAwaiter().GetResult()`), not an awaited
-    /// one, so this method's own synchronous signature and span-safety
-    /// contract are unchanged.
+    /// across its own awaits.
     ///
     /// FORMAT V4 — IndexedDelta7 PIXEL FORMAT: a second EncodeFramePixels
     /// branch (alongside Rgba8888), calling IndexedDelta7Codec.
@@ -135,44 +130,37 @@ namespace EditSharp.Composite
     /// per scrub tick, in exchange for removing a per-frame palette's worth
     /// of recurring on-disk size.
     ///
-    /// FORMAT V6.1 — GPU ENCODE FOR IndexedDelta7 (direct response to the
-    /// user's own explicit request: an earlier round of GPU work — see
-    /// ScrubProxyGpuEncoder — sped up READING an already-built proxy; the
-    /// actual ask was for the BUILD side to go faster too, since that's
-    /// what meaningfully speeds up proxy media generation. NO ON-DISK
-    /// FORMAT CHANGE AT ALL — this is purely an alternate, opportunistic
-    /// way of computing the exact same bytes EncodeFramePixels's
-    /// IndexedDelta7 branch always wrote, so it needed no schema version
-    /// bump and no header change): when `hwAccel` is HardwareAccelerator.GPU
-    /// and `pixelFormat` is IndexedDelta7, BuildAsync now creates its OWN
-    /// GpuContext/SkSurfacePool/GpuThreadDispatcher triple (see GPU ENCODE
-    /// CONTEXT LIFETIME below) scoped to this one build, and
-    /// EncodeFramePixels tries ScrubProxyGpuEncoder.TryEncode FIRST for
-    /// every frame, falling back to the proven IndexedDelta7Codec.
-    /// EncodeWithPalette CPU path the moment that GPU attempt declines or
-    /// fails for ANY reason — the exact same "opportunistic accelerator,
-    /// never the only path" posture this codebase already uses elsewhere.
-    /// Rgba8888 builds, and any IndexedDelta7 build running with
-    /// HardwareAccelerator.Software, are COMPLETELY UNAFFECTED — this only
-    /// ever engages for an IndexedDelta7 build explicitly asked to use the
-    /// GPU. THIS IS THE ENCODE SIDE ONLY — there is no corresponding GPU
-    /// decode path in this codebase (that earlier work was removed as
-    /// unneeded complexity); ScrubProxyReader always reads a frame back on
-    /// the CPU, exactly like every other proxy format.
-    ///
-    /// GPU ENCODE CONTEXT LIFETIME: this build's GPU context is scoped to
-    /// ONE BuildAsync call — created just before EncodeAsync runs, disposed
-    /// in the same method's own finally block once EncodeAsync returns
-    /// (success or failure). A proxy build is a one-shot, already-
-    /// expensive, already-logged operation (see the Stopwatch/Log calls
-    /// around EncodeAsync below) — there is no "session" for a build-
-    /// scoped GPU context to outlive, and creating a fresh D3D12 device/
-    /// GRContext per build (rather than trying to share one across
-    /// unrelated builds, possibly running for different sources on
-    /// different threads) keeps this exactly as safe as this codebase's own
-    /// GRContext-thread-confinement contract requires (see
-    /// GpuThreadDispatcher's class remarks) without introducing any new
-    /// shared, cross-build GPU state to reason about.
+    /// GPU ENCODE — TRIED, THEN REVERTED (decided in conversation): a round
+    /// of GPU work (ScrubProxyGpuEncoder, since deleted) attempted to
+    /// accelerate the IndexedDelta7 encode loop above with a two-stage
+    /// shader pipeline — a fully parallel nearest-palette prepass, followed
+    /// by a `width`-many sequential column-scan pass per frame. Measured on
+    /// real hardware (a 256x144 @ 10fps sample) it was dramatically SLOWER
+    /// than the plain CPU path — several minutes instead of seconds — not
+    /// faster: the column scan's own O(width) sequential, per-column,
+    /// full-frame draw-call structure (honestly flagged as an unmeasured
+    /// risk in that file's own remarks) turned out to be exactly the
+    /// bottleneck it warned about, with per-draw GPU submission/pool
+    /// overhead dominating the actual per-pixel math many times over. It
+    /// also produced visibly wrong output (a "deep fried," near-binary
+    /// black/white result) — most likely a color-space mismatch between
+    /// the color-managed decoded source frame and the untagged raw-float
+    /// data textures the pipeline's math assumed it was reading. Rather
+    /// than keep patching a design that was already measured to lose badly
+    /// on its own stated goal (making the BUILD side faster), the whole
+    /// attempt was reverted: EncodeFramePixels's IndexedDelta7 branch is
+    /// CPU-only again, unconditionally, via
+    /// IndexedDelta7Codec.EncodeWithPalette — exactly as it was before that
+    /// detour. IndexedDelta7 is now understood as this cache's low-
+    /// resolution/low-power-device option: it trades encode speed and
+    /// build-time CPU cost for the smaller on-disk footprint (see
+    /// IndexedDelta7Codec/ScrubProxyPixelFormat's own remarks), not as a
+    /// format this cache tries to accelerate with GPU work. A future
+    /// attempt at genuinely GPU-friendly proxy-encode acceleration (a small
+    /// per-tile learned autoencoder was discussed as a promising direction,
+    /// specifically because it has no cross-tile sequential dependency) is
+    /// a separate, larger initiative — nothing about that is wired in here
+    /// yet.
     ///
     /// IndexedDelta7 and Zstd are the ONLY pixel format / compression
     /// scheme this cache builds — the earlier Indexed8 pixel format and Rle
@@ -315,16 +303,11 @@ namespace EditSharp.Composite
         /// build IndexedDelta7's shared/global palette (see class remarks,
         /// FORMAT V6), decodes+resamples the whole source ONCE for real via
         /// the existing persistent SkSourceDecoder pipe, and writes the
-        /// whole self-contained .esrp file via EncodeAsync.
-        ///
-        /// GPU ENCODE (see class remarks, FORMAT V6.1): when this build is
-        /// IndexedDelta7 running with HardwareAccelerator.GPU, a build-
-        /// scoped GpuContext/SkSurfacePool/GpuThreadDispatcher triple is
-        /// created here, handed down into EncodeAsync, and disposed in this
-        /// method's own finally block — see GPU ENCODE CONTEXT LIFETIME.
-        /// Any other combination (Rgba8888, or IndexedDelta7 on
-        /// HardwareAccelerator.Software) leaves all three null, and
-        /// EncodeFramePixels behaves exactly as it always did — CPU only.
+        /// whole self-contained .esrp file via EncodeAsync. `hwAccel` is
+        /// used only to pick the source DECODE plan (see
+        /// FfmpegRunner.GetDecodePlanAsync below) — see class remarks, GPU
+        /// ENCODE — TRIED, THEN REVERTED: there is no GPU-vs-CPU branching
+        /// on the ENCODE side any more, for any pixel format.
         /// </summary>
         private static async Task<ScrubProxyEntry> BuildAsync(string sourcePath, string hash, HardwareAccelerator hwAccel)
         {
@@ -376,96 +359,23 @@ namespace EditSharp.Composite
                 CreatedAtUtc = DateTime.UtcNow,
             };
 
-            // See class remarks, FORMAT V6.1 / GPU ENCODE CONTEXT LIFETIME
-            // — a build-scoped GPU triple, created only for an
-            // IndexedDelta7 build actually asked to use the GPU. All three
-            // stay null (EncodeFramePixels's CPU-only behavior is
-            // unchanged) for every other combination.
-            bool wantGpuEncode = pixelFormat == ScrubProxyPixelFormat.IndexedDelta7 && hwAccel == HardwareAccelerator.GPU;
-
-            GpuContext? gpuContext = null;
-            SkSurfacePool? gpuPool = null;
-            GpuThreadDispatcher? gpuThread = null;
-
-            if (wantGpuEncode)
-            {
-                gpuThread = new GpuThreadDispatcher("ScrubProxyGpuEncoder");
-                try
-                {
-                    (gpuContext, gpuPool) = await gpuThread.RunAsync(() =>
-                    {
-                        GpuContext ctx = GpuContext.Create(hwAccel);
-                        SkSurfacePool pool = new(ctx.GRContext, width, height, seedCount: 0);
-                        return (ctx, pool);
-                    });
-                }
-                catch (Exception ex)
-                {
-                    // Creating the GPU context is itself an opportunistic
-                    // step — never let a failure here block the build, just
-                    // fall back to the CPU-only path exactly as if GPU
-                    // encode had never been requested.
-                    EditSharpConfig.Logger.LogWarning(
-                        "ScrubProxyCache: could not create a GPU context for IndexedDelta7 GPU encode, " +
-                        $"building with the CPU path instead: {ex.Message}");
-                    gpuThread.Dispose();
-                    gpuThread = null;
-                    gpuContext = null;
-                    gpuPool = null;
-                }
-            }
-
             EditSharpConfig.Logger.Log(
                 $"Building scrub proxy for '{sourcePath}' ({width}x{height} @ {sampleRate}/s, {frameCount} " +
                 $"frames, pixelFormat={pixelFormat}, compression={compressionScheme}" +
-                (globalPalette.Length > 0 ? ", shared palette built from a sample pass" : "") +
-                (gpuContext?.GRContext != null ? ", GPU encode enabled" : "") + ")...");
+                (globalPalette.Length > 0 ? ", shared palette built from a sample pass" : "") + ")...");
             var sw = Stopwatch.StartNew();
 
             try
             {
-                try
-                {
-                    await EncodeAsync(
-                        sourcePath, tempPath, width, height, sampleRate, frameCount, pixelFormat, compressionScheme,
-                        globalPalette, meta, plan, gpuContext, gpuPool, gpuThread);
-                    File.Move(tempPath, finalPath, overwrite: true);
-                }
-                catch
-                {
-                    TryDelete(tempPath);
-                    throw;
-                }
+                await EncodeAsync(
+                    sourcePath, tempPath, width, height, sampleRate, frameCount, pixelFormat, compressionScheme,
+                    globalPalette, meta, plan);
+                File.Move(tempPath, finalPath, overwrite: true);
             }
-            finally
+            catch
             {
-                // See class remarks, GPU ENCODE CONTEXT LIFETIME — this
-                // build's own GPU objects are torn down here, unconditionally,
-                // whether EncodeAsync succeeded or threw. Disposal itself is
-                // marshaled onto the same dedicated thread that created and
-                // used them (GpuContext.Dispose touches the GRContext, and
-                // must therefore run on the thread that owns it, same as
-                // every other GRContext-touching call).
-                if (gpuThread != null)
-                {
-                    try
-                    {
-                        await gpuThread.RunAsync(() =>
-                        {
-                            gpuPool?.Dispose();
-                            gpuContext?.Dispose();
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        EditSharpConfig.Logger.LogVerbose(
-                            $"ScrubProxyCache: GPU encode context teardown threw: {ex.Message}");
-                    }
-                    finally
-                    {
-                        gpuThread.Dispose();
-                    }
-                }
+                TryDelete(tempPath);
+                throw;
             }
 
             EditSharpConfig.Logger.Log(
@@ -486,11 +396,7 @@ namespace EditSharp.Composite
         /// stays close to GlobalPaletteSampleFrameCount regardless of
         /// `duration` — a source shorter than that many seconds at 1fps
         /// simply samples every second of it instead (clamped so the
-        /// sampling decoder is never asked for an fps below 1). This pass
-        /// stays CPU-only even for a GPU-encode build — see class remarks,
-        /// FORMAT V6.1: it touches a small, fixed number of frames
-        /// (GlobalPaletteSampleFrameCount, not the whole source), so it was
-        /// never the actual cost GPU encode is aimed at.
+        /// sampling decoder is never asked for an fps below 1).
         /// </summary>
         private static byte[] BuildGlobalDelta7Palette(
             string sourcePath, int width, int height, TimeSpan duration, DecodeHwAccelPlan plan)
@@ -527,18 +433,11 @@ namespace EditSharp.Composite
         /// 6 layout remarks — zero-length when `globalPalette` is empty),
         /// then a placeholder frame-index region, then every frame's stored
         /// bytes back to back, then a seek-back to fill in the frame index.
-        ///
-        /// `gpuContext`/`gpuPool`/`gpuThread` are this build's own GPU
-        /// encode triple (see class remarks, FORMAT V6.1) — all null for
-        /// every build that isn't IndexedDelta7-on-GPU. Handed straight
-        /// through to EncodeFramePixels, unchanged, for every frame; this
-        /// method itself has no GPU-vs-CPU branching of its own.
         /// </summary>
         private static async Task EncodeAsync(
             string sourcePath, string outputPath, int width, int height, int fps, int frameCount,
             ScrubProxyPixelFormat pixelFormat, ScrubProxyCompressionScheme compressionScheme,
-            byte[] globalPalette, ScrubProxyMeta meta, DecodeHwAccelPlan plan,
-            GpuContext? gpuContext, SkSurfacePool? gpuPool, GpuThreadDispatcher? gpuThread)
+            byte[] globalPalette, ScrubProxyMeta meta, DecodeHwAccelPlan plan)
         {
             using SkSourceDecoder decoder = SkSourceDecoder.Start(
                 sourcePath, 0, fps, width, height, plan, fastOpen: false);
@@ -578,8 +477,7 @@ namespace EditSharp.Composite
                 using SKImage frame = decoder.NextFrame();
 
                 byte[] stored = EncodeFramePixels(
-                    frame, sourcePath, i, width, height, pixelFormat, compressionScheme, globalPalette,
-                    gpuContext, gpuPool, gpuThread);
+                    frame, sourcePath, i, width, height, pixelFormat, compressionScheme, globalPalette);
 
                 frameIndex[i] = (cursor, stored.Length);
                 await stream.WriteAsync(stored);
@@ -620,28 +518,20 @@ namespace EditSharp.Composite
         ///     blob is JUST the compressed-or-not control-byte plane — no
         ///     palette bytes in it at all any more.
         ///
-        /// GPU ENCODE (see class remarks, FORMAT V6.1): the IndexedDelta7
-        /// branch now tries ScrubProxyGpuEncoder.TryEncode FIRST whenever
-        /// `gpuContext`/`gpuPool`/`gpuThread` are all non-null (they're
-        /// either all null or all non-null together — see BuildAsync),
-        /// dispatched via `gpuThread.RunAsync(...).GetAwaiter().GetResult()`
-        /// so this method's own synchronous signature (see class remarks,
-        /// FRAME-PIXEL ENCODING IS A PLAIN SYNCHRONOUS HELPER) never
-        /// changes shape — EncodeAsync's own await loop still just calls
-        /// this like an ordinary synchronous method, and the blocking wait
-        /// here is exactly the point: this frame's bytes must be finished,
-        /// one way or the other, before the loop's next stream.WriteAsync.
-        /// On ANY GPU failure (TryEncode returning false, or the dispatched
-        /// call itself throwing), this falls straight through to the same
-        /// IndexedDelta7Codec.EncodeWithPalette call this method always
-        /// made — see ScrubProxyGpuEncoder's own remarks on why that's
-        /// always safe to do unconditionally.
+        /// CPU-ONLY, UNCONDITIONALLY — see class remarks, GPU ENCODE —
+        /// TRIED, THEN REVERTED: there used to be a GPU-attempt-first
+        /// branch here (ScrubProxyGpuEncoder.TryEncode, with a CPU
+        /// fallback); it was removed entirely after being measured as both
+        /// much slower than this plain CPU path and visibly incorrect.
+        /// IndexedDelta7 is this cache's deliberately low-resolution/low-
+        /// power-device option now — trading encode speed and on-disk size
+        /// against Rgba8888 — not something this method tries to
+        /// accelerate with hardware.
         /// </summary>
         private static byte[] EncodeFramePixels(
             SKImage frame, string sourcePath, int frameIndex, int width, int height,
             ScrubProxyPixelFormat pixelFormat, ScrubProxyCompressionScheme compressionScheme,
-            byte[] globalPalette,
-            GpuContext? gpuContext, SkSurfacePool? gpuPool, GpuThreadDispatcher? gpuThread)
+            byte[] globalPalette)
         {
             using SKPixmap? pixmap = frame.PeekPixels();
             if (pixmap == null)
@@ -653,43 +543,7 @@ namespace EditSharp.Composite
             if (pixelFormat == ScrubProxyPixelFormat.IndexedDelta7)
             {
                 byte[] pixelCodes = new byte[width * height];
-
-                bool gpuHandled = false;
-                if (gpuContext != null && gpuPool != null && gpuThread != null)
-                {
-                    try
-                    {
-                        // See method remarks, GPU ENCODE — a deliberate
-                        // blocking wait, not an await: this method's own
-                        // signature must stay synchronous (see class
-                        // remarks, FRAME-PIXEL ENCODING IS A PLAIN
-                        // SYNCHRONOUS HELPER), and EncodeAsync's caller-side
-                        // loop needs this frame's bytes fully resolved
-                        // before it can proceed to the next one regardless.
-                        gpuHandled = gpuThread.RunAsync(() =>
-                            ScrubProxyGpuEncoder.TryEncode(
-                                gpuContext, gpuPool, frame, globalPalette, width, height, pixelCodes))
-                            .GetAwaiter().GetResult();
-                    }
-                    catch (Exception ex)
-                    {
-                        // Same posture as ScrubProxyGpuEncoder.TryEncode's
-                        // own internal try/catch — this outer one exists
-                        // because the dispatched RunAsync call itself can
-                        // fault (e.g. the dedicated GPU thread has already
-                        // torn down), which is a different failure surface
-                        // than TryEncode returning false for a reason it
-                        // caught internally.
-                        EditSharpConfig.Logger.LogWarning(
-                            "ScrubProxyCache: GPU IndexedDelta7 encode dispatch failed for frame " +
-                            $"{frameIndex} of '{sourcePath}', falling back to the CPU path: {ex.Message}");
-                        gpuHandled = false;
-                    }
-                }
-
-                if (!gpuHandled)
-                    IndexedDelta7Codec.EncodeWithPalette(raw, width, height, globalPalette, pixelCodes);
-
+                IndexedDelta7Codec.EncodeWithPalette(raw, width, height, globalPalette, pixelCodes);
                 return CompressPlane(pixelCodes, compressionScheme);
             }
 

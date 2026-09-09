@@ -91,15 +91,19 @@ namespace EditSharp.Composite
     /// well-defined. This also matches the user's own stated goal for the
     /// left-only dependency ("you could calculate every row all at once"):
     /// every row is independently decodable from nothing but its own
-    /// bytes, so a parallel pass (CPU or GPU) can process every row of a
-    /// frame independently — see ScrubProxyGpuEncoder for the GPU BUILD/
-    /// encode path this row-independence (and, within a row, the
-    /// segmented-scan structure PALETTE-mode resets create) makes
-    /// possible. (There is no corresponding GPU decode path in this
-    /// codebase — an earlier one was tried and removed as unneeded
-    /// complexity, since a proxy read is already a cheap, single
-    /// positioned file read regardless of pixel format; see
-    /// ScrubFrameSource's own remarks.)
+    /// bytes, so a parallel pass could in principle process every row of a
+    /// frame independently. NO GPU PATH ACTUALLY EXISTS IN THIS CODEBASE
+    /// FOR EITHER DIRECTION, THOUGH, BOTH TRIED AND BOTH REMOVED: an
+    /// earlier GPU decode attempt was removed as unneeded complexity,
+    /// since a proxy read is already a cheap, single positioned file read
+    /// regardless of pixel format (see ScrubFrameSource's own remarks);
+    /// and a later GPU encode attempt (ScrubProxyGpuEncoder, since
+    /// deleted) was measured to be dramatically slower than this plain
+    /// CPU path — its own per-column sequential draw-call structure ended
+    /// up dominated by GPU submission overhead, not the actual math — and
+    /// also produced visibly incorrect output, so it was reverted entirely
+    /// (see ScrubProxyCache's own class remarks). Every row of every frame
+    /// is encoded and decoded on the CPU now.
     ///
     /// PER-PIXEL SEARCH IS EXACT, NOT A PER-CHANNEL APPROXIMATION: for each
     /// pixel needing a delta candidate, FindBestDelta evaluates ALL
@@ -454,13 +458,10 @@ namespace EditSharp.Composite
         /// delta math differently. See class remarks, THE ENCODER MUST
         /// MIRROR THE DECODER'S OWN RECONSTRUCTED STATE.
         ///
-        /// This same "clamp(prev + offset, 0, 255)" shape is also exactly
-        /// what ScrubProxyGpuEncoder's GPU column scan evaluates per pixel
-        /// when searching DELTA candidates (see that class's own remarks)
-        /// — the two never drift apart because both ultimately implement
-        /// this one clamp/offset formula, even though the encoder's own
-        /// shader is a separate, independent expression of it (no shared
-        /// code between CPU and GPU is possible here).
+        /// A GPU re-implementation of this exact clamp/offset formula was
+        /// tried once (ScrubProxyGpuEncoder, since deleted — see
+        /// ScrubProxyCache's own class remarks on why) but is gone now;
+        /// this CPU version is the only place this math runs.
         /// </summary>
         private static void ApplyDelta(
             byte prevR, byte prevG, byte prevB, int rLevel, int gLevel, int bLevel,
