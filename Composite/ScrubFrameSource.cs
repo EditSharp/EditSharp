@@ -40,14 +40,39 @@ namespace EditSharp.Composite
     /// read of a few hundred KB, no process) that caching the result across
     /// calls buys nothing worth the complexity; every call just reads fresh.
     ///
-    /// PROXY RESOLUTION IS THE CALLER'S JOB, NOT THIS CLASS'S: `proxies`
-    /// (keyed by VideoSourceNode Id) is handed in fully resolved — Playback
-    /// builds/looks up every referenced source's scrub proxy (via
-    /// ScrubProxyCache, blocking on any missing build) as part of scrub/
-    /// reverse SESSION setup, once, before this class is ever asked for a
-    /// frame — see Playback.PrepareScrubProxiesAsync. A VideoSourceNode
-    /// with no entry here is a caller bug, not a runtime fallback case (see
-    /// GetOrOpenReader).
+    /// PROXY RESOLUTION IS THE CALLER'S JOB, BUT NO LONGER A GUARANTEE THIS
+    /// CLASS CAN LEAN ON (changed here, paired with Playback's own SCRUB
+    /// PROXY BUILDS RUN ON A REAL BACKGROUND THREAD fix): `proxies` (keyed
+    /// by VideoSourceNode Id) is handed in, and Playback kicks off every
+    /// referenced source's resolution via KickOffScrubProxyResolution — but
+    /// that now runs on a background thread and is explicitly NOT awaited
+    /// as part of session setup, so at the moment this class is asked for
+    /// a frame, `proxies` may well have NO entry yet for a node whose build
+    /// simply hasn't finished. That is now a completely ordinary, expected
+    /// state, not a caller bug — see MEDIA-OFFLINE PLACEHOLDER below for
+    /// what this class does about it.
+    ///
+    /// MEDIA-OFFLINE PLACEHOLDER FOR ANYTHING NOT YET (OR NEVER GOING TO
+    /// BE) RESOLVABLE (new here, direct response to real-world testing —
+    /// user request: "the placeholder should just be used anytime any
+    /// media comes up empty"): every one of this class's own content
+    /// dispatches — the scrub-proxy video path, static-image loading, text
+    /// rasterization — is now wrapped so that ANY failure to produce real
+    /// content (no proxy entry yet, a proxy whose build failed outright, a
+    /// missing/corrupt image file, a rasterization failure) falls back to
+    /// MediaPlaceholder.Get(canvasWidth, canvasHeight) instead of throwing
+    /// and breaking the whole frame's composite. A node that fails once is
+    /// remembered in `_knownBroken` so a broken STATIC node (image/text —
+    /// nothing about a bad file or a rasterization failure fixes itself
+    /// between ticks) doesn't keep retrying the same failing work every
+    /// single frame; a video node is deliberately NOT remembered this way,
+    /// since its proxy may still be building in the background and
+    /// `_proxies` genuinely gains an entry once that finishes (see
+    /// Playback's own ScrubProxyReady event) — every call simply re-checks
+    /// `_proxies` fresh. `_knownBroken` is kept as its OWN HashSet,
+    /// deliberately separate from `_staticContent`, so the shared,
+    /// never-disposed MediaPlaceholder image is never itself stored in a
+    /// dictionary that Dispose() below disposes wholesale.
     ///
     /// ScrubProxyReader INSTANCES ARE OWNED AND CACHED HERE, ONE PER SOURCE,
     /// OPENED LAZILY ON FIRST USE, AND DISPOSED WITH THIS CLASS — opening a
@@ -88,6 +113,12 @@ namespace EditSharp.Composite
         private readonly Dictionary<Guid, string> _ownedTempFiles = new();
         private readonly Dictionary<Guid, NestedTimelineRenderer> _nestedRenderers = new();
 
+        // See class remarks, MEDIA-OFFLINE PLACEHOLDER — nodes whose
+        // static content (image/text) has already failed once, so repeat
+        // ticks don't keep re-attempting the same doomed work. Video nodes
+        // are deliberately NOT tracked here — see remarks.
+        private readonly HashSet<Guid> _knownBroken = new();
+
         // Resolved content for the frame currently being composed —
         // populated by PrefetchAsync, consumed by GetContent (sync,
         // satisfies IClipContentSource). See class remarks on why this
@@ -126,10 +157,10 @@ namespace EditSharp.Composite
                 result[node.Id] = node switch
                 {
                     VideoSourceNode { Source.Type: SourceType.Video } media =>
-                        (GetProxyFrame(media, clipSeconds), false),
+                        (GetProxyFrame(media, clipSeconds, canvasWidth, canvasHeight), false),
 
                     VideoSourceNode { Source.Type: SourceType.Image } media =>
-                        (GetOrLoadStaticImage(media.Id, media.Source.Path), false),
+                        (GetOrLoadStaticImage(media.Id, media.Source.Path, canvasWidth, canvasHeight), false),
 
                     TextInputNode text =>
                         (GetOrRasterizeText(text, canvasWidth, canvasHeight), false),
@@ -172,52 +203,121 @@ namespace EditSharp.Composite
         /// </summary>
         public void ClearPrefetch() => _prefetched.Clear();
 
-        private SKImage GetProxyFrame(VideoSourceNode media, double clipSeconds)
+        /// <summary>
+        /// See class remarks, MEDIA-OFFLINE PLACEHOLDER: any failure here
+        /// — most commonly `_proxies` simply not having an entry for this
+        /// node yet (its build hasn't finished, or failed) — falls back to
+        /// the shared offline placeholder rather than throwing and
+        /// breaking the whole frame's composite. Deliberately re-checks
+        /// `_proxies` fresh every call rather than caching a "this node is
+        /// broken" verdict — a still-building proxy legitimately becomes
+        /// available partway through a scrub/reverse session (see
+        /// Playback's ScrubProxyReady event).
+        /// </summary>
+        private SKImage GetProxyFrame(VideoSourceNode media, double clipSeconds, int canvasWidth, int canvasHeight)
         {
-            double targetSeconds = (media.Source.Start ?? TimeSpan.Zero).TotalSeconds + Math.Max(0, clipSeconds);
-            return GetOrOpenReader(media).GetFrameAt(targetSeconds);
+            try
+            {
+                ScrubProxyReader? reader = TryGetOrOpenReader(media);
+                if (reader == null) return MediaPlaceholder.Get(canvasWidth, canvasHeight);
+
+                double targetSeconds = (media.Source.Start ?? TimeSpan.Zero).TotalSeconds + Math.Max(0, clipSeconds);
+                return reader.GetFrameAt(targetSeconds);
+            }
+            catch (Exception ex)
+            {
+                EditSharpConfig.Logger.LogWarning(
+                    $"ScrubFrameSource: falling back to the offline placeholder for '{media.Source.Path}': " +
+                    $"{ex.Message}");
+                return MediaPlaceholder.Get(canvasWidth, canvasHeight);
+            }
         }
 
-        private ScrubProxyReader GetOrOpenReader(VideoSourceNode media)
+        /// <summary>
+        /// Returns this node's already-open (or freshly-opened) proxy
+        /// reader, or null if `_proxies` has no entry for it yet — no
+        /// longer treated as a caller bug (see class remarks): a
+        /// background-kicked-off proxy build simply may not have finished,
+        /// or may have failed outright, by the time a frame is requested.
+        /// </summary>
+        private ScrubProxyReader? TryGetOrOpenReader(VideoSourceNode media)
         {
             if (_proxyReaders.TryGetValue(media.Id, out ScrubProxyReader? existing))
                 return existing;
 
             if (!_proxies.TryGetValue(media.Id, out ScrubProxyEntry entry))
-                throw new InvalidOperationException(
-                    "No scrub proxy registered for a VideoSourceNode — the caller must resolve/build every " +
-                    "referenced source's scrub proxy before scrubbing/reverse playback (see " +
-                    "Playback.PrepareScrubProxiesAsync).");
+                return null;
 
             ScrubProxyReader reader = ScrubProxyReader.Open(entry.Path);
             _proxyReaders[media.Id] = reader;
             return reader;
         }
 
-        private SKImage GetOrLoadStaticImage(Guid nodeId, string path)
+        /// <summary>
+        /// See class remarks, MEDIA-OFFLINE PLACEHOLDER: a missing/corrupt
+        /// image falls back to the offline placeholder rather than
+        /// throwing. `nodeId` is remembered in `_knownBroken` on failure so
+        /// a bad file isn't re-read every single tick — nothing about a
+        /// decode failure here is expected to resolve itself mid-session,
+        /// unlike a still-building video proxy.
+        /// </summary>
+        private SKImage GetOrLoadStaticImage(Guid nodeId, string path, int canvasWidth, int canvasHeight)
         {
             if (_staticContent.TryGetValue(nodeId, out SKImage? cached))
                 return cached;
 
-            using SKData data = SKData.Create(path)
-                ?? throw new InvalidOperationException($"Could not read '{path}'.");
+            if (_knownBroken.Contains(nodeId))
+                return MediaPlaceholder.Get(canvasWidth, canvasHeight);
 
-            SKImage image = SKImage.FromEncodedData(data)
-                ?? throw new InvalidOperationException($"Could not decode image '{path}'.");
+            try
+            {
+                using SKData data = SKData.Create(path)
+                    ?? throw new InvalidOperationException($"Could not read '{path}'.");
 
-            _staticContent[nodeId] = image;
-            return image;
+                SKImage image = SKImage.FromEncodedData(data)
+                    ?? throw new InvalidOperationException($"Could not decode image '{path}'.");
+
+                _staticContent[nodeId] = image;
+                return image;
+            }
+            catch (Exception ex)
+            {
+                EditSharpConfig.Logger.LogWarning(
+                    $"ScrubFrameSource: falling back to the offline placeholder for '{path}': {ex.Message}");
+                _knownBroken.Add(nodeId);
+                return MediaPlaceholder.Get(canvasWidth, canvasHeight);
+            }
         }
 
+        /// <summary>
+        /// See class remarks, MEDIA-OFFLINE PLACEHOLDER: a rasterization
+        /// failure falls back to the offline placeholder, and `text.Id` is
+        /// remembered in `_knownBroken` the same way a broken static image
+        /// is — same reasoning, nothing about a rasterization failure is
+        /// expected to fix itself mid-session.
+        /// </summary>
         private SKImage GetOrRasterizeText(TextInputNode text, int canvasWidth, int canvasHeight)
         {
             if (_staticContent.TryGetValue(text.Id, out SKImage? cached))
                 return cached;
 
-            string path = TextRasterizer.Rasterize(text, canvasWidth, canvasHeight, out _, out _);
-            _ownedTempFiles[text.Id] = path;
+            if (_knownBroken.Contains(text.Id))
+                return MediaPlaceholder.Get(canvasWidth, canvasHeight);
 
-            return GetOrLoadStaticImage(text.Id, path);
+            try
+            {
+                string path = TextRasterizer.Rasterize(text, canvasWidth, canvasHeight, out _, out _);
+                _ownedTempFiles[text.Id] = path;
+
+                return GetOrLoadStaticImage(text.Id, path, canvasWidth, canvasHeight);
+            }
+            catch (Exception ex)
+            {
+                EditSharpConfig.Logger.LogWarning(
+                    $"ScrubFrameSource: falling back to the offline placeholder for a text node: {ex.Message}");
+                _knownBroken.Add(text.Id);
+                return MediaPlaceholder.Get(canvasWidth, canvasHeight);
+            }
         }
 
         private NestedTimelineRenderer GetOrCreateNestedRenderer(TimelineVideoInputNode embed)
@@ -237,8 +337,14 @@ namespace EditSharp.Composite
             foreach (ScrubProxyReader reader in _proxyReaders.Values) reader.Dispose();
             _proxyReaders.Clear();
 
+            // NOTE: _staticContent never holds the shared MediaPlaceholder
+            // image (see class remarks, MEDIA-OFFLINE PLACEHOLDER) — every
+            // image disposed here was actually loaded/rasterized by this
+            // instance, so disposing them all is safe.
             foreach (SKImage image in _staticContent.Values) image.Dispose();
             _staticContent.Clear();
+
+            _knownBroken.Clear();
 
             foreach (NestedTimelineRenderer renderer in _nestedRenderers.Values) renderer.Dispose();
             _nestedRenderers.Clear();

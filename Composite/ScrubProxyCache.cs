@@ -62,19 +62,17 @@ namespace EditSharp.Composite
     /// OptimizedMediaCache: a source that's renamed, moved, or duplicated
     /// under a second name still resolves to the same cache entry.
     ///
-    /// FULLY OPPORTUNISTIC AT THE CALL SITE FOR PrewarmAsync, BUT BLOCKING
-    /// FOR Playback's OWN SCRUB-SESSION SETUP — a deliberate difference from
-    /// OptimizedMediaCache (whose Playback/Renderer call sites use the non-
-    /// blocking TryGetAsync and never trigger a build themselves). Per the
-    /// decided behavior: missing proxies are built when a scrub/reverse
-    /// session actually starts (Playback.BuildScrubSessionAsync /
-    /// ReverseVideoLoopAsync call GetOrBuildAsync, blocking that session's
-    /// startup on the build), with PrewarmAsync offered as the opt-in way
-    /// to pay that cost ahead of time instead (e.g. right after import).
-    /// This is different from optimized media's build-competes-with-
-    /// playback concern because a scrub proxy build is a ONE-TIME, bounded,
-    /// low-resolution linear decode pass — not something worth silently
-    /// skipping the way a multi-minute 4K optimized-media encode would be.
+    /// CALLER CONTRACT (updated — see Playback's own class remarks, SCRUB
+    /// PROXY BUILDS RUN ON A REAL BACKGROUND THREAD, NEVER BLOCK SESSION
+    /// STARTUP): Playback's scrub/reverse session setup no longer awaits
+    /// GetOrBuildAsync inline as part of its own startup — it fires each
+    /// referenced source's resolution via Task.Run and moves on, showing
+    /// the offline placeholder for whatever isn't ready yet (see
+    /// ScrubFrameSource). GetOrBuildAsync itself is UNCHANGED in that it
+    /// still blocks ITS OWN caller until the build finishes — that
+    /// contract stays true for PrewarmScrubProxiesAsync (still fully
+    /// awaited by design) and for the fire-and-forget Task.Run wrapper
+    /// Playback now uses instead of awaiting it directly.
     ///
     /// MEMOIZATION shape is a direct copy of OptimizedMediaCache's (in-flight
     /// build coalescing, last-failure tracking for GetStatusAsync, a
@@ -83,6 +81,48 @@ namespace EditSharp.Composite
     /// file this process has already resolved) — same problem, same fix,
     /// see OptimizedMediaCache's own remarks for the fuller reasoning behind
     /// each layer.
+    ///
+    /// IN-FLIGHT BUILD COALESCING HARDENED AGAINST A REAL GetOrAdd RACE
+    /// (fixed here, real-world regression: "it attempted to build 7
+    /// identical files" — root-caused together with the matching call-site
+    /// fix in Playback, see its own class remarks, ONE BACKGROUND BUILD PER
+    /// DISTINCT SOURCE PATH, NOT PER NODE): `InFlight` used to be a plain
+    /// `ConcurrentDictionary&lt;string, Task&lt;ScrubProxyEntry&gt;&gt;`, populated via
+    /// `InFlight.GetOrAdd(hash, _ =&gt; BuildAndTrackAsync(...))`. That looks
+    /// like it guarantees exactly one build per hash, but it doesn't:
+    /// `GetOrAdd`'s valueFactory is NOT guaranteed to run only once under
+    /// contention — if two callers reach it for the same key at nearly the
+    /// same moment (which happens routinely here, since every caller must
+    /// first `await MediaHasher.ComputeAsync(...)` — real I/O — before ever
+    /// reaching this call, so several callers hashing the same file
+    /// reliably land within the same small window of each other), the
+    /// dictionary may invoke the factory MORE THAN ONCE, keeping only one
+    /// resulting Task but having already let every invocation's side
+    /// effects run — and `_ =&gt; BuildAndTrackAsync(...)` is a real async
+    /// method that starts executing (its file I/O, its ffmpeg decode
+    /// pass) the instant it's invoked, not merely queued. Each losing
+    /// invocation still ran BuildAsync to completion, each against its own
+    /// temp file, each finishing with its own `File.Move(overwrite: true)`
+    /// racing the others for the same final path — exactly "N identical
+    /// builds" for one source. FIX: `InFlight` now stores
+    /// `Lazy&lt;Task&lt;ScrubProxyEntry&gt;&gt;` instead of `Task&lt;ScrubProxyEntry&gt;`
+    /// directly. `GetOrAdd`'s factory here only ever constructs a `Lazy`
+    /// wrapper (cheap, does nothing, starts nothing) — if it's invoked more
+    /// than once under the same race, the extra `Lazy` objects are simply
+    /// discarded unused. The ACTUAL build only starts the first time
+    /// `.Value` is read on whichever `Lazy` instance the dictionary settled
+    /// on keeping, and `Lazy`'s own default thread-safety mode
+    /// (ExecutionAndPublication) guarantees that read triggers the factory
+    /// at most once even if multiple threads read `.Value` concurrently —
+    /// so no matter how many times `GetOrAdd`'s own factory races, exactly
+    /// one `BuildAndTrackAsync` call ever actually executes per hash.
+    /// GetStatusAsync's own `InFlight.TryGetValue` lookup follows suit,
+    /// reading `.Value` off whatever `Lazy` it finds — safe for the same
+    /// reason, and correct even if THIS is the very call that ends up
+    /// triggering the factory (that would only happen if this method
+    /// somehow observed the entry before any GetOrBuildAsync caller read
+    /// its own `.Value`, which can't happen given GetOrBuildAsync always
+    /// reads `.Value` in the same expression it adds the entry with).
     ///
     /// FORMAT V2 — SINGLE SELF-CONTAINED FILE, OPTIONAL PER-FRAME
     /// COMPRESSION (decided in conversation, once the original all-raw,
@@ -156,7 +196,12 @@ namespace EditSharp.Composite
         private const int CurrentSchemaVersion = 1;
         private const string Extension = "esrp";
 
-        private static readonly ConcurrentDictionary<string, Task<ScrubProxyEntry>> InFlight = new();
+        // See class remarks, IN-FLIGHT BUILD COALESCING HARDENED AGAINST A
+        // REAL GetOrAdd RACE — Lazy<Task<T>>, not Task<T> directly, so that
+        // a ConcurrentDictionary.GetOrAdd race can only ever construct (and
+        // discard) unused Lazy wrappers, never start more than one real
+        // build per hash.
+        private static readonly ConcurrentDictionary<string, Lazy<Task<ScrubProxyEntry>>> InFlight = new();
         private static readonly ConcurrentDictionary<string, Exception> LastFailure = new();
         private static readonly ConcurrentDictionary<string, ScrubProxyEntry> ResolvedEntries = new();
 
@@ -166,10 +211,13 @@ namespace EditSharp.Composite
         /// <summary>
         /// Returns a ready-to-use scrub proxy for `sourcePath`, building it
         /// first if no cache entry exists yet — BLOCKS the caller until the
-        /// build finishes (or fails). This is what Playback's own scrub/
-        /// reverse session setup calls — see the class remarks on why that's
-        /// the right default here, unlike OptimizedMediaCache's playback
-        /// call sites.
+        /// build finishes (or fails). Kept fully blocking for its own
+        /// caller by design (see class remarks, CALLER CONTRACT) — Playback
+        /// no longer awaits this INLINE as part of its own scrub-session
+        /// setup (it wraps the call in a fire-and-forget Task.Run instead —
+        /// see Playback's own class remarks), but PrewarmScrubProxiesAsync
+        /// still awaits it directly, and that contract is exactly why this
+        /// method still blocks its own immediate caller start-to-finish.
         /// </summary>
         public static async Task<ScrubProxyEntry> GetOrBuildAsync(
             string sourcePath, HardwareAccelerator hwAccel, CancellationToken ct = default)
@@ -179,15 +227,21 @@ namespace EditSharp.Composite
 
             string hash = await MediaHasher.ComputeAsync(sourcePath, ct);
 
-            Task<ScrubProxyEntry> build = InFlight.GetOrAdd(
-                hash, _ => BuildAndTrackAsync(sourcePath, hash, hwAccel));
+            // See class remarks, IN-FLIGHT BUILD COALESCING HARDENED
+            // AGAINST A REAL GetOrAdd RACE: this factory only constructs a
+            // Lazy (cheap, starts nothing) — reading .Value immediately
+            // below is what actually starts (or joins) the one real build
+            // for this hash, no matter how many racing callers reach
+            // GetOrAdd for it at once.
+            Lazy<Task<ScrubProxyEntry>> lazyBuild = InFlight.GetOrAdd(
+                hash, _ => new Lazy<Task<ScrubProxyEntry>>(() => BuildAndTrackAsync(sourcePath, hash, hwAccel)));
 
             // .WaitAsync(ct) — this caller's own cancellation stops waiting
             // without cancelling a build another caller (or Playback's own
             // memoized _scrubSetupTask, once started) may also be awaiting.
             // Same "cancel the wait, not the shared work" split KeyframeIndex
             // and Playback's own scrub-session setup already used.
-            return await build.WaitAsync(ct);
+            return await lazyBuild.Value.WaitAsync(ct);
         }
 
         /// <summary>
@@ -235,8 +289,8 @@ namespace EditSharp.Composite
 
             string hash = await MediaHasher.ComputeAsync(sourcePath, ct);
 
-            if (InFlight.TryGetValue(hash, out Task<ScrubProxyEntry>? task))
-                return task.IsFaulted ? ScrubProxyStatus.Failed : ScrubProxyStatus.Building;
+            if (InFlight.TryGetValue(hash, out Lazy<Task<ScrubProxyEntry>>? lazyBuild))
+                return lazyBuild.Value.IsFaulted ? ScrubProxyStatus.Failed : ScrubProxyStatus.Building;
 
             if (LastFailure.ContainsKey(hash))
                 return ScrubProxyStatus.Failed;

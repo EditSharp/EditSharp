@@ -180,25 +180,148 @@ namespace EditSharp.Playback
     ///      linked with the caller's own `ct` — a superseded request's
     ///      OperationCanceledException is swallowed (not the caller's own
     ///      cancellation, so nothing to propagate).
-    ///   2. The one-time scrub-session setup — now a real PROXY BUILD for
-    ///      any source that doesn't have one cached yet, via
-    ///      PrepareScrubProxiesAsync/ScrubProxyCache.GetOrBuildAsync, a
-    ///      genuinely slower one-time cost than the old native-size-only
-    ///      probe it replaces — is MEMOIZED (_scrubSetupTask, mirroring
-    ///      ScrubProxyCache's own cached-Task build coalescing) rather than
-    ///      restarted inside every call. Once started it always runs to
-    ///      completion regardless of which caller kicked it off or whether
-    ///      that caller is later superseded; every call just awaits
+    ///   2. The one-time scrub-session setup — its own GPU context/pool
+    ///      (persistent, see SCRUB GPU CONTEXT IS NOW PERSISTENT below) plus
+    ///      a fresh ScrubFrameSource — is MEMOIZED (_scrubSetupTask,
+    ///      mirroring ScrubProxyCache's own cached-Task build coalescing)
+    ///      rather than restarted inside every call. Once started it always
+    ///      runs to completion regardless of which caller kicked it off or
+    ///      whether that caller is later superseded; every call just awaits
     ///      (cancellably, via WaitAsync) whatever the current attempt is —
     ///      the same "cancel the wait, not the shared work" split
-    ///      ScrubProxyCache.GetOrBuildAsync itself already uses.
+    ///      ScrubProxyCache.GetOrBuildAsync itself already uses. Individual
+    ///      SOURCE proxy builds are no longer part of what this setup
+    ///      waits ON at all — see SCRUB PROXY BUILDS RUN ON A REAL
+    ///      BACKGROUND THREAD, NEVER BLOCK SESSION STARTUP below.
     ///
     /// PrewarmScrubProxiesAsync — the opt-in "generate proxies beforehand"
     /// entry point: builds every video source's scrub proxy ahead of need
     /// (e.g. right after a project loads), so the FIRST scrub/reverse
     /// session doesn't pay any build cost at all. Entirely optional — the
     /// first scrub/reverse session builds whatever's still missing on
-    /// demand either way (see EnsureScrubSessionBaseAsync).
+    /// demand either way (see EnsureScrubSessionBaseAsync). UNLIKE the
+    /// session-startup path below, THIS entry point is still fully
+    /// awaited/blocking for its own caller — that's the point of calling it
+    /// explicitly ahead of time, and its caller controls whether/how to
+    /// await it.
+    ///
+    /// SCRUB PROXY BUILDS RUN ON A REAL BACKGROUND THREAD, NEVER BLOCK
+    /// SESSION STARTUP (fixed here, real-world regression found in
+    /// testing): a scrub/reverse session's own setup used to AWAIT every
+    /// referenced source's scrub proxy build INLINE (the old
+    /// PrepareScrubProxiesAsync -> Task.WhenAll -> per-source
+    /// ScrubProxyCache.GetOrBuildAsync) before EnsureScrubSessionBaseAsync
+    /// (and therefore ScrubToAsync/ReverseVideoLoopAsync's own startup)
+    /// would ever complete — for a source with no cached proxy yet, that's
+    /// a real, potentially multi-second decode+encode pass (see
+    /// ScrubProxyCache.BuildAsync), and testing found it visibly HUNG THE
+    /// CALLING THREAD for that whole duration, not merely responded slowly.
+    /// NEW EVIDENCE surfaced by that same test run, worth recording since it
+    /// contradicts an earlier conclusion in this file: TWO DEAD-END
+    /// HYPOTHESES below, point (a), concluded Godot's C# integration
+    /// installs NO SynchronizationContext at all. A production crash log
+    /// captured DURING THIS ROUND showed `Godot.GodotSynchronizationContext`
+    /// / `Godot.GodotTaskScheduler` (`ExecutePendingContinuations`/
+    /// `Activate`, both driven from the engine's own per-frame
+    /// `ScriptManagerBridge.FrameCallback`) directly in the call stack —
+    /// meaning that earlier conclusion was WRONG (or true only of an older
+    /// Godot version): Godot DOES capture and use its own
+    /// SynchronizationContext, and it resumes `await` continuations from
+    /// the MAIN THREAD's own per-frame callback. That reconciles this hang
+    /// exactly: every `await` in the old PrepareScrubProxiesAsync chain
+    /// (this file, ScrubProxyCache, MediaProbe, FfmpegRunner — none of it
+    /// ConfigureAwait(false), see (a) below) posted its continuation back
+    /// through that captured context, so a CPU-heavy decode+encode pass
+    /// ended up executing in chunks ON THE MAIN THREAD itself, between/
+    /// within frame callbacks — visually indistinguishable from a genuine
+    /// hang for as long as it took. FIX: proxy resolution no longer runs
+    /// inline as part of session setup at all —
+    /// KickOffScrubProxyResolution/KickOffProxyResolution fire each
+    /// referenced source's resolution via `Task.Run(...)`, which
+    /// unconditionally schedules onto the real ThreadPool regardless of any
+    /// captured SynchronizationContext, and BuildScrubSessionAsync/
+    /// ReverseVideoLoopAsync no longer await them at all — a scrub/reverse
+    /// session is considered "ready" (EnsureScrubSessionBaseAsync returns,
+    /// ReverseVideoLoopAsync proceeds) the moment its OWN GPU context
+    /// exists, regardless of whether every referenced source's proxy has
+    /// actually finished building yet. See MEDIA-OFFLINE PLACEHOLDER FOR
+    /// NOT-YET-READY MEDIA below for what fills the gap in the meantime.
+    ///
+    /// ONE BACKGROUND BUILD PER DISTINCT SOURCE PATH, NOT PER NODE (fixed
+    /// here, real-world regression found in testing directly after the fix
+    /// above: "it attempted to build 7 identical files"): once proxy
+    /// resolution moved onto a fire-and-forget Task.Run per VideoSourceNode
+    /// (see directly above), a Timeline that references the SAME underlying
+    /// source path from several distinct VideoSourceNode instances (the
+    /// same footage cut into multiple clips, or reused across channels) fired
+    /// one INDEPENDENT Task.Run per NODE, all racing to build that one
+    /// source's proxy at once. ScrubProxyCache.GetOrBuildAsync's own
+    /// in-flight-build coalescing (InFlight.GetOrAdd, keyed by content hash)
+    /// looks like it should have caught this, but each caller must first
+    /// `await MediaHasher.ComputeAsync(...)` (real, non-instant I/O) BEFORE
+    /// it ever reaches that GetOrAdd call — several callers hashing the
+    /// same file at once reliably finish within the same small window of
+    /// each other, and .NET's ConcurrentDictionary.GetOrAdd does NOT
+    /// guarantee its valueFactory runs only once under that kind of
+    /// near-simultaneous contention: multiple racing calls can each invoke
+    /// BuildAndTrackAsync (a real async method that starts running the
+    /// instant it's invoked, not merely queued), with only one of the
+    /// resulting Tasks actually kept in the dictionary — the others run to
+    /// completion anyway, each against its own temp file, each ending in
+    /// its own `File.Move(tempPath, finalPath, overwrite: true)` racing the
+    /// others for the same final path. That is exactly "N identical builds"
+    /// for one source, for N nodes that reference it. FIX, at the call
+    /// site (the actual root cause — see also the cache-level hardening
+    /// immediately below): KickOffScrubProxyResolution now groups every
+    /// referenced VideoSourceNode by its own Source.Path FIRST, and
+    /// KickOffProxyResolution fires exactly ONE Task.Run per DISTINCT path
+    /// — its result is then written into `proxies` for every node Id that
+    /// shares that path, once the one build/lookup completes. A Timeline
+    /// with 7 clips cut from the same source file now resolves that source
+    /// exactly once, not 7 times.
+    ///
+    /// ScrubProxyCache.GetOrBuildAsync ALSO HARDENED AGAINST THE SAME RACE,
+    /// AS DEFENSE-IN-DEPTH (paired with the fix directly above): the
+    /// call-site dedup above is the actual fix for THIS reported bug (one
+    /// Timeline, resolved through Playback), but ScrubProxyCache is a
+    /// process-wide static cache other call sites can reach too (e.g.
+    /// PrewarmScrubProxiesAsync running concurrently with a live scrub
+    /// session's own on-demand resolution for the same source) — so the
+    /// underlying GetOrAdd race is fixed at the cache itself too, not just
+    /// papered over here. See ScrubProxyCache's own remarks for the actual
+    /// mechanism (wrapping the in-flight Task in a Lazy so only the winning
+    /// caller's factory ever actually executes).
+    ///
+    /// MEDIA-OFFLINE PLACEHOLDER FOR NOT-YET-READY MEDIA (fixed here,
+    /// paired with the fix directly above — direct user request: "the
+    /// placeholder should just be used anytime any media comes up empty"):
+    /// ScrubFrameSource now falls back to MediaPlaceholder.Get(...) — a
+    /// small, cached, drawn-not-decoded "MEDIA OFFLINE" image — for ANY
+    /// input node it can't currently resolve real content for: a video
+    /// proxy that's still building in the background (see directly above),
+    /// one whose build failed outright, a missing/corrupt static image, or
+    /// a text node that fails to rasterize. See ScrubFrameSource's own
+    /// class remarks, MEDIA-OFFLINE PLACEHOLDER, for the full per-case
+    /// behavior. DELIBERATELY SCOPED TO SCRUB/REVERSE ONLY, NOT
+    /// SkClipContentSource, per direct user decision — forward Playback and
+    /// Render/* keep throwing on broken/missing media; silently masking
+    /// that in a real export or live playback could hide a real problem,
+    /// whereas scrub/reverse is already an approximate preview by nature
+    /// (see SCRUB/REVERSE VIA RAW SCRUB PROXIES above).
+    ///
+    /// ScrubProxyReady EVENT (new): once a background-kicked-off proxy
+    /// build completes successfully, `proxies` (the SAME mutable
+    /// dictionary ScrubFrameSource reads from) gains that source's entry,
+    /// but nothing automatically re-renders the CURRENT scrub/reverse
+    /// position with it — the next tick picks it up naturally
+    /// (ScrubFrameSource reads `proxies` fresh every call), but until then
+    /// whatever's already on screen (a placeholder, or a still-missing
+    /// frame) keeps showing. ScrubProxyReady fires (from whatever
+    /// background thread the build completed on — same "consumer marshals
+    /// it themselves" convention as every other event on this class) so a
+    /// consumer that wants to eagerly replace a placeholder can re-issue
+    /// ScrubToAsync(Position) itself once notified; entirely optional,
+    /// nothing internally depends on anyone handling it.
     ///
     /// REVERSE PLAYBACK (Speed &lt; 0): Play() branches to
     /// ReverseVideoLoopAsync instead of VideoLoopAsync. Audio never
@@ -272,12 +395,21 @@ namespace EditSharp.Playback
     ///       deadlock against a captured SynchronizationContext. REVERTED —
     ///       the real consumer app (a Godot C# game) calls ScrubToAsync
     ///       fire-and-forget from a slider's ValueChanged signal, never
-    ///       blocking on it, and Godot's C# integration installs NO
-    ///       SynchronizationContext at all (confirmed by the app's own use
-    ///       of CallDeferred/SetDeferred everywhere a callback needs to
-    ///       reach the main thread) — so this theory never actually applied
-    ///       here, and the fix was a no-op for this app's real behavior.
-    ///       Removed for cleanliness rather than left in as dead weight.
+    ///       blocking on it, and Godot's C# integration was believed at the
+    ///       time to install NO SynchronizationContext at all — so this
+    ///       theory was believed not to apply here, and the fix was treated
+    ///       as a no-op for this app's real behavior. Removed for
+    ///       cleanliness rather than left in as dead weight. SEE SCRUB
+    ///       PROXY BUILDS RUN ON A REAL BACKGROUND THREAD, NEVER BLOCK
+    ///       SESSION STARTUP above — later evidence shows the
+    ///       "no SynchronizationContext at all" premise here was actually
+    ///       WRONG; this revert's conclusion about ITS OWN theorized
+    ///       deadlock risk is unaffected (a plain `.Wait()`-on-UI-thread
+    ///       deadlock is a different mechanism than the main-thread-hang
+    ///       bug that new evidence explains), but the "this app has no
+    ///       SynchronizationContext, full stop" framing above it was never
+    ///       actually true and should not be trusted at face value by a
+    ///       future investigator.
     ///   (b) GpuContext.Dispose() was changed to wait for the GPU to idle
     ///       (GRContext.Flush() + Submit(syncCpu: true)) before releasing
     ///       the D3D12 device/queue/adapter/factory, on the theory that
@@ -290,40 +422,44 @@ namespace EditSharp.Playback
     /// The real cause turned out to be a third, different thing — see GPU
     /// WORK MUST STAY ON ONE THREAD below.
     ///
-    /// GPU WORK MUST STAY ON ONE THREAD — THE ACTUAL ROOT CAUSE: since
-    /// Godot's C# integration installs no SynchronizationContext (see (a)
-    /// above), EVERY `await` anywhere in this file — with or without
-    /// ConfigureAwait(false), before or after any fix in this
-    /// investigation — has ALWAYS resumed on an arbitrary ThreadPool
-    /// thread, not necessarily the same thread as before that await. That
-    /// means every GPU-touching call this file makes (GpuContext.Create,
-    /// SkSurfacePool's Rent/CreateSurface, SkFrameCompositor.RenderFrame,
-    /// GpuContext.Dispose) could already land on a DIFFERENT OS thread than
-    /// the call immediately before or after it, purely as an artifact of
-    /// how the .NET ThreadPool happens to schedule continuations — this was
-    /// true from the very first version of the scrub rewrite, independent
-    /// of every fix tried above. Skia's GrDirectContext (GRContext in
-    /// SkiaSharp) is not documented as safe for that usage pattern:
-    /// sequential-but-cross-thread access to one GRContext, its SKSurfaces,
-    /// and the D3D12 command queue backing it, with nothing pinning it to
-    /// one thread, is a real, plausible source of a driver-level hang —
-    /// more likely to actually manifest the more real GPU work a given call
-    /// submits, which lines up with the reported pattern (a cheap/short
-    /// first scrub tends to survive; a slower/longer one is more likely to
-    /// get unlucky; once ANY frame has succeeded, later calls in the same
-    /// process keep landing on threads the pool already has warmed up for
-    /// this workload, which is why it then "stays fixed"). FIX:
-    /// GpuThreadDispatcher (Composite/GpuThreadDispatcher.cs) confines every
-    /// GPU-touching call for a given GpuContext/SkSurfacePool pair to ONE
-    /// dedicated background thread, for as long as that pair is alive —
-    /// used for the scrub GPU context/pool (`_scrubGpuThread`, persistent —
-    /// see SCRUB GPU CONTEXT IS NOW PERSISTENT below) and for a
+    /// GPU WORK MUST STAY ON ONE THREAD — THE ACTUAL ROOT CAUSE OF THE
+    /// EARLIER SCRUB LOCKUP (unrelated to the main-thread-hang fixed above,
+    /// which is a separate bug with a separate mechanism — see SCRUB PROXY
+    /// BUILDS RUN ON A REAL BACKGROUND THREAD above): regardless of whether
+    /// Godot captures a SynchronizationContext (see (a) above for why that
+    /// question turned out to matter, just not for THIS bug), EVERY `await`
+    /// anywhere in this file could already land its continuation on a
+    /// DIFFERENT OS thread than the call immediately before or after it —
+    /// whether that continuation is scheduled by a captured
+    /// SynchronizationContext's own queue or by the plain ThreadPool, the
+    /// specific thread it actually runs on from one await to the next is
+    /// not guaranteed to be the same one. That means every GPU-touching
+    /// call this file makes (GpuContext.Create, SkSurfacePool's
+    /// Rent/CreateSurface, SkFrameCompositor.RenderFrame, GpuContext.Dispose)
+    /// could land on a different thread than the call before/after it,
+    /// purely as an artifact of scheduling — true from the very first
+    /// version of the scrub rewrite, independent of every fix tried above.
+    /// Skia's GrDirectContext (GRContext in SkiaSharp) is not documented as
+    /// safe for that usage pattern: sequential-but-cross-thread access to
+    /// one GRContext, its SKSurfaces, and the D3D12 command queue backing
+    /// it, with nothing pinning it to one thread, is a real, plausible
+    /// source of a driver-level hang — more likely to actually manifest the
+    /// more real GPU work a given call submits, which lines up with the
+    /// reported pattern (a cheap/short first scrub tends to survive; a
+    /// slower/longer one is more likely to get unlucky; once ANY frame has
+    /// succeeded, later calls in the same process keep landing on threads
+    /// already warmed up for this workload, which is why it then "stays
+    /// fixed"). FIX: GpuThreadDispatcher (Composite/GpuThreadDispatcher.cs)
+    /// confines every GPU-touching call for a given GpuContext/SkSurfacePool
+    /// pair to ONE dedicated background thread, for as long as that pair is
+    /// alive — used for the scrub GPU context/pool (`_scrubGpuThread`,
+    /// persistent — see SCRUB GPU CONTEXT IS NOW PERSISTENT below) and for a
     /// session-scoped dispatcher inside both VideoLoopAsync and
     /// ReverseVideoLoopAsync (created and disposed alongside that session's
     /// own GpuContext/SkSurfacePool). Every PrefetchAsync/RenderFrame/
     /// Create/Dispose call for a given context now happens on that context's
     /// own single thread, every time, structurally — not by hoping the
-    /// ThreadPool schedules favorably. CONFIRMED ON REAL HARDWARE — the
+    /// scheduler behaves favorably. CONFIRMED ON REAL HARDWARE — the
     /// user reported the reported freeze/lockup is completely gone after
     /// this fix.
     ///
@@ -502,6 +638,21 @@ namespace EditSharp.Playback
     ///   8. CLOSED — see SCRUB SETS POSITION FIRST, UNCONDITIONALLY and
     ///      SCRUB FAILURES ARE NOW LOGGED, NOT SILENT above. NOT YET
     ///      CONFIRMED ON REAL HARDWARE.
+    ///   9. CLOSED — see SCRUB PROXY BUILDS RUN ON A REAL BACKGROUND
+    ///      THREAD, NEVER BLOCK SESSION STARTUP and MEDIA-OFFLINE
+    ///      PLACEHOLDER FOR NOT-YET-READY MEDIA above. A scrub/reverse
+    ///      session no longer blocks the calling thread while a missing
+    ///      proxy builds; ScrubFrameSource shows the offline placeholder
+    ///      for whatever isn't ready yet. REGRESSION FOUND ON REAL HARDWARE
+    ///      ("attempted to build 7 identical files" / "No scrub proxy
+    ///      registered" errors) AND FIXED — see ONE BACKGROUND BUILD PER
+    ///      DISTINCT SOURCE PATH, NOT PER NODE above (the duplicate-build
+    ///      race) and ScrubFrameSource's own MEDIA-OFFLINE PLACEHOLDER
+    ///      remarks (the "No scrub proxy registered" throw is gone — that
+    ///      path now falls back to the placeholder instead, which is what
+    ///      should have shipped with this gap's original fix but did not
+    ///      actually make it into the pushed file the first time). NOT YET
+    ///      CONFIRMED ON REAL HARDWARE.
     /// </summary>
     public class Playback : IDisposable
     {
@@ -555,6 +706,19 @@ namespace EditSharp.Playback
             PlaybackStarted?.Invoke(this, e);
         }
 
+        /// <summary>
+        /// See class remarks, ScrubProxyReady EVENT — fires whenever a
+        /// background-kicked-off scrub proxy build completes successfully.
+        /// Purely a notification; nothing internally depends on anyone
+        /// handling it, and firing it never touches session state itself.
+        /// </summary>
+        public event EventHandler? ScrubProxyReady;
+
+        protected virtual void OnScrubProxyReady(EventArgs e)
+        {
+            ScrubProxyReady?.Invoke(this, e);
+        }
+
         private readonly object _stateLock = new();
         private bool _isPlaying;
         private CancellationTokenSource? _cts;
@@ -598,7 +762,9 @@ namespace EditSharp.Playback
         // own. Reset to null by EndScrubbing() so the NEXT session rebuilds
         // `_scrubContentSource`/`_scrubProxies` (the GPU context/pool/thread
         // above are untouched by that reset — see SCRUB GPU CONTEXT IS NOW
-        // PERSISTENT).
+        // PERSISTENT). NOTE: completing no longer implies every referenced
+        // source's proxy is ready — see SCRUB PROXY BUILDS RUN ON A REAL
+        // BACKGROUND THREAD, NEVER BLOCK SESSION STARTUP.
         private Task? _scrubSetupTask;
 
         // The most recent ScrubToAsync call's own supersession token — see
@@ -782,10 +948,15 @@ namespace EditSharp.Playback
         /// cached and pays no build cost at all — the opt-in "generate
         /// proxies beforehand" entry point (see class remarks). Entirely
         /// optional: a scrub/reverse session builds whatever's still
-        /// missing on demand either way. Safe to call at any time,
-        /// including while a scrub session is already active or playback
-        /// is running — it only ever reads/builds via ScrubProxyCache, it
-        /// never touches this instance's own scrub-session state.
+        /// missing on demand either way (in the BACKGROUND now, without
+        /// blocking — see class remarks, SCRUB PROXY BUILDS RUN ON A REAL
+        /// BACKGROUND THREAD). Safe to call at any time, including while a
+        /// scrub session is already active or playback is running — it
+        /// only ever reads/builds via ScrubProxyCache, it never touches
+        /// this instance's own scrub-session state. UNLIKE that background
+        /// path, THIS method is still fully awaited/blocking for ITS OWN
+        /// caller — that is the entire point of calling it explicitly ahead
+        /// of time.
         /// </summary>
         public Task PrewarmScrubProxiesAsync(CancellationToken ct = default) =>
             Task.WhenAll(EnumerateVideoSourcePaths(Timeline)
@@ -809,6 +980,11 @@ namespace EditSharp.Playback
         /// failure in the render/session-setup work that follows is caught
         /// and logged rather than left to vanish into an unobserved Task —
         /// see class remarks, SCRUB FAILURES ARE NOW LOGGED, NOT SILENT.
+        /// NEVER BLOCKS ON A MISSING SOURCE'S SCRUB PROXY BUILD ANY MORE —
+        /// see class remarks, SCRUB PROXY BUILDS RUN ON A REAL BACKGROUND
+        /// THREAD, NEVER BLOCK SESSION STARTUP; a node whose proxy isn't
+        /// ready yet renders as the offline placeholder instead (see
+        /// MEDIA-OFFLINE PLACEHOLDER FOR NOT-YET-READY MEDIA).
         /// </summary>
         public async Task ScrubToAsync(TimeSpan position, CancellationToken ct = default)
         {
@@ -984,12 +1160,21 @@ namespace EditSharp.Playback
         /// itself (see class remarks, GPU WORK MUST STAY ON ONE THREAD), so
         /// this method's own await here is what actually makes that
         /// thread-confinement possible.
+        ///
+        /// NO LONGER AWAITS INDIVIDUAL SOURCE PROXY RESOLUTION AT ALL — see
+        /// class remarks, SCRUB PROXY BUILDS RUN ON A REAL BACKGROUND
+        /// THREAD, NEVER BLOCK SESSION STARTUP. KickOffScrubProxyResolution
+        /// fires every referenced source's resolution on the ThreadPool and
+        /// returns immediately; this method (and therefore
+        /// EnsureScrubSessionBaseAsync/ScrubToAsync's own await on it)
+        /// completes as soon as the GPU context/pool exist, regardless of
+        /// whether any given source's proxy has actually finished building.
         /// </summary>
         private async Task BuildScrubSessionAsync(int width, int height)
         {
             var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
 
-            await PrepareScrubProxiesAsync(Timeline, RenderSettings.HardwareAccelerator, proxies);
+            KickOffScrubProxyResolution(Timeline, RenderSettings.HardwareAccelerator, proxies);
 
             _scrubProxies = proxies;
             _scrubContentSource = new ScrubFrameSource(
@@ -1044,20 +1229,27 @@ namespace EditSharp.Playback
         }
 
         /// <summary>
-        /// Resolves (building on a cache miss — BLOCKING; see class remarks,
-        /// SCRUB/REVERSE VIA RAW SCRUB PROXIES) every video source
-        /// referenced by `timeline`'s own scrub proxy via ScrubProxyCache.
-        /// Deliberately NOT RenderContentPreparation.PrepareContentAsync,
-        /// which probes native size/decode plan and consults
-        /// OptimizedMediaCache — none of that applies here at all any more;
-        /// this only needs each source's already-resolved-or-built
-        /// ScrubProxyEntry.
+        /// Fires off resolution for every DISTINCT Video-type source path
+        /// referenced by `timeline` — see class remarks, ONE BACKGROUND
+        /// BUILD PER DISTINCT SOURCE PATH, NOT PER NODE — as an independent
+        /// background task each (see KickOffProxyResolution) and returns
+        /// IMMEDIATELY, without waiting for any of them. Deliberately NOT
+        /// RenderContentPreparation.PrepareContentAsync, which probes
+        /// native size/decode plan and consults OptimizedMediaCache — none
+        /// of that applies here at all any more; this only ever needs each
+        /// source's already-resolved-or-built ScrubProxyEntry.
+        ///
+        /// GROUPS VideoSourceNodes BY Source.Path FIRST (fixed here — see
+        /// class remarks): several distinct nodes referencing the SAME
+        /// source path collapse into ONE resolution/build for that path,
+        /// whose result is then written into `proxies` for every one of
+        /// those nodes' own Ids once it completes.
         /// </summary>
-        private static async Task PrepareScrubProxiesAsync(
+        private void KickOffScrubProxyResolution(
             Timeline timeline, HardwareAccelerator hwAccel,
             ConcurrentDictionary<Guid, ScrubProxyEntry> proxies)
         {
-            var tasks = new List<Task>();
+            var nodeIdsByPath = new Dictionary<string, List<Guid>>();
 
             foreach (VideoChannel channel in timeline.VideoChannels)
             {
@@ -1068,17 +1260,58 @@ namespace EditSharp.Playback
                     foreach (VideoSourceNode media in video.Graph.Nodes.OfType<VideoSourceNode>())
                     {
                         if (media.Source.Type != SourceType.Video) continue;
-                        tasks.Add(ResolveOneAsync(media));
+
+                        if (!nodeIdsByPath.TryGetValue(media.Source.Path, out List<Guid>? nodeIds))
+                            nodeIdsByPath[media.Source.Path] = nodeIds = new List<Guid>();
+
+                        nodeIds.Add(media.Id);
                     }
                 }
             }
 
-            await Task.WhenAll(tasks);
+            foreach (KeyValuePair<string, List<Guid>> entry in nodeIdsByPath)
+                KickOffProxyResolution(entry.Key, entry.Value, hwAccel, proxies);
+        }
 
-            async Task ResolveOneAsync(VideoSourceNode media)
+        /// <summary>
+        /// Resolves (looking up, or building on a cache miss) ONE source
+        /// path's scrub proxy via `Task.Run(...)` — a REAL, guaranteed
+        /// ThreadPool hop regardless of any captured SynchronizationContext,
+        /// since `ScrubProxyCache.GetOrBuildAsync`'s own await chain has
+        /// none of its own ConfigureAwait(false) calls (see class remarks,
+        /// SCRUB PROXY BUILDS RUN ON A REAL BACKGROUND THREAD). Called
+        /// exactly ONCE per distinct source path (see
+        /// KickOffScrubProxyResolution and class remarks, ONE BACKGROUND
+        /// BUILD PER DISTINCT SOURCE PATH, NOT PER NODE) — the single
+        /// resulting ScrubProxyEntry is written into `proxies` for EVERY
+        /// node Id in `nodeIds` that shares this path, not just one.
+        /// Fire-and-forget by design — the caller
+        /// (KickOffScrubProxyResolution) doesn't wait for this, so failures
+        /// are caught and logged HERE rather than left to fault an
+        /// unobserved Task; `proxies` simply never gains an entry for any
+        /// of these node Ids if the build fails, which ScrubFrameSource
+        /// already treats as "show the offline placeholder for it" (see
+        /// that class's own remarks) — permanently for this session, since
+        /// nothing here retries a failed build on its own.
+        /// </summary>
+        private void KickOffProxyResolution(
+            string sourcePath, IReadOnlyList<Guid> nodeIds, HardwareAccelerator hwAccel,
+            ConcurrentDictionary<Guid, ScrubProxyEntry> proxies)
+        {
+            _ = Task.Run(async () =>
             {
-                proxies[media.Id] = await ScrubProxyCache.GetOrBuildAsync(media.Source.Path, hwAccel);
-            }
+                try
+                {
+                    ScrubProxyEntry resolvedEntry = await ScrubProxyCache.GetOrBuildAsync(sourcePath, hwAccel);
+                    foreach (Guid nodeId in nodeIds) proxies[nodeId] = resolvedEntry;
+                    OnScrubProxyReady(EventArgs.Empty);
+                }
+                catch (Exception ex)
+                {
+                    EditSharpConfig.Logger.LogError(
+                        $"Playback: failed to resolve a scrub proxy for '{sourcePath}': {ex}");
+                }
+            });
         }
 
         /// <summary>Every distinct Video-type source path referenced by `timeline` — used by PrewarmScrubProxiesAsync.</summary>
@@ -1120,9 +1353,9 @@ namespace EditSharp.Playback
         /// remarks, GPU WORK MUST STAY ON ONE THREAD. This is the same fix
         /// applied to scrubbing, extended here for consistency: this loop's
         /// own awaits (Task.Delay, PlaybackPauseGate.WaitIfPausedAsync) can
-        /// resume on a different ThreadPool thread each time just like
-        /// ScrubToAsync's could, since nothing in this process installs a
-        /// SynchronizationContext — so without this, every per-frame
+        /// resume on a different thread each time just like ScrubToAsync's
+        /// could, since nothing about that scheduling is pinned to one
+        /// thread by default — so without this, every per-frame
         /// SkFrameCompositor.RenderFrame call here carried the same
         /// cross-thread GRContext hazard scrubbing did.
         /// </summary>
@@ -1331,6 +1564,17 @@ namespace EditSharp.Playback
         /// own fixed sample rate, not the earlier keyframe-snapped "fast
         /// rewind" jumpiness.
         ///
+        /// PROXY RESOLUTION NO LONGER BLOCKS THIS LOOP'S OWN STARTUP EITHER
+        /// — see class remarks, SCRUB PROXY BUILDS RUN ON A REAL BACKGROUND
+        /// THREAD: `proxies` is populated via the SAME
+        /// KickOffScrubProxyResolution ScrubToAsync's own session setup
+        /// uses (deduplicated by source path — see ONE BACKGROUND BUILD
+        /// PER DISTINCT SOURCE PATH, NOT PER NODE), fired off and NOT
+        /// awaited, so this loop's warm-up frame can render (via the
+        /// offline placeholder for whatever isn't ready yet — see
+        /// ScrubFrameSource's own remarks) without waiting on any source's
+        /// build to finish first.
+        ///
         /// GpuContext/SkSurfacePool/contentSource are session-scoped here
         /// too — same revert as VideoLoopAsync, see class remarks, EAGER
         /// RELEASE ON PAUSE, REVERTED. Uses its OWN session-scoped
@@ -1359,7 +1603,7 @@ namespace EditSharp.Playback
                 {
                     var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
 
-                    await PrepareScrubProxiesAsync(Timeline, RenderSettings.HardwareAccelerator, proxies);
+                    KickOffScrubProxyResolution(Timeline, RenderSettings.HardwareAccelerator, proxies);
 
                     using var contentSource = new ScrubFrameSource(
                         fps, RenderSettings.HardwareAccelerator, proxies);
