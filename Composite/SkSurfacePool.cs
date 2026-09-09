@@ -1,14 +1,14 @@
 using System;
 using System.Collections.Generic;
 using SkiaSharp;
- 
+
 namespace EditSharp.Composite
 {
     /// <summary>
     /// Session-lifetime cache of SKSurface instances keyed by (width, height)
-    /// — every surface this pool hands out is Rgba8888/Premul, the only
-    /// format the Skia compositor ever creates, so that part of the key is
-    /// implicit rather than tracked.
+    /// — every surface this pool hands out via Rent/Return is Rgba8888/
+    /// Premul, the only format the Skia compositor ever creates, so that
+    /// part of the key is implicit rather than tracked.
     ///
     /// WHY THIS IS SAFE: the render loop is strictly sequential (see
     /// Renderer.RenderAllFramesAsync). Nothing outlives a single frame's
@@ -53,26 +53,52 @@ namespace EditSharp.Composite
     /// NOT THREAD-SAFE, deliberately — matches the render loop's own
     /// strictly-sequential contract. A lock here would be pure overhead for
     /// a single-threaded caller, and would silently paper over a
-    /// reintroduced-concurrency bug rather than surfacing it.
+    /// reintroduced-concurrency bug rather than surfacing it. This
+    /// contract now extends to the DATA-SURFACE path below too — see
+    /// DATA SURFACES (GPU SCAN DECODE) — a data surface must only ever be
+    /// rented/returned from the SAME single thread that owns this pool's
+    /// GRContext (the GpuThreadDispatcher thread — see that class and
+    /// ScrubProxyGpuDecoder), exactly like every other use of this pool.
+    ///
+    /// DATA SURFACES (GPU SCAN DECODE), ADDED IN CONVERSATION alongside
+    /// ScrubProxyGpuDecoder's clamp-affine parallel-scan IndexedDelta7
+    /// decode: that decoder needs GPU render targets that are NOT Rgba8888/
+    /// Premul at all — full-range floating-point (lo, hi, offset) state per
+    /// pixel, which an 8-bit-per-channel normalized color format cannot
+    /// represent (an accumulated offset across a wide row can run well
+    /// outside 0-255 — see ScrubProxyGpuDecoder's own remarks). RentData/
+    /// ReturnData below extend this pool with a SECOND, INDEPENDENT free-
+    /// list keyed by (Width, Height, ColorType) rather than touching the
+    /// original (Width, Height)-keyed one Rent/Return already use — so nothing
+    /// about the proven Rgba8888 compositor path (SkFrameCompositor,
+    /// SkGeneratorClip, SkNoiseClip, every existing call site) changes
+    /// behavior, risk, or allocation pattern at all. A data surface is
+    /// always created with SKAlphaType.Unpremul and is ALWAYS drawn into
+    /// with SKBlendMode.Src (never the default SrcOver) — see
+    /// ScrubProxyGpuDecoder's own remarks on why: these surfaces carry
+    /// arbitrary, non-color float payloads in their RGBA channels (not a
+    /// straight color+coverage pair), and an alpha-aware blend would
+    /// silently corrupt or discard that payload on every single draw.
     /// </summary>
     internal sealed class SkSurfacePool : IDisposable
     {
         private readonly GRContext? _grContext;
         private readonly Dictionary<(int Width, int Height), Stack<SKSurface>> _free = new();
+        private readonly Dictionary<(int Width, int Height, SKColorType ColorType), Stack<SKSurface>> _freeData = new();
         private readonly List<SKSurface> _owned = new();
- 
+
         public SkSurfacePool(GRContext? grContext, int canvasWidth, int canvasHeight, int seedCount)
         {
             _grContext = grContext;
- 
+
             var key = (canvasWidth, canvasHeight);
             var stack = new Stack<SKSurface>(Math.Max(seedCount, 0));
             for (int i = 0; i < seedCount; i++)
                 stack.Push(CreateSurface(canvasWidth, canvasHeight));
- 
+
             _free[key] = stack;
         }
- 
+
         /// <summary>
         /// Hands out a surface of exactly width x height. Content is whatever
         /// was left on it by its previous use (or uninitialized, for a brand
@@ -85,10 +111,10 @@ namespace EditSharp.Composite
             var key = (width, height);
             if (_free.TryGetValue(key, out Stack<SKSurface>? stack) && stack.Count > 0)
                 return stack.Pop();
- 
+
             return CreateSurface(width, height);
         }
- 
+
         /// <summary>
         /// Returns a surface obtained from Rent (or present at seed time)
         /// for reuse. width/height must match what it was Rent'd as — there
@@ -101,18 +127,18 @@ namespace EditSharp.Composite
             var key = (width, height);
             if (!_free.TryGetValue(key, out Stack<SKSurface>? stack))
                 _free[key] = stack = new Stack<SKSurface>();
- 
+
             stack.Push(surface);
         }
- 
+
         private SKSurface CreateSurface(int width, int height)
         {
             var info = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Premul);
- 
+
             SKSurface? surface = _grContext != null
                 ? SKSurface.Create(_grContext, budgeted: true, info)
                 : null;
- 
+
             // GPU-backed creation can legitimately fail (context lost,
             // texture budget exhausted) even when the GRContext itself is
             // healthy — fall back to raster for just this one surface rather
@@ -121,17 +147,56 @@ namespace EditSharp.Composite
             // whole-context fallback GpuContext already logs loudly; not
             // logged here to avoid spamming per-frame if it repeats.
             surface ??= SKSurface.Create(info);
- 
+
             _owned.Add(surface);
             return surface;
         }
- 
+
+        /// <summary>
+        /// See class remarks, DATA SURFACES (GPU SCAN DECODE). Hands out a
+        /// surface of exactly width x height at `colorType`, Unpremul,
+        /// backed by this pool's own GRContext when one exists (falls back
+        /// to raster exactly like CreateSurface above does for a normal
+        /// Rgba8888 surface, for the same reason — a GPU-backed create can
+        /// legitimately fail even on a healthy context). NOT interchangeable
+        /// with Rent/Return above — a surface obtained here must be
+        /// returned via ReturnData, and only ever drawn into with
+        /// SKBlendMode.Src (see class remarks for why).
+        /// </summary>
+        public SKSurface RentData(int width, int height, SKColorType colorType)
+        {
+            var key = (width, height, colorType);
+            if (_freeData.TryGetValue(key, out Stack<SKSurface>? stack) && stack.Count > 0)
+                return stack.Pop();
+
+            var info = new SKImageInfo(width, height, colorType, SKAlphaType.Unpremul);
+
+            SKSurface? surface = _grContext != null
+                ? SKSurface.Create(_grContext, budgeted: true, info)
+                : null;
+
+            surface ??= SKSurface.Create(info);
+
+            _owned.Add(surface);
+            return surface;
+        }
+
+        /// <summary>Returns a surface obtained from RentData for reuse. width/height/colorType must match exactly.</summary>
+        public void ReturnData(SKSurface surface, int width, int height, SKColorType colorType)
+        {
+            var key = (width, height, colorType);
+            if (!_freeData.TryGetValue(key, out Stack<SKSurface>? stack))
+                _freeData[key] = stack = new Stack<SKSurface>();
+
+            stack.Push(surface);
+        }
+
         public void Dispose()
         {
             foreach (SKSurface surface in _owned) surface.Dispose();
             _owned.Clear();
             _free.Clear();
+            _freeData.Clear();
         }
     }
 }
- 

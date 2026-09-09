@@ -134,7 +134,7 @@ namespace EditSharp
             set => _scrubProxyDirectory = value ?? throw new ArgumentNullException(nameof(value));
         }
 
-        private static int _scrubProxyTargetShortSide = 216;
+        private static int _scrubProxyTargetShortSide = 144;
 
         /// <summary>
         /// The target size, on whichever axis is a source's own SHORT side,
@@ -148,15 +148,22 @@ namespace EditSharp
         /// sizes (this is a scrub/rewind indicator, never used for a final
         /// render — see ScrubFrameSource).
         ///
-        /// WORTH REVISITING NOW THAT Indexed8/IndexedDelta7 EXIST (see
-        /// ScrubProxyPixelFormat.Indexed8/IndexedDelta7's own remarks): the
-        /// whole point of both formats' size savings is that they buy back
-        /// room to raise this toward native resolution. Left at its
-        /// original default here rather than changed as part of either
-        /// format's own introduction — nothing about either format's own
+        /// WORTH REVISITING NOW THAT IndexedDelta7/Zstd EXIST (see
+        /// ScrubProxyPixelFormat.IndexedDelta7's own remarks and
+        /// ScrubProxyCompressionScheme.Zstd's own remarks): the whole point
+        /// of their size savings is that they buy back room to raise this
+        /// toward native resolution — the user's stated ideal target is
+        /// 720p30fps at a reasonable size while keeping fully frame-
+        /// independent seeking. IndexedDelta7's V6 shared/global palette
+        /// (see ScrubProxyFormat's own remarks) is one lever toward that
+        /// target; a GPU-accelerated IndexedDelta7 BUILD path (see
+        /// ScrubProxyGpuEncoder) is meant to make raising this toward 720p
+        /// affordable on the one-time build side too. Left at its
+        /// original default here rather than changed as part of any one
+        /// format/scheme's own introduction — nothing about either's own
         /// correctness depends on a particular target short side, so
         /// raising this is a separate, purely-quality-vs-size tuning
-        /// decision for later, not bundled into either format change
+        /// decision for later, not bundled into any one of those changes
         /// itself.
         /// </summary>
         public static int ScrubProxyTargetShortSide
@@ -168,7 +175,7 @@ namespace EditSharp
                     nameof(value), "ScrubProxyTargetShortSide must be positive.");
         }
 
-        private static double _scrubProxySampleRate = 30.0;
+        private static double _scrubProxySampleRate = 10.0;
 
         /// <summary>
         /// How many frames per second of SOURCE TIME a scrub proxy stores —
@@ -196,30 +203,43 @@ namespace EditSharp
                     nameof(value), "ScrubProxySampleRate must be positive.");
         }
 
-        private static ScrubProxyCompressionScheme _scrubProxyCompressionScheme = ScrubProxyCompressionScheme.Rle;
+        private static ScrubProxyCompressionScheme _scrubProxyCompressionScheme = ScrubProxyCompressionScheme.Zstd;
 
         /// <summary>
         /// Which lossless per-frame transform, if any, ScrubProxyCache
         /// applies to every stored frame in a NEWLY BUILT .esrp scrub proxy
         /// — see ScrubProxyFormat.ScrubProxyCompressionScheme and
-        /// ScrubProxyRle for the actual codec. Defaults to Rle: confirmed,
-        /// via real-world testing in a separate application, to cost
-        /// negligible CPU even on a hot per-tick decode path, for a real,
-        /// often substantial reduction in a scrub proxy's on-disk size —
-        /// flat colour, letterboxing/pillarboxing, and gradient-heavy
-        /// footage in particular compress well. Set to None to build fully
-        /// raw proxies instead (the original v1 shape, still supported —
-        /// just no longer the default).
+        /// ScrubProxyZstd for the actual codec.
+        ///
+        /// TWO VALUES AVAILABLE:
+        ///   - None: fully raw proxies (the original v1 shape).
+        ///   - Zstd (DEFAULT): Zstandard compression via ZstdSharp.Port (a
+        ///     fully-managed, pure-C# port — no native/P-Invoke
+        ///     dependency). CONFIRMED ON REAL HARDWARE alongside
+        ///     IndexedDelta7 to produce a real, often substantial
+        ///     reduction in a scrub proxy's on-disk size — chosen because
+        ///     Zstd's decode speed is roughly independent of the
+        ///     compression level used at encode time (see ScrubProxyZstd's
+        ///     own remarks), so an aggressive one-time build-time level
+        ///     costs nothing extra per scrub tick. Alongside IndexedDelta7,
+        ///     this is the settled, best-performing combination this cache
+        ///     builds — the earlier Rle scheme it replaced as the default
+        ///     was removed entirely (decided in conversation: unnecessary
+        ///     complexity once Zstd proved better). NOTED FOR LATER, NOT
+        ///     YET PURSUED: pushing the compression level past its current
+        ///     19 (see ScrubProxyZstd.CompressionLevel) was raised as a
+        ///     further size lever and deliberately deferred in favor of
+        ///     IndexedDelta7's V6 shared/global palette.
         ///
         /// ONLY AFFECTS NEW BUILDS. An existing cached .esrp file's own
         /// CompressionScheme (recorded in its own header at build time) is
         /// what ScrubProxyReader actually honors when reading it back —
         /// changing this setting does not retroactively touch anything
         /// already on disk, and there is no need to rebuild existing
-        /// entries just because this changed; old and new entries coexist
-        /// fine side by side in the same cache directory. APPLIES TO
-        /// Indexed8/IndexedDelta7 FRAMES' CONTROL-BYTE PLANE TOO (see those
-        /// formats' own remarks) — this one knob governs whichever
+        /// entries just because this changed; entries built under either
+        /// value coexist fine side by side in the same cache directory.
+        /// APPLIES TO IndexedDelta7 FRAMES' CONTROL-BYTE PLANE TOO (see
+        /// that format's own remarks) — this one knob governs whichever
         /// ScrubProxyPixelFormat below is also configured.
         /// </summary>
         public static ScrubProxyCompressionScheme ScrubProxyCompressionScheme
@@ -232,43 +252,53 @@ namespace EditSharp
 
         /// <summary>
         /// How ScrubProxyCache stores each frame's pixels in a NEWLY BUILT
-        /// .esrp scrub proxy — see ScrubProxyFormat.ScrubProxyPixelFormat,
-        /// ColorQuantizer (Indexed8's quantization/dithering machinery),
+        /// .esrp scrub proxy — see ScrubProxyFormat.ScrubProxyPixelFormat
         /// and IndexedDelta7Codec (IndexedDelta7's own encode/decode
-        /// machinery) for how each format actually works. DEFAULTS TO
-        /// Indexed8 — DECIDED IN CONVERSATION: this format's size savings
-        /// are large enough to be worth taking as the default trade-off for
-        /// a scrub PREVIEW (never used for a final render — see
-        /// ScrubProxyFormat's own class remarks on the "accurate to the
-        /// proxy, not the source" trade-off this whole mechanism already
-        /// makes regardless of pixel format), and it has been confirmed on
-        /// real hardware to produce dramatic size reductions with correct
-        /// behavior.
+        /// machinery) for how it actually works.
         ///
-        /// THREE VALUES AVAILABLE:
+        /// TWO VALUES AVAILABLE:
         ///   - Rgba8888: fully lossless (modulo CompressionScheme) — the
         ///     original v1/v2 shape, still fully supported, just no longer
-        ///     the default now that Indexed8 exists.
-        ///   - Indexed8 (DEFAULT): a 256-color palette quantized per frame,
-        ///     with ordered (Bayer) dithering to reduce visible banding.
-        ///     Proven on real hardware.
-        ///   - IndexedDelta7: a hybrid 128-color palette + per-pixel
-        ///     predictive-delta encoding, direct implementation of a user-
-        ///     proposed design (see IndexedDelta7Codec's own remarks) —
-        ///     EXPERIMENTAL, not yet validated on real hardware, and NOT
-        ///     the default. Intended, per the user's own stated goal, to
-        ///     push size down further than Indexed8 while also IMPROVING
-        ///     visual quality (no dithering, exact per-pixel delta instead)
-        ///     — worth evaluating once real-hardware testing is possible,
-        ///     but not assumed correct until then.
+        ///     the default now that IndexedDelta7 exists.
+        ///   - IndexedDelta7 (DEFAULT): a hybrid 128-color palette +
+        ///     per-pixel predictive-delta encoding, direct implementation
+        ///     of a user-proposed design (see IndexedDelta7Codec's own
+        ///     remarks) — CONFIRMED ON REAL HARDWARE to deliver a
+        ///     dramatic size reduction with correct behavior and good
+        ///     visual quality (no dithering, exact per-pixel delta
+        ///     instead). Alongside Zstd compression, this is the settled,
+        ///     best-performing combination this cache builds — the
+        ///     earlier Indexed8 format it replaced as the default was
+        ///     removed entirely (decided in conversation: unnecessary
+        ///     complexity once IndexedDelta7 proved better).
+        ///
+        ///     V6 FORMAT CHANGE, DECIDED IN CONVERSATION: IndexedDelta7 now
+        ///     stores exactly ONE palette for the whole file (built from a
+        ///     bounded sample of frames spread across the source, before
+        ///     the real encode pass — see ScrubProxyCache's own remarks on
+        ///     BuildGlobalDelta7Palette), rather than a fresh palette per
+        ///     frame — a further size lever toward the user's stated ideal
+        ///     target of 720p30fps at a reasonable size with fully
+        ///     frame-independent seeking, pursued alongside a GPU-
+        ///     accelerated build/encode path (see ScrubProxyGpuEncoder)
+        ///     rather than instead of it. This bumped
+        ///     ScrubProxyFormat.CurrentVersion 5 -> 6 and the
+        ///     fixed header from 40 to 44 bytes — any pre-V6 cached file is
+        ///     treated as a cache miss and rebuilt, same as every earlier
+        ///     format-version bump. NOTED FOR LATER, NOT YET PURSUED
+        ///     alongside this: re-tuning the delta bit-split/color-space
+        ///     weighting (IndexedDelta7Codec's RStep/GStep/BStep
+        ///     constants), and a larger/alternate palette+delta format
+        ///     variant — both raised as further size/quality levers and
+        ///     deliberately deferred in favor of the shared palette.
         ///
         /// ONLY AFFECTS NEW BUILDS — same non-retroactive contract as
         /// ScrubProxyCompressionScheme immediately above: an existing
         /// cached .esrp file's own PixelFormat (recorded in its own header
         /// at build time) is what ScrubProxyReader actually honors when
         /// reading it back, so changing this does not touch anything
-        /// already on disk, and entries built under any of the three
-        /// values coexist fine side by side in the same cache directory.
+        /// already on disk, and entries built under either value coexist
+        /// fine side by side in the same cache directory.
         /// </summary>
         public static ScrubProxyPixelFormat ScrubProxyPixelFormat
         {

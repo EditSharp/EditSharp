@@ -101,6 +101,16 @@ namespace EditSharp.Composite
     /// are already random-access by construction — dispatches the same way
     /// SkClipContentSource does for those; no shared base class since video
     /// handling is otherwise completely different between the two.
+    ///
+    /// EVERY VIDEO-PROXY FRAME IS READ ON THE CPU — there is no GPU decode
+    /// path for a scrub proxy frame in this codebase; an earlier round of
+    /// GPU decode work for IndexedDelta7 was tried and then removed
+    /// entirely as unneeded complexity (decided in conversation — the GPU
+    /// work that actually matters here is on the BUILD/encode side, see
+    /// ScrubProxyGpuEncoder, not the read side, since a proxy read is
+    /// already a cheap, single positioned file read regardless of pixel
+    /// format). GetProxyFrame below is therefore just
+    /// `reader.GetFrameAt(...)`, unconditionally, for every pixel format.
     /// </summary>
     internal sealed class ScrubFrameSource : IClipContentSource, IDisposable
     {
@@ -212,7 +222,9 @@ namespace EditSharp.Composite
         /// `_proxies` fresh every call rather than caching a "this node is
         /// broken" verdict — a still-building proxy legitimately becomes
         /// available partway through a scrub/reverse session (see
-        /// Playback's ScrubProxyReady event).
+        /// Playback's ScrubProxyReady event). See class remarks, EVERY
+        /// VIDEO-PROXY FRAME IS READ ON THE CPU — no GPU decode attempt
+        /// happens here for any pixel format.
         /// </summary>
         private SKImage GetProxyFrame(VideoSourceNode media, double clipSeconds, int canvasWidth, int canvasHeight)
         {
@@ -222,6 +234,7 @@ namespace EditSharp.Composite
                 if (reader == null) return MediaPlaceholder.Get(canvasWidth, canvasHeight);
 
                 double targetSeconds = (media.Source.Start ?? TimeSpan.Zero).TotalSeconds + Math.Max(0, clipSeconds);
+
                 return reader.GetFrameAt(targetSeconds);
             }
             catch (Exception ex)

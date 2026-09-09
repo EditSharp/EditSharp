@@ -96,6 +96,45 @@ namespace EditSharp.Playback
     /// UNLESS a scrub actually moved the position during that pause — see
     /// SCRUB DURING PAUSE FORCES A REAL SEEK ON RESUME below.
     ///
+    /// STATE (PlaybackState) — REPLACED THE EARLIER IsPlaying/IsPaused
+    /// BOOLEAN PAIR (decided in conversation): this class used to expose
+    /// two independently-readable booleans (`IsPlaying`, and `IsPaused`
+    /// derived from `_pauseGate?.IsPaused`), which meant a caller wanting
+    /// "is this actually actively playing right now" had to combine them
+    /// itself (`IsPlaying &amp;&amp; !IsPaused`) — and internally, this class had
+    /// its own `_isPlaying` bool tracking "a session exists" completely
+    /// separately from `_pauseGate`'s own paused/not-paused bit, two pieces
+    /// of state that could only ever legally combine into three real
+    /// situations (no session; session, unpaused; session, paused) despite
+    /// the boolean pair's own state space technically allowing four. A
+    /// single `PlaybackState State` (see that enum's own remarks) replaces
+    /// both: `Inactive`/`Playing`/`Paused` cover exactly those three real
+    /// situations with no illegal combination possible, and `Scrubbing` is
+    /// now a real, first-class fourth state (see SCRUB STATE IS NOW A REAL
+    /// STATE, NOT AN ORTHOGONAL FLAG below) rather than something that used
+    /// to happen ambiently underneath whatever `IsPlaying`/`IsPaused` said.
+    /// `_pauseGate` itself is UNCHANGED and still exists — it remains the
+    /// actual mechanism VideoLoopAsync/ReverseVideoLoopAsync poll to block
+    /// producing new frames while paused; `_state` is the coarse, externally-
+    /// visible reflection of what's currently true, kept in sync with every
+    /// place this class used to flip `_isPlaying` or touch `_pauseGate`.
+    ///
+    /// SCRUB STATE IS NOW A REAL STATE, NOT AN ORTHOGONAL FLAG (part of the
+    /// STATE change above): ScrubToAsync's own guard — previously
+    /// `_isPlaying &amp;&amp; !IsPaused` — is now simply `State ==
+    /// PlaybackState.Playing` (throws in that one case, exactly the same
+    /// set of situations as before: scrubbing is allowed whenever no
+    /// session exists at all, OR the existing session is paused). For the
+    /// duration of composing and delivering ONE scrubbed-to frame, `_state`
+    /// is set to `PlaybackState.Scrubbing` (saving whatever it was
+    /// immediately before — `Inactive` or `Paused` — under `_stateLock`)
+    /// and restored to that saved value once the render finishes, whether
+    /// it succeeds or fails. Because actual scrub RENDERING is already
+    /// serialized through `_scrubGate` (a plain SemaphoreSlim — see SCRUB
+    /// COALESCING below), only one ScrubToAsync call is ever inside that
+    /// bracket at a time, so this save/restore can never race a second
+    /// concurrent one.
+    ///
     /// SCRUB/REVERSE VIA RAW SCRUB PROXIES (ScrubProxyCache /
     /// ScrubProxyReader / ScrubFrameSource) — REWRITTEN IN CONVERSATION,
     /// REPLACING AN EARLIER ffmpeg-KEYFRAME-DECODE APPROACH ENTIRELY, after
@@ -202,8 +241,7 @@ namespace EditSharp.Playback
     /// demand either way (see EnsureScrubSessionBaseAsync). UNLIKE the
     /// session-startup path below, THIS entry point is still fully
     /// awaited/blocking for its own caller — that's the point of calling it
-    /// explicitly ahead of time, and its caller controls whether/how to
-    /// await it.
+    /// explicitly ahead of time.
     ///
     /// SCRUB PROXY BUILDS RUN ON A REAL BACKGROUND THREAD, NEVER BLOCK
     /// SESSION STARTUP (fixed here, real-world regression found in
@@ -345,18 +383,18 @@ namespace EditSharp.Playback
     /// the "resume an existing paused session" path and the "start a
     /// brand-new session" path, BEFORE taking _stateLock. Found in the
     /// field: scrubbing is explicitly allowed while playback is merely
-    /// paused (ScrubToAsync's own guard is `_isPlaying &amp;&amp; !IsPaused`, not
-    /// `!_isPlaying`) — Play() itself used to never tear an active scrub
-    /// session down before (re)starting its own forward-playback session.
-    /// Runs OUTSIDE `_stateLock` deliberately: EndScrubbing() blocks
-    /// synchronously on `_scrubGate`, and ScrubToAsync can be holding
-    /// `_scrubGate` while briefly needing `_stateLock` itself — calling
-    /// EndScrubbing() while already holding `_stateLock` would risk a
-    /// lock-order inversion deadlock. NOTE this fix now ONLY tears down
-    /// `_scrubContentSource` (see SCRUB GPU CONTEXT IS NOW PERSISTENT
-    /// below) — it no longer touches the scrub GpuContext at all, since
-    /// that is now a persistent, once-created resource for this Playback
-    /// instance's whole life.
+    /// paused (ScrubToAsync's own guard is `State != PlaybackState.Playing`,
+    /// not `State == PlaybackState.Inactive` — see STATE above) — Play()
+    /// itself used to never tear an active scrub session down before
+    /// (re)starting its own forward-playback session. Runs OUTSIDE
+    /// `_stateLock` deliberately: EndScrubbing() blocks synchronously on
+    /// `_scrubGate`, and ScrubToAsync can be holding `_scrubGate` while
+    /// briefly needing `_stateLock` itself — calling EndScrubbing() while
+    /// already holding `_stateLock` would risk a lock-order inversion
+    /// deadlock. NOTE this fix now ONLY tears down `_scrubContentSource`
+    /// (see SCRUB GPU CONTEXT IS NOW PERSISTENT below) — it no longer
+    /// touches the scrub GpuContext at all, since that is now a persistent,
+    /// once-created resource for this Playback instance's whole life.
     ///
     /// EAGER RELEASE ON PAUSE, REVERTED — TRIED, THEN EXPLICITLY UNDONE PER
     /// USER DIRECTION: a real GPU-contention concern was identified where
@@ -536,11 +574,12 @@ namespace EditSharp.Playback
     /// by Pause()) together detect "did an actual scrub happen since this
     /// pause started" — a plain int-equality check, immune to any timing
     /// race with the leader's own periodic Report() calls (which never
-    /// touch `_scrubGeneration`). Play()'s resume branch (`_isPlaying &amp;&amp;
-    /// startPosition == null`) now checks this first:
+    /// touch `_scrubGeneration`). Play()'s resume branch (session already
+    /// active and `startPosition == null`) now checks this first:
     ///   - NO scrub happened (generations match): unchanged, cheap,
-    ///     instant in-place resume — `_pauseGate.Resume()` +
-    ///     `_referenceClock.ResumeWallClock()`, exactly as before this fix.
+    ///     instant in-place resume — `_pauseGate?.Resume()` +
+    ///     `_referenceClock?.ResumeWallClock()` + `_state =
+    ///     PlaybackState.Playing`, exactly as before this fix.
     ///   - A scrub DID happen (generations differ): the persistent decode
     ///     pipe genuinely cannot jump to the new position on its own, so
     ///     this falls through to the SAME stop+restart path a fresh
@@ -653,6 +692,22 @@ namespace EditSharp.Playback
     ///      should have shipped with this gap's original fix but did not
     ///      actually make it into the pushed file the first time). NOT YET
     ///      CONFIRMED ON REAL HARDWARE.
+    ///  10. GPU DECODE FOR IndexedDelta7 — TRIED, THEN REMOVED PER
+    ///      EXPLICIT USER CORRECTION: an earlier round of GPU work wired a
+    ///      ScrubProxyGpuDecoder into every ScrubFrameSource this file
+    ///      constructs (BuildScrubSessionAsync's persistent scrub session
+    ///      and ReverseVideoLoopAsync's session-scoped one), attempting a
+    ///      GPU decode of each IndexedDelta7 proxy frame before falling
+    ///      back to IndexedDelta7Codec.Decode. The user clarified that
+    ///      request was actually about the BUILD/ENCODE side, not decode —
+    ///      a proxy read is already a cheap, single positioned file read
+    ///      regardless of pixel format, so GPU-accelerating it bought
+    ///      little, while the ENCODE side (see ScrubProxyCache/
+    ///      ScrubProxyGpuEncoder) is the genuinely expensive, worth-
+    ///      accelerating step. The decoder and its wiring here were
+    ///      removed entirely as unneeded complexity; every scrub-proxy
+    ///      frame this file resolves is read on the CPU now, exactly as it
+    ///      was before that detour — see ScrubFrameSource's own remarks.
     /// </summary>
     public class Playback : IDisposable
     {
@@ -668,9 +723,13 @@ namespace EditSharp.Playback
         private PlaybackReferenceClock? _referenceClock;
         public TimeSpan Position => _referenceClock?.Position ?? _lastKnownPosition;
 
-        public bool IsPlaying => _isPlaying;
-
-        public bool IsPaused => _pauseGate?.IsPaused ?? false;
+        /// <summary>
+        /// This Playback instance's current coarse state — see
+        /// PlaybackState's own remarks and this class's STATE section
+        /// above for the full reasoning behind replacing the earlier
+        /// IsPlaying/IsPaused boolean pair with this single enum.
+        /// </summary>
+        public PlaybackState State => _state;
 
         // Always true now — see class remarks, SCRUB/REVERSE VIA RAW SCRUB
         // PROXIES. Kept (rather than removed) purely for API compatibility
@@ -720,7 +779,16 @@ namespace EditSharp.Playback
         }
 
         private readonly object _stateLock = new();
-        private bool _isPlaying;
+
+        /// <summary>
+        /// See class remarks, STATE — the single source of truth for this
+        /// instance's coarse playback state, replacing the earlier
+        /// `_isPlaying` bool. Every place this class used to flip
+        /// `_isPlaying` or read `_pauseGate?.IsPaused` now reads/writes
+        /// this field instead, under `_stateLock` at every write.
+        /// </summary>
+        private PlaybackState _state = PlaybackState.Inactive;
+
         private CancellationTokenSource? _cts;
         private Task? _videoTask;
         private PlaybackAudioEngine? _audioEngine;
@@ -774,6 +842,9 @@ namespace EditSharp.Playback
         // behind _scrubGate.
         private CancellationTokenSource? _scrubSupersedeCts;
 
+        /// <summary>True while `_state` is Playing or Paused — i.e. a play session currently exists, whether or not it's paused.</summary>
+        private bool SessionActive => _state == PlaybackState.Playing || _state == PlaybackState.Paused;
+
         public void Play(TimeSpan? startPosition = null)
         {
             // See class remarks, SWITCHING BETWEEN SCRUB AND PLAYBACK —
@@ -786,7 +857,7 @@ namespace EditSharp.Playback
 
             lock (_stateLock)
             {
-                if (_isPlaying && startPosition == null)
+                if (SessionActive && startPosition == null)
                 {
                     if (_scrubGeneration == _scrubGenerationAtPause)
                     {
@@ -794,6 +865,7 @@ namespace EditSharp.Playback
                         // same cheap, instant, in-place resume as always.
                         _pauseGate?.Resume();
                         _referenceClock?.ResumeWallClock();
+                        _state = PlaybackState.Playing;
                         return;
                     }
 
@@ -809,11 +881,11 @@ namespace EditSharp.Playback
                 }
             }
 
-            if (_isPlaying) Stop();
+            if (SessionActive) Stop();
 
             lock (_stateLock)
             {
-                if (_isPlaying) return;
+                if (SessionActive) return;
 
                 if (Speed == 0f)
                     throw new NotSupportedException(
@@ -831,7 +903,7 @@ namespace EditSharp.Playback
 
                 bool reverse = Speed < 0f;
 
-                _isPlaying = true;
+                _state = PlaybackState.Playing;
                 _cts = new CancellationTokenSource();
                 CancellationToken token = _cts.Token;
 
@@ -891,8 +963,9 @@ namespace EditSharp.Playback
         {
             lock (_stateLock)
             {
-                if (!_isPlaying || _pauseGate == null) return;
+                if (_state != PlaybackState.Playing || _pauseGate == null) return;
                 _pauseGate.Pause();
+                _state = PlaybackState.Paused;
                 // Snapshot BEFORE stopping the wall clock — see class
                 // remarks, SCRUB DURING PAUSE FORCES A REAL SEEK ON RESUME.
                 _scrubGenerationAtPause = _scrubGeneration;
@@ -908,8 +981,8 @@ namespace EditSharp.Playback
 
             lock (_stateLock)
             {
-                if (!_isPlaying) return;
-                _isPlaying = false;
+                if (!SessionActive) return;
+                _state = PlaybackState.Inactive;
                 cts = _cts;
                 _cts = null;
                 _pauseGate = null;
@@ -985,12 +1058,19 @@ namespace EditSharp.Playback
         /// THREAD, NEVER BLOCK SESSION STARTUP; a node whose proxy isn't
         /// ready yet renders as the offline placeholder instead (see
         /// MEDIA-OFFLINE PLACEHOLDER FOR NOT-YET-READY MEDIA).
+        ///
+        /// SETS State TO Scrubbing FOR THE DURATION OF THE ACTUAL RENDER —
+        /// see class remarks, SCRUB STATE IS NOW A REAL STATE, NOT AN
+        /// ORTHOGONAL FLAG: whatever State was immediately before this call
+        /// entered its gated section (Inactive, or Paused if a play session
+        /// is paused) is saved and restored once the render finishes,
+        /// succeeds or fails.
         /// </summary>
         public async Task ScrubToAsync(TimeSpan position, CancellationToken ct = default)
         {
             lock (_stateLock)
             {
-                if (_isPlaying && !(_pauseGate?.IsPaused ?? false))
+                if (_state == PlaybackState.Playing)
                     throw new InvalidOperationException(
                         "ScrubToAsync cannot be used while actively playing — Pause() first.");
             }
@@ -1032,6 +1112,20 @@ namespace EditSharp.Playback
             try
             {
                 await _scrubGate.WaitAsync(linked);
+
+                // See class remarks, SCRUB STATE IS NOW A REAL STATE, NOT
+                // AN ORTHOGONAL FLAG — save whatever State was right before
+                // this scrub's own render work starts, so it can be
+                // restored once this one render finishes. Safe without a
+                // race: only one ScrubToAsync call is ever inside this
+                // `_scrubGate`-held section at a time.
+                PlaybackState stateBeforeScrub;
+                lock (_stateLock)
+                {
+                    stateBeforeScrub = _state;
+                    _state = PlaybackState.Scrubbing;
+                }
+
                 try
                 {
                     // .WaitAsync(linked) — cancellable WAITING only, never
@@ -1058,6 +1152,7 @@ namespace EditSharp.Playback
                 }
                 finally
                 {
+                    lock (_stateLock) { _state = stateBeforeScrub; }
                     _scrubGate.Release();
                 }
             }
@@ -1101,13 +1196,16 @@ namespace EditSharp.Playback
         /// through `pool` and therefore through its backing GRContext, not
         /// just SkFrameCompositor.RenderFrame itself — runs as ONE unit of
         /// work on `gpuThread`, the dedicated thread that owns `pool`'s
-        /// GpuContext. See class remarks, GPU WORK MUST STAY ON ONE THREAD.
-        /// PrefetchAsync is blocked on synchronously (`.GetAwaiter().
-        /// GetResult()`) INSIDE that unit of work rather than awaited —
-        /// safe only because ScrubFrameSource's own remarks document it as
-        /// fully synchronous under the hood (always returns
-        /// Task.CompletedTask), so this never actually blocks a thread on
-        /// real I/O.
+        /// GpuContext. See class remarks, GPU WORK MUST STAY ON ONE
+        /// THREAD. PrefetchAsync is blocked on synchronously
+        /// (`.GetAwaiter().GetResult()`) INSIDE that unit of work rather
+        /// than awaited — safe only because ScrubFrameSource's own remarks
+        /// document it as fully synchronous under the hood (always returns
+        /// Task.CompletedTask, and every proxy frame it reads is a plain
+        /// CPU read — see its remarks, EVERY VIDEO-PROXY FRAME IS READ ON
+        /// THE CPU), so this never actually blocks a thread on real I/O or
+        /// attempts a reentrant dispatch onto `gpuThread` from within
+        /// itself.
         /// </summary>
         private Task<(byte[] Buffer, int Length)> ComposeInstantFrameAsync(
             ScrubFrameSource contentSource, SkSurfacePool pool, GpuThreadDispatcher gpuThread,
@@ -1169,17 +1267,16 @@ namespace EditSharp.Playback
         /// EnsureScrubSessionBaseAsync/ScrubToAsync's own await on it)
         /// completes as soon as the GPU context/pool exist, regardless of
         /// whether any given source's proxy has actually finished building.
+        ///
+        /// `_scrubGpuContext`/`_scrubSurfacePool`/`_scrubGpuThread` back
+        /// this session's own COMPOSITING (ComposeInstantFrameAsync's
+        /// PrefetchAsync/RenderFrame calls) — the ScrubFrameSource this
+        /// method constructs does NOT take them: it never touches the GPU
+        /// itself, since every proxy frame it reads is a plain CPU read
+        /// (see that class's own remarks).
         /// </summary>
         private async Task BuildScrubSessionAsync(int width, int height)
         {
-            var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
-
-            KickOffScrubProxyResolution(Timeline, RenderSettings.HardwareAccelerator, proxies);
-
-            _scrubProxies = proxies;
-            _scrubContentSource = new ScrubFrameSource(
-                RenderSettings.Framerate, RenderSettings.HardwareAccelerator, proxies);
-
             if (_scrubGpuContext == null)
             {
                 _scrubGpuThread ??= new GpuThreadDispatcher("EditSharp-ScrubGPU");
@@ -1195,6 +1292,14 @@ namespace EditSharp.Playback
                 _scrubGpuContext = context;
                 _scrubSurfacePool = pool;
             }
+
+            var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
+
+            KickOffScrubProxyResolution(Timeline, RenderSettings.HardwareAccelerator, proxies);
+
+            _scrubProxies = proxies;
+            _scrubContentSource = new ScrubFrameSource(
+                RenderSettings.Framerate, RenderSettings.HardwareAccelerator, proxies);
         }
 
         public void EndScrubbing()
@@ -1531,7 +1636,7 @@ namespace EditSharp.Playback
             }
             finally
             {
-                lock (_stateLock) { _isPlaying = false; }
+                lock (_stateLock) { _state = PlaybackState.Inactive; }
             }
         }
 
@@ -1586,6 +1691,13 @@ namespace EditSharp.Playback
         /// about scrubbing), so a matching session-scoped dispatcher is the
         /// right shape here — see class remarks, GPU WORK MUST STAY ON ONE
         /// THREAD.
+        ///
+        /// `gpuContext`/`surfacePool`/`reverseGpuThread` back this
+        /// session's own COMPOSITING (ComposeInstantFrameAsync's
+        /// PrefetchAsync/RenderFrame calls) — the ScrubFrameSource this
+        /// method constructs does NOT take them: it never touches the GPU
+        /// itself, since every proxy frame it reads is a plain CPU read
+        /// (see that class's own remarks).
         /// </summary>
         private async Task ReverseVideoLoopAsync(
             CancellationToken token, TimeSpan startPosition,
@@ -1601,19 +1713,19 @@ namespace EditSharp.Playback
             {
                 try
                 {
-                    var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
-
-                    KickOffScrubProxyResolution(Timeline, RenderSettings.HardwareAccelerator, proxies);
-
-                    using var contentSource = new ScrubFrameSource(
-                        fps, RenderSettings.HardwareAccelerator, proxies);
-
                     using var reverseGpuThread = new GpuThreadDispatcher("EditSharp-ReverseGPU");
 
                     GpuContext gpuContext = await reverseGpuThread.RunAsync(() =>
                         GpuContext.Create(RenderSettings.HardwareAccelerator, RenderSettings.GpuAdapterIndex));
                     SkSurfacePool surfacePool = await reverseGpuThread.RunAsync(() =>
                         new SkSurfacePool(gpuContext.GRContext, width, height, Timeline.VideoChannels.Count));
+
+                    var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
+
+                    KickOffScrubProxyResolution(Timeline, RenderSettings.HardwareAccelerator, proxies);
+
+                    using var contentSource = new ScrubFrameSource(
+                        fps, RenderSettings.HardwareAccelerator, proxies);
 
                     try
                     {
@@ -1718,7 +1830,7 @@ namespace EditSharp.Playback
             }
             finally
             {
-                lock (_stateLock) { _isPlaying = false; }
+                lock (_stateLock) { _state = PlaybackState.Inactive; }
             }
         }
 
@@ -1728,9 +1840,9 @@ namespace EditSharp.Playback
 
             lock (_stateLock)
             {
-                if (!_isPlaying) return;
+                if (!SessionActive) return;
 
-                _isPlaying = false;
+                _state = PlaybackState.Inactive;
                 _lastKnownPosition = _referenceClock?.Position ?? _lastKnownPosition;
                 _referenceClock = null;
                 _pauseGate = null;

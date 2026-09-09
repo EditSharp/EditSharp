@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -40,178 +41,164 @@ namespace EditSharp.Composite
     /// spawning ANY ffmpeg process per scrub tick — GPU or software — could
     /// not be made both fast and crash-safe under a fast scrub drag.
     ///
-    /// WHY THIS EXISTS: the same structural problem OptimizedMediaCache
-    /// solves for forward playback (a source's own codec/GOP structure can
-    /// make an arbitrary seek expensive) applies even harder to scrubbing,
-    /// which needs MANY arbitrary seeks per second with zero tolerance for
-    /// per-tick latency. OptimizedMediaCache's answer (an intra-only ffmpeg-
-    /// decodable proxy) still pays a real decode — cheap, but not free, and
-    /// not zero-process — on every tick. This cache's answer is stronger:
-    /// a proxy with NO decode step at all. See ScrubProxyFormat's own
-    /// remarks for the file shape that makes that possible.
+    /// DELIBERATELY A SEPARATE CACHE FROM OptimizedMediaCache — different
+    /// purpose (scrub preview, never used by Render/* or real playback —
+    /// see ScrubFrameSource), different shape, different size target.
     ///
-    /// DELIBERATELY A SEPARATE CACHE FROM OptimizedMediaCache, NOT A THIRD
-    /// QUALITY TIER OF IT: different purpose (scrub preview, never used by
-    /// Render/* or real playback — see ScrubFrameSource), different shape
-    /// (raw/RLE fixed-rate frames vs. a real decodable video container),
-    /// different size target (a few hundred pixels vs. up to 4K) — sharing
-    /// one cache/directory/schema would only couple two things that change
-    /// for unrelated reasons.
+    /// CONTENT-ADDRESSED, KEYED BY MediaHasher'S HASH — a source that's
+    /// renamed, moved, or duplicated under a second name still resolves to
+    /// the same cache entry.
     ///
-    /// CONTENT-ADDRESSED, KEYED BY MediaHasher'S HASH — same reasoning as
-    /// OptimizedMediaCache: a source that's renamed, moved, or duplicated
-    /// under a second name still resolves to the same cache entry.
-    ///
-    /// CALLER CONTRACT (updated — see Playback's own class remarks, SCRUB
-    /// PROXY BUILDS RUN ON A REAL BACKGROUND THREAD, NEVER BLOCK SESSION
-    /// STARTUP): Playback's scrub/reverse session setup no longer awaits
-    /// GetOrBuildAsync inline as part of its own startup — it fires each
+    /// CALLER CONTRACT: Playback's scrub/reverse session setup fires each
     /// referenced source's resolution via Task.Run and moves on, showing
     /// the offline placeholder for whatever isn't ready yet (see
-    /// ScrubFrameSource). GetOrBuildAsync itself is UNCHANGED in that it
-    /// still blocks ITS OWN caller until the build finishes — that
-    /// contract stays true for PrewarmScrubProxiesAsync (still fully
-    /// awaited by design) and for the fire-and-forget Task.Run wrapper
-    /// Playback now uses instead of awaiting it directly.
+    /// ScrubFrameSource). GetOrBuildAsync itself still blocks ITS OWN
+    /// caller until the build finishes — that contract stays true for
+    /// PrewarmScrubProxiesAsync (still fully awaited by design) and for the
+    /// fire-and-forget Task.Run wrapper Playback uses instead of awaiting
+    /// it directly.
     ///
     /// MEMOIZATION shape is a direct copy of OptimizedMediaCache's (in-flight
     /// build coalescing, last-failure tracking for GetStatusAsync, a
     /// resolved-entry cache keyed by hash, and a source-identity cache keyed
     /// on (path, length, mtime) that skips even the hash computation for a
-    /// file this process has already resolved) — same problem, same fix,
-    /// see OptimizedMediaCache's own remarks for the fuller reasoning behind
-    /// each layer.
+    /// file this process has already resolved).
     ///
     /// IN-FLIGHT BUILD COALESCING HARDENED AGAINST A REAL GetOrAdd RACE
     /// (fixed here, real-world regression: "it attempted to build 7
-    /// identical files" — root-caused together with the matching call-site
-    /// fix in Playback, see its own class remarks, ONE BACKGROUND BUILD PER
-    /// DISTINCT SOURCE PATH, NOT PER NODE): `InFlight` used to be a plain
-    /// `ConcurrentDictionary&lt;string, Task&lt;ScrubProxyEntry&gt;&gt;`, populated via
-    /// `InFlight.GetOrAdd(hash, _ =&gt; BuildAndTrackAsync(...))`. That looks
-    /// like it guarantees exactly one build per hash, but it doesn't:
-    /// `GetOrAdd`'s valueFactory is NOT guaranteed to run only once under
-    /// contention — if two callers reach it for the same key at nearly the
-    /// same moment (which happens routinely here, since every caller must
-    /// first `await MediaHasher.ComputeAsync(...)` — real I/O — before ever
-    /// reaching this call, so several callers hashing the same file
-    /// reliably land within the same small window of each other), the
-    /// dictionary may invoke the factory MORE THAN ONCE, keeping only one
-    /// resulting Task but having already let every invocation's side
-    /// effects run — and `_ =&gt; BuildAndTrackAsync(...)` is a real async
-    /// method that starts executing (its file I/O, its ffmpeg decode
-    /// pass) the instant it's invoked, not merely queued. Each losing
-    /// invocation still ran BuildAsync to completion, each against its own
-    /// temp file, each finishing with its own `File.Move(overwrite: true)`
-    /// racing the others for the same final path — exactly "N identical
-    /// builds" for one source. FIX: `InFlight` now stores
-    /// `Lazy&lt;Task&lt;ScrubProxyEntry&gt;&gt;` instead of `Task&lt;ScrubProxyEntry&gt;`
-    /// directly. `GetOrAdd`'s factory here only ever constructs a `Lazy`
-    /// wrapper (cheap, does nothing, starts nothing) — if it's invoked more
-    /// than once under the same race, the extra `Lazy` objects are simply
-    /// discarded unused. The ACTUAL build only starts the first time
-    /// `.Value` is read on whichever `Lazy` instance the dictionary settled
-    /// on keeping, and `Lazy`'s own default thread-safety mode
-    /// (ExecutionAndPublication) guarantees that read triggers the factory
-    /// at most once even if multiple threads read `.Value` concurrently —
-    /// so no matter how many times `GetOrAdd`'s own factory races, exactly
-    /// one `BuildAndTrackAsync` call ever actually executes per hash.
-    /// GetStatusAsync's own `InFlight.TryGetValue` lookup follows suit,
-    /// reading `.Value` off whatever `Lazy` it finds — safe for the same
-    /// reason, and correct even if THIS is the very call that ends up
-    /// triggering the factory (that would only happen if this method
-    /// somehow observed the entry before any GetOrBuildAsync caller read
-    /// its own `.Value`, which can't happen given GetOrBuildAsync always
-    /// reads `.Value` in the same expression it adds the entry with).
+    /// identical files"): `InFlight` stores `Lazy&lt;Task&lt;ScrubProxyEntry&gt;&gt;`
+    /// instead of `Task&lt;ScrubProxyEntry&gt;` directly, so a `GetOrAdd` race
+    /// under contention can only ever construct (and discard) unused `Lazy`
+    /// wrappers — the actual build only starts the first time `.Value` is
+    /// read on whichever `Lazy` the dictionary settles on keeping, and
+    /// `Lazy`'s own default thread-safety mode guarantees that read
+    /// triggers the factory at most once.
     ///
     /// FORMAT V2 — SINGLE SELF-CONTAINED FILE, OPTIONAL PER-FRAME
-    /// COMPRESSION (decided in conversation, once the original all-raw,
-    /// two-file design had been proven correct and stable on real hardware):
-    /// every entry is now exactly ONE .esrp file — no more companion
-    /// `.meta.json` — with its metadata embedded and, by default, every
-    /// frame's pixels PackBits-RLE-compressed for real on-disk size savings
-    /// at negligible per-tick CPU cost (real-world-tested in a separate
-    /// application). See ScrubProxyFormat's own VERSION 2 remarks, and
-    /// EditSharpConfig.ScrubProxyCompressionScheme for the build-time knob
-    /// (default Rle; set to None for the original fully-raw shape). This
-    /// class's own on-disk layout changed accordingly: PathsFor now returns
-    /// one path, not a (media, meta) pair, and TryLoadExistingAsync/
-    /// BuildAsync/EncodeAsync read/write the embedded header+metadata+frame-
-    /// index directly rather than a separate JSON file.
+    /// COMPRESSION: every entry is one .esrp file — metadata embedded, no
+    /// companion file — with every frame's pixels optionally compressed
+    /// (see EditSharpConfig.ScrubProxyCompressionScheme).
     ///
-    /// FRAME-PIXEL ENCODING PULLED INTO A PLAIN SYNCHRONOUS HELPER
-    /// (EncodeFramePixels, hardening fix, no observed compiler to confirm
-    /// against in this environment): `EncodeAsync` used to declare
-    /// `ReadOnlySpan&lt;byte&gt; raw = pixmap.GetPixelSpan();` — a ref-struct
-    /// local — directly inside its own `async` method body, spanning
-    /// several `await`s before and after it in the surrounding loop. Ref
-    /// structs can't be held live across an `await` (the compiler would
-    /// reject that outright), and older C# versions additionally disallow
-    /// declaring one as a local ANYWHERE inside an async method body at
-    /// all, even when it's never actually live across a suspension point —
-    /// a real, plausible source of a silent build failure on whatever C#
-    /// language version this project targets, and not something to leave
-    /// unresolved just because it can't be confirmed without a compiler
-    /// here. FIX: the span-touching work (GetPixelSpan + RLE-or-raw encode)
-    /// now lives entirely inside EncodeFramePixels, a plain, fully
-    /// synchronous, non-async method — no `await` anywhere in it, so a
-    /// `Span`/`ReadOnlySpan` local is always unambiguously safe there
-    /// regardless of language version. EncodeAsync itself now only ever
-    /// holds the RETURNED `byte[]` (a normal heap object, never a ref
-    /// struct) across its own awaits.
+    /// FRAME-PIXEL ENCODING IS A PLAIN SYNCHRONOUS HELPER
+    /// (EncodeFramePixels) — deliberately not async, so a `Span`/
+    /// `ReadOnlySpan` local touching a decoded frame's raw pixels is always
+    /// unambiguously safe there regardless of language version; EncodeAsync
+    /// itself only ever holds the RETURNED `byte[]` (never a ref struct)
+    /// across its own awaits. WITH GPU ENCODE (see below), EncodeFramePixels
+    /// still never holds a ref struct across an await ITSELF — the GPU
+    /// attempt it may make is a fully blocking call
+    /// (`gpuThread.RunAsync(...).GetAwaiter().GetResult()`), not an awaited
+    /// one, so this method's own synchronous signature and span-safety
+    /// contract are unchanged.
     ///
-    /// BUILD FAILURES ARE NOW LOGGED (hardening fix): BuildAndTrackAsync
-    /// used to record a build failure ONLY into `LastFailure` (consulted
-    /// by GetStatusAsync) — there was no actual log line anywhere for a
-    /// build that failed outright, unlike the existing success-path Log()
-    /// calls in BuildAsync. Paired with Playback.ScrubToAsync's own new
-    /// catch-all logging (see Playback's class remarks, SCRUB FAILURES ARE
-    /// NOW LOGGED, NOT SILENT), this is what actually put a message on the
-    /// record for the reported "empty scrub proxy folder, no proxy file,
-    /// no error shown anywhere" symptom — previously NEITHER layer logged
-    /// anything on this path.
+    /// FORMAT V4 — IndexedDelta7 PIXEL FORMAT: a second EncodeFramePixels
+    /// branch (alongside Rgba8888), calling IndexedDelta7Codec.
     ///
-    /// FORMAT V3 — Indexed8 PIXEL FORMAT (decided in conversation, direct
-    /// response to a user proposal to trade exact color accuracy for a
-    /// large size reduction — see ScrubProxyPixelFormat.Indexed8 and
-    /// ColorQuantizer for the full design/reasoning): EncodeFramePixels now
-    /// branches on EditSharpConfig.ScrubProxyPixelFormat. For Indexed8,
-    /// ColorQuantizer.Quantize builds this frame's own 256-color palette
-    /// and per-pixel index plane, which are concatenated (palette raw,
-    /// always; indices optionally Rle'd, same as an Rgba8888 frame's own
-    /// bytes would be) into the single blob BuildAsync/EncodeAsync already
-    /// treat as an opaque per-frame byte sequence — no change needed to
-    /// the frame-index/offset bookkeeping in EncodeAsync at all, since that
-    /// machinery never cared WHY a frame's length varies, only that it
-    /// does. GPU-SHADER DECODE OF THIS FORMAT IS EXPLICITLY OUT OF SCOPE
-    /// FOR THIS ROUND — deferred to a separate, later optimization per
-    /// direct user instruction ("let's treat the GPU decode piece as a
-    /// later step") — for now, ScrubProxyReader.GetFrameAt expands an
-    /// Indexed8 frame back to full RGBA8888 entirely on the CPU (see that
-    /// method's own remarks), so ScrubFrameSource/Playback need zero
-    /// awareness this format exists at all.
+    /// FORMAT V5 — Zstd COMPRESSION SCHEME: the per-branch "compress-or-
+    /// leave-raw" ternary each of Rgba8888/IndexedDelta7 used to carry
+    /// independently is a single shared CompressPlane helper (below) both
+    /// branches call through, dispatching on
+    /// EditSharpConfig.ScrubProxyCompressionScheme (None/Zstd) in exactly
+    /// one place. STRICTLY INTRA-FRAME, LIKE EVERY OTHER PART OF THIS
+    /// FORMAT — CompressPlane compresses exactly one frame's own plane in
+    /// isolation, with no cross-frame context, preserving the
+    /// O(1)-random-access property this whole format exists for.
     ///
-    /// FORMAT V4 — IndexedDelta7 PIXEL FORMAT (decided in conversation,
-    /// direct implementation of a user-proposed pseudocode design — see
-    /// ScrubProxyPixelFormat.IndexedDelta7 and IndexedDelta7Codec for the
-    /// full design/reasoning): EncodeFramePixels gained a third branch
-    /// alongside Indexed8, calling IndexedDelta7Codec.Encode instead of
-    /// ColorQuantizer.Quantize and using
-    /// ScrubProxyFormat.Delta7PaletteByteSize (384 bytes, not Indexed8's
-    /// 1024) for the palette portion of the concatenated blob — otherwise
-    /// an exact structural mirror of the Indexed8 branch (palette raw
-    /// always, control bytes optionally Rle'd), for the same reason: the
-    /// frame-index/offset bookkeeping in EncodeAsync doesn't care why a
-    /// frame's length varies, only that it does. Same GPU-decode scoping
-    /// as Indexed8 — out of scope for this round, CPU-only for now (see
-    /// IndexedDelta7Codec's own remarks on why this format's row-only
-    /// dependency structure leaves that door open for later, without
-    /// committing to it here).
+    /// FORMAT V6 — IndexedDelta7 SHARED/GLOBAL PALETTE (decided in
+    /// conversation, direct response to the user's own real-hardware
+    /// measurements of IndexedDelta7+Zstd against a 720p30 size target, and
+    /// their explicit choice of a shared/global palette as the next lever —
+    /// see ScrubProxyPixelFormat.IndexedDelta7's own SHARED/GLOBAL PALETTE
+    /// (V6) remarks for the on-disk-shape reasoning): BuildAsync now runs a
+    /// SECOND, SEPARATE, BOUNDED sampling pass before the real encode pass,
+    /// ONLY when pixelFormat is IndexedDelta7 — see BuildGlobalDelta7Palette
+    /// below. This second pass decodes a small, fixed number of frames
+    /// (GlobalPaletteSampleFrameCount) evenly spread across the source's
+    /// whole duration (via a SEPARATE SkSourceDecoder.Start call, run at a
+    /// low fps chosen so the sample count stays bounded regardless of the
+    /// source's real length — a source that's 10 seconds long and one
+    /// that's 10 minutes long both cost roughly the same sampling-pass
+    /// decode time), accumulates a shared histogram across all of them via
+    /// IndexedDelta7Codec.AccumulateHistogram, and median-cuts that into
+    /// ONE palette via IndexedDelta7Codec.BuildPaletteFromHistogram — a
+    /// genuinely representative, whole-source palette, not a series of
+    /// independently-drifting per-frame ones. EncodeAsync then writes that
+    /// ONE palette into the file's own new [GlobalPalette] section (see
+    /// ScrubProxyFormat's VERSION 6 layout remarks) exactly once, and
+    /// EncodeFramePixels's IndexedDelta7 branch calls
+    /// IndexedDelta7Codec.EncodeWithPalette against it instead of building
+    /// (and storing) a fresh palette per frame — a frame's own on-disk blob
+    /// is now JUST its compressed-or-not control-byte plane, no embedded
+    /// palette at all. THIS IS A REAL, SECOND, ONE-TIME BUILD-COST DECODE
+    /// PASS, NOT FREE — same trade-off family as Zstd's own build-time-only
+    /// cost (see ScrubProxyZstd's own remarks): paid once per build, never
+    /// per scrub tick, in exchange for removing a per-frame palette's worth
+    /// of recurring on-disk size.
+    ///
+    /// FORMAT V6.1 — GPU ENCODE FOR IndexedDelta7 (direct response to the
+    /// user's own explicit request: an earlier round of GPU work — see
+    /// ScrubProxyGpuEncoder — sped up READING an already-built proxy; the
+    /// actual ask was for the BUILD side to go faster too, since that's
+    /// what meaningfully speeds up proxy media generation. NO ON-DISK
+    /// FORMAT CHANGE AT ALL — this is purely an alternate, opportunistic
+    /// way of computing the exact same bytes EncodeFramePixels's
+    /// IndexedDelta7 branch always wrote, so it needed no schema version
+    /// bump and no header change): when `hwAccel` is HardwareAccelerator.GPU
+    /// and `pixelFormat` is IndexedDelta7, BuildAsync now creates its OWN
+    /// GpuContext/SkSurfacePool/GpuThreadDispatcher triple (see GPU ENCODE
+    /// CONTEXT LIFETIME below) scoped to this one build, and
+    /// EncodeFramePixels tries ScrubProxyGpuEncoder.TryEncode FIRST for
+    /// every frame, falling back to the proven IndexedDelta7Codec.
+    /// EncodeWithPalette CPU path the moment that GPU attempt declines or
+    /// fails for ANY reason — the exact same "opportunistic accelerator,
+    /// never the only path" posture this codebase already uses elsewhere.
+    /// Rgba8888 builds, and any IndexedDelta7 build running with
+    /// HardwareAccelerator.Software, are COMPLETELY UNAFFECTED — this only
+    /// ever engages for an IndexedDelta7 build explicitly asked to use the
+    /// GPU. THIS IS THE ENCODE SIDE ONLY — there is no corresponding GPU
+    /// decode path in this codebase (that earlier work was removed as
+    /// unneeded complexity); ScrubProxyReader always reads a frame back on
+    /// the CPU, exactly like every other proxy format.
+    ///
+    /// GPU ENCODE CONTEXT LIFETIME: this build's GPU context is scoped to
+    /// ONE BuildAsync call — created just before EncodeAsync runs, disposed
+    /// in the same method's own finally block once EncodeAsync returns
+    /// (success or failure). A proxy build is a one-shot, already-
+    /// expensive, already-logged operation (see the Stopwatch/Log calls
+    /// around EncodeAsync below) — there is no "session" for a build-
+    /// scoped GPU context to outlive, and creating a fresh D3D12 device/
+    /// GRContext per build (rather than trying to share one across
+    /// unrelated builds, possibly running for different sources on
+    /// different threads) keeps this exactly as safe as this codebase's own
+    /// GRContext-thread-confinement contract requires (see
+    /// GpuThreadDispatcher's class remarks) without introducing any new
+    /// shared, cross-build GPU state to reason about.
+    ///
+    /// IndexedDelta7 and Zstd are the ONLY pixel format / compression
+    /// scheme this cache builds — the earlier Indexed8 pixel format and Rle
+    /// compression scheme were both removed (decided in conversation:
+    /// unnecessary complexity now that IndexedDelta7+Zstd is the settled
+    /// default, best-performing combination).
     /// </summary>
     internal static class ScrubProxyCache
     {
         private const int CurrentSchemaVersion = 1;
         private const string Extension = "esrp";
+
+        /// <summary>
+        /// How many frames BuildGlobalDelta7Palette samples, spread
+        /// evenly across the WHOLE source, to build IndexedDelta7's one
+        /// shared/global palette — see class remarks, FORMAT V6. Chosen as
+        /// a fixed, small, bounded count (rather than e.g. "every Nth
+        /// frame", which would scale sampling-pass cost with source length)
+        /// so a 10-second source and a 10-minute source cost roughly the
+        /// same sampling-pass decode time; 32 distinct frames' worth of
+        /// color content is already a large multiple of the 128-entry
+        /// palette being built from them. NOT VALIDATED AGAINST REAL
+        /// CONTENT — same honesty flag as IndexedDelta7Codec's own step-
+        /// size constants: a reasonable starting point, not a measured one.
+        /// </summary>
+        private const int GlobalPaletteSampleFrameCount = 32;
 
         // See class remarks, IN-FLIGHT BUILD COALESCING HARDENED AGAINST A
         // REAL GetOrAdd RACE — Lazy<Task<T>>, not Task<T> directly, so that
@@ -228,13 +215,7 @@ namespace EditSharp.Composite
         /// <summary>
         /// Returns a ready-to-use scrub proxy for `sourcePath`, building it
         /// first if no cache entry exists yet — BLOCKS the caller until the
-        /// build finishes (or fails). Kept fully blocking for its own
-        /// caller by design (see class remarks, CALLER CONTRACT) — Playback
-        /// no longer awaits this INLINE as part of its own scrub-session
-        /// setup (it wraps the call in a fire-and-forget Task.Run instead —
-        /// see Playback's own class remarks), but PrewarmScrubProxiesAsync
-        /// still awaits it directly, and that contract is exactly why this
-        /// method still blocks its own immediate caller start-to-finish.
+        /// build finishes (or fails). See class remarks, CALLER CONTRACT.
         /// </summary>
         public static async Task<ScrubProxyEntry> GetOrBuildAsync(
             string sourcePath, HardwareAccelerator hwAccel, CancellationToken ct = default)
@@ -244,30 +225,16 @@ namespace EditSharp.Composite
 
             string hash = await MediaHasher.ComputeAsync(sourcePath, ct);
 
-            // See class remarks, IN-FLIGHT BUILD COALESCING HARDENED
-            // AGAINST A REAL GetOrAdd RACE: this factory only constructs a
-            // Lazy (cheap, starts nothing) — reading .Value immediately
-            // below is what actually starts (or joins) the one real build
-            // for this hash, no matter how many racing callers reach
-            // GetOrAdd for it at once.
             Lazy<Task<ScrubProxyEntry>> lazyBuild = InFlight.GetOrAdd(
                 hash, _ => new Lazy<Task<ScrubProxyEntry>>(() => BuildAndTrackAsync(sourcePath, hash, hwAccel)));
 
-            // .WaitAsync(ct) — this caller's own cancellation stops waiting
-            // without cancelling a build another caller (or Playback's own
-            // memoized _scrubSetupTask, once started) may also be awaiting.
-            // Same "cancel the wait, not the shared work" split KeyframeIndex
-            // and Playback's own scrub-session setup already used.
             return await lazyBuild.Value.WaitAsync(ct);
         }
 
         /// <summary>
         /// Starts building a scrub proxy for `sourcePath` ahead of need —
-        /// the "generate proxies beforehand" convenience entry point a
-        /// consumer app can call right after import, mirroring
-        /// OptimizedMediaCache.PrewarmAsync. Safe to call fire-and-forget;
-        /// failures surface later via GetStatusAsync rather than as an
-        /// unobserved exception.
+        /// mirrors OptimizedMediaCache.PrewarmAsync. Safe to call fire-and-
+        /// forget; failures surface later via GetStatusAsync.
         /// </summary>
         public static Task<ScrubProxyEntry> PrewarmAsync(
             string sourcePath, HardwareAccelerator hwAccel, CancellationToken ct = default) =>
@@ -315,17 +282,6 @@ namespace EditSharp.Composite
             return ScrubProxyStatus.NotCached;
         }
 
-        /// <summary>
-        /// See class remarks, BUILD FAILURES ARE NOW LOGGED: any exception
-        /// out of BuildAsync is now logged here, in addition to being
-        /// recorded into LastFailure (for GetStatusAsync) and rethrown (for
-        /// whoever's awaiting InFlight[hash] directly). Previously this
-        /// catch block recorded the failure silently with no log line at
-        /// all — a caller that doesn't observe the returned Task (e.g. an
-        /// opportunistic PrewarmAsync fire-and-forget, or a build kicked off
-        /// by a ScrubToAsync call that's itself superseded before it awaits
-        /// the result) would never see any evidence a build failed.
-        /// </summary>
         private static async Task<ScrubProxyEntry> BuildAndTrackAsync(string sourcePath, string hash, HardwareAccelerator hwAccel)
         {
             try
@@ -355,14 +311,20 @@ namespace EditSharp.Composite
 
         /// <summary>
         /// The actual build: probes the source, computes the proxy's target
-        /// size and frame count, decodes+resamples the whole source ONCE via
-        /// the existing persistent SkSourceDecoder pipe (GPU-eligible — see
-        /// class remarks and Playback's own — this is a single one-time
-        /// linear pass, not a per-tick call, so it doesn't carry the per-
-        /// tick GPU-session-exhaustion risk that got GPU decode pulled out
-        /// of the per-tick scrub path in an earlier fix), and writes the
-        /// whole self-contained .esrp file (header + embedded metadata +
-        /// frame index + every frame's stored pixels) via EncodeAsync.
+        /// size and frame count, optionally runs a bounded sampling pass to
+        /// build IndexedDelta7's shared/global palette (see class remarks,
+        /// FORMAT V6), decodes+resamples the whole source ONCE for real via
+        /// the existing persistent SkSourceDecoder pipe, and writes the
+        /// whole self-contained .esrp file via EncodeAsync.
+        ///
+        /// GPU ENCODE (see class remarks, FORMAT V6.1): when this build is
+        /// IndexedDelta7 running with HardwareAccelerator.GPU, a build-
+        /// scoped GpuContext/SkSurfacePool/GpuThreadDispatcher triple is
+        /// created here, handed down into EncodeAsync, and disposed in this
+        /// method's own finally block — see GPU ENCODE CONTEXT LIFETIME.
+        /// Any other combination (Rgba8888, or IndexedDelta7 on
+        /// HardwareAccelerator.Software) leaves all three null, and
+        /// EncodeFramePixels behaves exactly as it always did — CPU only.
         /// </summary>
         private static async Task<ScrubProxyEntry> BuildAsync(string sourcePath, string hash, HardwareAccelerator hwAccel)
         {
@@ -382,11 +344,6 @@ namespace EditSharp.Composite
             (int width, int height) = ComputeProxySize(
                 sourceInfo.Width, sourceInfo.Height, EditSharpConfig.ScrubProxyTargetShortSide);
 
-            // The configured sample rate is rounded to an integer ONCE here
-            // and used consistently for BOTH the decode's own fps-conform
-            // filter and the stored header value — a mismatch between the
-            // two would desync GetFrameAt's `seconds * SampleRate` math from
-            // what was actually decoded and stored.
             int sampleRate = Math.Max(1, (int)Math.Round(EditSharpConfig.ScrubProxySampleRate));
             int frameCount = Math.Max(1, (int)Math.Ceiling(duration.TotalSeconds * sampleRate));
 
@@ -394,6 +351,14 @@ namespace EditSharp.Composite
             ScrubProxyPixelFormat pixelFormat = EditSharpConfig.ScrubProxyPixelFormat;
 
             DecodeHwAccelPlan plan = await FfmpegRunner.GetDecodePlanAsync(sourcePath, hwAccel);
+
+            // See class remarks, FORMAT V6 — a second, bounded, one-time
+            // sampling pass, ONLY for IndexedDelta7, run BEFORE the real
+            // encode pass below (which needs the finished palette to
+            // encode every frame against).
+            byte[] globalPalette = pixelFormat == ScrubProxyPixelFormat.IndexedDelta7
+                ? BuildGlobalDelta7Palette(sourcePath, width, height, duration, plan)
+                : Array.Empty<byte>();
 
             (string finalPath, string dir) = PathFor(hash);
             Directory.CreateDirectory(dir);
@@ -411,21 +376,96 @@ namespace EditSharp.Composite
                 CreatedAtUtc = DateTime.UtcNow,
             };
 
+            // See class remarks, FORMAT V6.1 / GPU ENCODE CONTEXT LIFETIME
+            // — a build-scoped GPU triple, created only for an
+            // IndexedDelta7 build actually asked to use the GPU. All three
+            // stay null (EncodeFramePixels's CPU-only behavior is
+            // unchanged) for every other combination.
+            bool wantGpuEncode = pixelFormat == ScrubProxyPixelFormat.IndexedDelta7 && hwAccel == HardwareAccelerator.GPU;
+
+            GpuContext? gpuContext = null;
+            SkSurfacePool? gpuPool = null;
+            GpuThreadDispatcher? gpuThread = null;
+
+            if (wantGpuEncode)
+            {
+                gpuThread = new GpuThreadDispatcher("ScrubProxyGpuEncoder");
+                try
+                {
+                    (gpuContext, gpuPool) = await gpuThread.RunAsync(() =>
+                    {
+                        GpuContext ctx = GpuContext.Create(hwAccel);
+                        SkSurfacePool pool = new(ctx.GRContext, width, height, seedCount: 0);
+                        return (ctx, pool);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    // Creating the GPU context is itself an opportunistic
+                    // step — never let a failure here block the build, just
+                    // fall back to the CPU-only path exactly as if GPU
+                    // encode had never been requested.
+                    EditSharpConfig.Logger.LogWarning(
+                        "ScrubProxyCache: could not create a GPU context for IndexedDelta7 GPU encode, " +
+                        $"building with the CPU path instead: {ex.Message}");
+                    gpuThread.Dispose();
+                    gpuThread = null;
+                    gpuContext = null;
+                    gpuPool = null;
+                }
+            }
+
             EditSharpConfig.Logger.Log(
                 $"Building scrub proxy for '{sourcePath}' ({width}x{height} @ {sampleRate}/s, {frameCount} " +
-                $"frames, pixelFormat={pixelFormat}, compression={compressionScheme})...");
+                $"frames, pixelFormat={pixelFormat}, compression={compressionScheme}" +
+                (globalPalette.Length > 0 ? ", shared palette built from a sample pass" : "") +
+                (gpuContext?.GRContext != null ? ", GPU encode enabled" : "") + ")...");
             var sw = Stopwatch.StartNew();
 
             try
             {
-                await EncodeAsync(
-                    sourcePath, tempPath, width, height, sampleRate, frameCount, pixelFormat, compressionScheme, meta, plan);
-                File.Move(tempPath, finalPath, overwrite: true);
+                try
+                {
+                    await EncodeAsync(
+                        sourcePath, tempPath, width, height, sampleRate, frameCount, pixelFormat, compressionScheme,
+                        globalPalette, meta, plan, gpuContext, gpuPool, gpuThread);
+                    File.Move(tempPath, finalPath, overwrite: true);
+                }
+                catch
+                {
+                    TryDelete(tempPath);
+                    throw;
+                }
             }
-            catch
+            finally
             {
-                TryDelete(tempPath);
-                throw;
+                // See class remarks, GPU ENCODE CONTEXT LIFETIME — this
+                // build's own GPU objects are torn down here, unconditionally,
+                // whether EncodeAsync succeeded or threw. Disposal itself is
+                // marshaled onto the same dedicated thread that created and
+                // used them (GpuContext.Dispose touches the GRContext, and
+                // must therefore run on the thread that owns it, same as
+                // every other GRContext-touching call).
+                if (gpuThread != null)
+                {
+                    try
+                    {
+                        await gpuThread.RunAsync(() =>
+                        {
+                            gpuPool?.Dispose();
+                            gpuContext?.Dispose();
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        EditSharpConfig.Logger.LogVerbose(
+                            $"ScrubProxyCache: GPU encode context teardown threw: {ex.Message}");
+                    }
+                    finally
+                    {
+                        gpuThread.Dispose();
+                    }
+                }
             }
 
             EditSharpConfig.Logger.Log(
@@ -435,48 +475,95 @@ namespace EditSharp.Composite
         }
 
         /// <summary>
-        /// Decodes `sourcePath` ONCE, resampled to `fps`/`width`x`height`
-        /// via SkSourceDecoder's existing persistent-pipe machinery (the
-        /// same one real forward playback uses), and writes the complete
-        /// self-contained .esrp file to `outputPath` — fixed header, then
-        /// the embedded metadata blob, then a placeholder frame-index
-        /// region, then every frame's stored (raw or Rle-encoded) bytes
-        /// back to back, then a seek-back to fill in the frame index with
-        /// each frame's REAL (offset, length) now that they're known — see
-        /// ScrubProxyFormat's LAYOUT remarks for the exact byte order this
-        /// produces. The seek-back is a plain in-place overwrite of a
-        /// region already reserved earlier in this same write, not a
-        /// truncation — the file already extends past it by the time the
-        /// backpatch runs.
+        /// See class remarks, FORMAT V6. Decodes GlobalPaletteSampleFrameCount
+        /// frames, evenly spread across `duration`, via a SEPARATE
+        /// SkSourceDecoder.Start call (its own persistent pipe, distinct
+        /// from the real encode pass's own decoder — this class already
+        /// establishes the pattern of one decoder instance per linear pass
+        /// elsewhere), accumulates their color histogram, and median-cuts
+        /// it into one 384-byte shared IndexedDelta7 palette. The sampling
+        /// fps is chosen so the TOTAL number of frames actually decoded
+        /// stays close to GlobalPaletteSampleFrameCount regardless of
+        /// `duration` — a source shorter than that many seconds at 1fps
+        /// simply samples every second of it instead (clamped so the
+        /// sampling decoder is never asked for an fps below 1). This pass
+        /// stays CPU-only even for a GPU-encode build — see class remarks,
+        /// FORMAT V6.1: it touches a small, fixed number of frames
+        /// (GlobalPaletteSampleFrameCount, not the whole source), so it was
+        /// never the actual cost GPU encode is aimed at.
+        /// </summary>
+        private static byte[] BuildGlobalDelta7Palette(
+            string sourcePath, int width, int height, TimeSpan duration, DecodeHwAccelPlan plan)
+        {
+            double targetSampleFps = GlobalPaletteSampleFrameCount / Math.Max(duration.TotalSeconds, 1.0);
+            int sampleFps = Math.Max(1, (int)Math.Round(Math.Min(targetSampleFps, GlobalPaletteSampleFrameCount)));
+
+            var histogram = new Dictionary<uint, int>();
+
+            using (SkSourceDecoder sampleDecoder = SkSourceDecoder.Start(
+                sourcePath, 0, sampleFps, width, height, plan, fastOpen: false))
+            {
+                int samplesToTake = Math.Max(1, GlobalPaletteSampleFrameCount);
+                for (int i = 0; i < samplesToTake; i++)
+                {
+                    using SKImage sampleFrame = sampleDecoder.NextFrame();
+                    using SKPixmap? pixmap = sampleFrame.PeekPixels();
+                    if (pixmap == null) continue;
+
+                    IndexedDelta7Codec.AccumulateHistogram(pixmap.GetPixelSpan(), width, height, histogram);
+                }
+            }
+
+            byte[] palette = new byte[ScrubProxyFormat.Delta7PaletteByteSize];
+            IndexedDelta7Codec.BuildPaletteFromHistogram(histogram, palette);
+            return palette;
+        }
+
+        /// <summary>
+        /// Decodes `sourcePath` ONCE, resampled to `fps`/`width`x`height`,
+        /// and writes the complete self-contained .esrp file to
+        /// `outputPath` — fixed header, then the embedded metadata blob,
+        /// then the shared-palette section (see ScrubProxyFormat's VERSION
+        /// 6 layout remarks — zero-length when `globalPalette` is empty),
+        /// then a placeholder frame-index region, then every frame's stored
+        /// bytes back to back, then a seek-back to fill in the frame index.
         ///
-        /// Per-frame pixel encoding itself is delegated to
-        /// EncodeFramePixels — see class remarks, FRAME-PIXEL ENCODING
-        /// PULLED INTO A PLAIN SYNCHRONOUS HELPER — so this method's own
-        /// loop only ever holds a `byte[]` (never a `Span`/`ReadOnlySpan`)
-        /// across its `await stream.WriteAsync(stored)` call.
+        /// `gpuContext`/`gpuPool`/`gpuThread` are this build's own GPU
+        /// encode triple (see class remarks, FORMAT V6.1) — all null for
+        /// every build that isn't IndexedDelta7-on-GPU. Handed straight
+        /// through to EncodeFramePixels, unchanged, for every frame; this
+        /// method itself has no GPU-vs-CPU branching of its own.
         /// </summary>
         private static async Task EncodeAsync(
             string sourcePath, string outputPath, int width, int height, int fps, int frameCount,
             ScrubProxyPixelFormat pixelFormat, ScrubProxyCompressionScheme compressionScheme,
-            ScrubProxyMeta meta, DecodeHwAccelPlan plan)
+            byte[] globalPalette, ScrubProxyMeta meta, DecodeHwAccelPlan plan,
+            GpuContext? gpuContext, SkSurfacePool? gpuPool, GpuThreadDispatcher? gpuThread)
         {
             using SkSourceDecoder decoder = SkSourceDecoder.Start(
                 sourcePath, 0, fps, width, height, plan, fastOpen: false);
 
             byte[] metaBytes = ScrubProxyMetaSerializer.SerializeToUtf8Bytes(meta);
 
-            long frameIndexOffset = ScrubProxyFormat.FrameIndexOffset(metaBytes.Length);
+            long globalPaletteOffset = ScrubProxyFormat.GlobalPaletteOffset(metaBytes.Length);
+            long frameIndexOffset = ScrubProxyFormat.FrameIndexOffset(metaBytes.Length, globalPalette.Length);
             int frameIndexByteSize = frameCount * ScrubProxyFormat.FrameIndexEntrySize;
-            long frameDataStartOffset = frameIndexOffset + frameIndexByteSize;
+            long frameDataStartOffset =
+                ScrubProxyFormat.FrameDataStartOffset(metaBytes.Length, globalPalette.Length, frameCount);
 
             using var stream = new FileStream(
                 outputPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 1 << 20, useAsync: true);
 
             byte[] header = new byte[ScrubProxyFormat.HeaderSize];
-            ScrubProxyFormat.WriteHeader(header, width, height, pixelFormat, compressionScheme, fps, frameCount, metaBytes.Length);
+            ScrubProxyFormat.WriteHeader(
+                header, width, height, pixelFormat, compressionScheme, fps, frameCount, metaBytes.Length,
+                globalPalette.Length);
             await stream.WriteAsync(header);
 
             await stream.WriteAsync(metaBytes);
+
+            if (globalPalette.Length > 0)
+                await stream.WriteAsync(globalPalette);
 
             // Reserve the frame index region with zeros for now — every
             // entry's real (offset, length) is only known once its frame
@@ -490,7 +577,9 @@ namespace EditSharp.Composite
             {
                 using SKImage frame = decoder.NextFrame();
 
-                byte[] stored = EncodeFramePixels(frame, sourcePath, i, width, height, pixelFormat, compressionScheme);
+                byte[] stored = EncodeFramePixels(
+                    frame, sourcePath, i, width, height, pixelFormat, compressionScheme, globalPalette,
+                    gpuContext, gpuPool, gpuThread);
 
                 frameIndex[i] = (cursor, stored.Length);
                 await stream.WriteAsync(stored);
@@ -510,48 +599,49 @@ namespace EditSharp.Composite
             stream.Seek(frameIndexOffset, SeekOrigin.Begin);
             await stream.WriteAsync(indexBytes);
             await stream.FlushAsync();
+
+            // globalPaletteOffset is unused past this point (the palette
+            // was already written in file order above) — kept as a local
+            // purely to name/document the section's start alongside the
+            // others for anyone reading this method.
+            _ = globalPaletteOffset;
         }
 
         /// <summary>
-        /// PLAIN, FULLY SYNCHRONOUS — deliberately not async, and never
-        /// itself awaited from anywhere — see class remarks, FRAME-PIXEL
-        /// ENCODING PULLED INTO A PLAIN SYNCHRONOUS HELPER. Reads one
-        /// decoded frame's raw pixels via SKPixmap.GetPixelSpan() (a
-        /// ref-struct ReadOnlySpan&lt;byte&gt;, safe here precisely because
-        /// nothing in this method ever suspends) and returns this frame's
-        /// complete on-disk blob, shaped according to `pixelFormat`:
-        ///   - Rgba8888: either the RLE-encoded bytes or a plain heap copy
-        ///     of the raw bytes, depending on `compressionScheme` — exactly
-        ///     the v2 behavior, unchanged.
-        ///   - Indexed8: ColorQuantizer.Quantize builds this frame's own
-        ///     256-color palette and per-pixel index plane (see
-        ///     ScrubProxyPixelFormat.Indexed8's own remarks); the palette
-        ///     is always stored raw, and the index plane is RLE-encoded or
-        ///     copied raw depending on `compressionScheme`, same as an
-        ///     Rgba8888 frame's own bytes would be. The two pieces are
-        ///     concatenated (palette first, at the fixed 1024-byte offset
-        ///     ScrubProxyReader expects) into the single returned blob.
-        ///   - IndexedDelta7: IndexedDelta7Codec.Encode builds this frame's
-        ///     own 128-color RGB palette and per-pixel control-byte plane
-        ///     (see ScrubProxyPixelFormat.IndexedDelta7's own remarks) —
-        ///     otherwise an exact structural mirror of the Indexed8 case
-        ///     immediately above, just with a 384-byte (not 1024-byte)
-        ///     palette region.
-        /// `frame`/`sourcePath`/`frameIndex` are used only to produce a
-        /// clear exception message on the (rare, but real — see
-        /// BuildAndTrackAsync's own catch, now logged) PeekPixels() failure
-        /// case; the caller (EncodeAsync) still owns `frame`'s lifetime via
-        /// its own `using`.
+        /// PLAIN, FULLY SYNCHRONOUS — see class remarks. Reads one decoded
+        /// frame's raw pixels via SKPixmap.GetPixelSpan() and returns this
+        /// frame's complete on-disk blob, shaped according to `pixelFormat`:
+        ///   - Rgba8888: CompressPlane's result on the raw bytes.
+        ///   - IndexedDelta7 (see class remarks, FORMAT V6): `globalPalette`
+        ///     (built once, before this method is ever called — see
+        ///     BuildGlobalDelta7Palette) is handed to
+        ///     IndexedDelta7Codec.EncodeWithPalette instead of this method
+        ///     building/writing a fresh per-frame palette. The returned
+        ///     blob is JUST the compressed-or-not control-byte plane — no
+        ///     palette bytes in it at all any more.
         ///
-        /// SkSourceDecoder's own WrapAsImage always builds its SKImage with
-        /// rowBytes == width * 4 (no padding) — GetPixelSpan is therefore
-        /// already exactly frameByteSize contiguous bytes, matching what
-        /// both ScrubProxyRle.Encode/the raw path and
-        /// ColorQuantizer.Quantize/IndexedDelta7Codec.Encode expect.
+        /// GPU ENCODE (see class remarks, FORMAT V6.1): the IndexedDelta7
+        /// branch now tries ScrubProxyGpuEncoder.TryEncode FIRST whenever
+        /// `gpuContext`/`gpuPool`/`gpuThread` are all non-null (they're
+        /// either all null or all non-null together — see BuildAsync),
+        /// dispatched via `gpuThread.RunAsync(...).GetAwaiter().GetResult()`
+        /// so this method's own synchronous signature (see class remarks,
+        /// FRAME-PIXEL ENCODING IS A PLAIN SYNCHRONOUS HELPER) never
+        /// changes shape — EncodeAsync's own await loop still just calls
+        /// this like an ordinary synchronous method, and the blocking wait
+        /// here is exactly the point: this frame's bytes must be finished,
+        /// one way or the other, before the loop's next stream.WriteAsync.
+        /// On ANY GPU failure (TryEncode returning false, or the dispatched
+        /// call itself throwing), this falls straight through to the same
+        /// IndexedDelta7Codec.EncodeWithPalette call this method always
+        /// made — see ScrubProxyGpuEncoder's own remarks on why that's
+        /// always safe to do unconditionally.
         /// </summary>
         private static byte[] EncodeFramePixels(
             SKImage frame, string sourcePath, int frameIndex, int width, int height,
-            ScrubProxyPixelFormat pixelFormat, ScrubProxyCompressionScheme compressionScheme)
+            ScrubProxyPixelFormat pixelFormat, ScrubProxyCompressionScheme compressionScheme,
+            byte[] globalPalette,
+            GpuContext? gpuContext, SkSurfacePool? gpuPool, GpuThreadDispatcher? gpuThread)
         {
             using SKPixmap? pixmap = frame.PeekPixels();
             if (pixmap == null)
@@ -560,53 +650,70 @@ namespace EditSharp.Composite
 
             ReadOnlySpan<byte> raw = pixmap.GetPixelSpan();
 
-            if (pixelFormat == ScrubProxyPixelFormat.Indexed8)
-            {
-                byte[] palette = new byte[ScrubProxyFormat.IndexedPaletteByteSize];
-                byte[] indices = new byte[width * height];
-                ColorQuantizer.Quantize(raw, width, height, palette, indices);
-
-                byte[] storedIndices = compressionScheme == ScrubProxyCompressionScheme.Rle
-                    ? ScrubProxyRle.Encode(indices)
-                    : indices;
-
-                byte[] combined = new byte[palette.Length + storedIndices.Length];
-                palette.CopyTo(combined, 0);
-                storedIndices.CopyTo(combined, palette.Length);
-                return combined;
-            }
-
             if (pixelFormat == ScrubProxyPixelFormat.IndexedDelta7)
             {
-                byte[] palette = new byte[ScrubProxyFormat.Delta7PaletteByteSize];
                 byte[] pixelCodes = new byte[width * height];
-                IndexedDelta7Codec.Encode(raw, width, height, palette, pixelCodes);
 
-                byte[] storedPixelCodes = compressionScheme == ScrubProxyCompressionScheme.Rle
-                    ? ScrubProxyRle.Encode(pixelCodes)
-                    : pixelCodes;
+                bool gpuHandled = false;
+                if (gpuContext != null && gpuPool != null && gpuThread != null)
+                {
+                    try
+                    {
+                        // See method remarks, GPU ENCODE — a deliberate
+                        // blocking wait, not an await: this method's own
+                        // signature must stay synchronous (see class
+                        // remarks, FRAME-PIXEL ENCODING IS A PLAIN
+                        // SYNCHRONOUS HELPER), and EncodeAsync's caller-side
+                        // loop needs this frame's bytes fully resolved
+                        // before it can proceed to the next one regardless.
+                        gpuHandled = gpuThread.RunAsync(() =>
+                            ScrubProxyGpuEncoder.TryEncode(
+                                gpuContext, gpuPool, frame, globalPalette, width, height, pixelCodes))
+                            .GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        // Same posture as ScrubProxyGpuEncoder.TryEncode's
+                        // own internal try/catch — this outer one exists
+                        // because the dispatched RunAsync call itself can
+                        // fault (e.g. the dedicated GPU thread has already
+                        // torn down), which is a different failure surface
+                        // than TryEncode returning false for a reason it
+                        // caught internally.
+                        EditSharpConfig.Logger.LogWarning(
+                            "ScrubProxyCache: GPU IndexedDelta7 encode dispatch failed for frame " +
+                            $"{frameIndex} of '{sourcePath}', falling back to the CPU path: {ex.Message}");
+                        gpuHandled = false;
+                    }
+                }
 
-                byte[] combined = new byte[palette.Length + storedPixelCodes.Length];
-                palette.CopyTo(combined, 0);
-                storedPixelCodes.CopyTo(combined, palette.Length);
-                return combined;
+                if (!gpuHandled)
+                    IndexedDelta7Codec.EncodeWithPalette(raw, width, height, globalPalette, pixelCodes);
+
+                return CompressPlane(pixelCodes, compressionScheme);
             }
 
-            return compressionScheme == ScrubProxyCompressionScheme.Rle
-                ? ScrubProxyRle.Encode(raw)
-                : raw.ToArray();
+            return CompressPlane(raw, compressionScheme);
         }
 
         /// <summary>
+        /// SHARED None/Zstd DISPATCH — see class remarks, FORMAT V5. Every
+        /// place this cache compresses one frame's own byte plane goes
+        /// through here instead of its own inline ternary.
+        /// </summary>
+        private static byte[] CompressPlane(ReadOnlySpan<byte> plane, ScrubProxyCompressionScheme compressionScheme) =>
+            compressionScheme switch
+            {
+                ScrubProxyCompressionScheme.None => plane.ToArray(),
+                ScrubProxyCompressionScheme.Zstd => ScrubProxyZstd.Encode(plane),
+                _ => throw new InvalidOperationException(
+                    $"ScrubProxyCache: unknown ScrubProxyCompressionScheme '{compressionScheme}'."),
+            };
+
+        /// <summary>
         /// Looks up an existing entry on disk by hash — the read side of
-        /// the cache. A confirmed hit is memoized into ResolvedEntries; a
-        /// miss (a missing file, a wrong/older format version, an
-        /// unreadable/mismatched embedded metadata blob) is treated as a
-        /// plain miss, silently rebuildable, never an error surfaced to the
-        /// caller that stumbled onto it. Fully synchronous now — reading
-        /// the header/metadata is a couple of small positioned reads, no
-        /// real async I/O worth awaiting — but kept easy to call from the
-        /// async call sites above.
+        /// the cache. Fully synchronous — reading the header/metadata is a
+        /// couple of small positioned reads.
         /// </summary>
         private static ScrubProxyEntry? TryLoadExisting(string hash)
         {
@@ -646,15 +753,8 @@ namespace EditSharp.Composite
 
         /// <summary>
         /// The proxy's target size: `targetShortSide` on whichever axis is
-        /// the source's own SHORT side (handles portrait/vertical sources
-        /// correctly, not just landscape — see class remarks on the
-        /// "fixed short-side, aspect-preserved" decision), the other axis
-        /// scaled proportionally, aspect preserved, never upscaled past
-        /// native. Rounded to even on both axes purely for consistency with
-        /// this codebase's other proxy-sizing convention (OptimizedMediaCache.
-        /// ComputeTargetSize) — RGBA8888 has no chroma-subsampling
-        /// constraint that actually requires it, unlike that method's yuv422p
-        /// target.
+        /// the source's own SHORT side, the other axis scaled
+        /// proportionally, aspect preserved, never upscaled past native.
         /// </summary>
         private static (int Width, int Height) ComputeProxySize(int nativeWidth, int nativeHeight, int targetShortSide)
         {
@@ -674,15 +774,11 @@ namespace EditSharp.Composite
         private static int RoundToEven(int value) => value % 2 == 0 ? value : value + 1;
 
         /// <summary>
-        /// One self-contained .esrp file per entry now (see class remarks,
-        /// FORMAT V2) — no separate meta-file path any more. Still returns
-        /// the containing directory alongside it, since BuildAsync needs to
-        /// CreateDirectory it before writing.
+        /// One self-contained .esrp file per entry (see class remarks,
+        /// FORMAT V2).
         /// </summary>
         private static (string MediaPath, string Directory) PathFor(string hash)
         {
-            // Same sharded content-addressable-storage layout OptimizedMediaCache
-            // uses — see its own PathsFor remarks.
             string shard = hash[..2];
             string dir = Path.Combine(EditSharpConfig.ScrubProxyDirectory, shard);
 

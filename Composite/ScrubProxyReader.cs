@@ -13,38 +13,60 @@ namespace EditSharp.Composite
     /// index lookup (which byte range a timestamp's nearest stored frame
     /// occupies) plus one direct positioned read via System.IO.RandomAccess
     /// (and, depending on the file's own PixelFormat/CompressionScheme, one
-    /// fast in-memory decode of that read — an RLE decode, a palette
-    /// expansion, a palette+delta expansion, or a combination — see
-    /// GetFrameAt below) — this is what lets GetFrameAt be genuinely safe
-    /// to call back-to-back as fast as a caller likes, with no per-call
-    /// process, no per-call I/O wait beyond one small positioned read, and
-    /// (unlike a shared FileStream's Seek+Read) no shared cursor state a
-    /// second concurrent caller could race against.
+    /// fast in-memory decode of that read — a Zstd decompression pass, a
+    /// palette+delta expansion, or both — see GetFrameAt below) — this is
+    /// what lets GetFrameAt be genuinely safe to call back-to-back as fast
+    /// as a caller likes, with no per-call process, no per-call I/O wait
+    /// beyond one small positioned read, and (unlike a shared FileStream's
+    /// Seek+Read) no shared cursor state a second concurrent caller could
+    /// race against.
     ///
-    /// THE FRAME INDEX TABLE IS READ ONCE, IN FULL, AT Open() TIME, AND
-    /// KEPT IN MEMORY for this reader's whole life — see ScrubProxyFormat's
-    /// VERSION 2 remarks for why v2 needs a table at all (compressed/
-    /// Indexed8/IndexedDelta7 frames are variable-size, so GetFrameAt can no
-    /// longer compute an offset by plain multiplication). The table itself
-    /// is small (FrameCount * 12 bytes) even for a long/high-sample-rate
-    /// source, so reading all of it up front costs one extra small
-    /// positioned read per SOURCE, not per tick, in exchange for
-    /// GetFrameAt never touching the table's own on-disk bytes again.
+    /// THE FRAME INDEX TABLE — AND, FOR AN IndexedDelta7 FILE, ITS ONE
+    /// SHARED PALETTE — ARE READ ONCE, IN FULL, AT Open() TIME, AND KEPT IN
+    /// MEMORY for this reader's whole life. The table itself is small
+    /// (FrameCount * 12 bytes) even for a long/high-sample-rate source, and
+    /// the shared palette is smaller still (384 bytes) — both cost one
+    /// extra small positioned read per SOURCE, not per tick, in exchange
+    /// for GetFrameAt never touching either section's own on-disk bytes
+    /// again.
     ///
     /// ONE READER PER SOURCE, OWNED BY ITS ScrubFrameSource/caller — not a
     /// process-wide singleton. The shared mutable scratch fields
-    /// (_frameBuffer, and — for Indexed8/IndexedDelta7 files only —
+    /// (_frameBuffer, and — for an IndexedDelta7 file only —
     /// _indexScratchBuffer) are reused across calls to avoid a fresh
     /// allocation every scrub tick; see ScrubFrameSource's own remarks on
     /// why multi-clip prefetch is still sequential, not parallel, in this
     /// pass — that's what keeps reusing these buffers safe without a lock.
-    /// A frame read off a COMPRESSED and/or Indexed8/IndexedDelta7 file
-    /// additionally rents a scratch buffer for the raw on-disk bytes
-    /// themselves (ArrayPool&lt;byte&gt;.Shared, sized to exactly this
-    /// frame's own recorded length, returned before the call returns) — the
-    /// decode target is always `_frameBuffer` (always full RGBA8888), so
-    /// callers see the exact same "fresh SKImage over a stable-sized raw
-    /// buffer" shape regardless of PixelFormat/CompressionScheme.
+    /// A frame read off a COMPRESSED and/or IndexedDelta7 file additionally
+    /// rents a scratch buffer for the raw on-disk bytes themselves
+    /// (ArrayPool&lt;byte&gt;.Shared, sized to exactly this frame's own
+    /// recorded length, returned before the call returns) — the decode
+    /// target is always `_frameBuffer` (always full RGBA8888), so callers
+    /// see the exact same "fresh SKImage over a stable-sized raw buffer"
+    /// shape regardless of PixelFormat/CompressionScheme.
+    ///
+    /// DECOMPRESSION DISPATCH IS SHARED — DecompressPlane below is the ONE
+    /// place that switches on CompressionScheme (None/Zstd) to turn a
+    /// frame's stored bytes back into a plane; ReadRgba8888Frame/
+    /// ReadIndexedDelta7Frame both route through it once they have that
+    /// frame's own compressed bytes in hand. ReadRgba8888Frame keeps its
+    /// own direct-read fast path for the None case specifically (reading
+    /// straight into `_frameBuffer` with no intermediate rented buffer at
+    /// all).
+    ///
+    /// SHARED/GLOBAL PALETTE FOR IndexedDelta7 (V6, see ScrubProxyFormat's
+    /// VERSION 6 remarks and IndexedDelta7Codec's own SHARED/GLOBAL PALETTE
+    /// (V6) remarks): an IndexedDelta7 file's ONE palette (`_globalPalette`
+    /// below) is read once here, at Open() time, from the file's own
+    /// [GlobalPalette] section (see ScrubProxyFormat.GlobalPaletteOffset) —
+    /// exactly like the frame index table already is. ReadIndexedDelta7Frame
+    /// doesn't split a per-frame palette off the front of each frame's own
+    /// blob at all — a frame's WHOLE recorded blob is just its
+    /// compressed-or-not control-byte plane, decompressed directly via
+    /// DecompressPlane into `_indexScratchBuffer`, then expanded against
+    /// `_globalPalette` via IndexedDelta7Codec.Decode. `_globalPalette` is
+    /// null for an Rgba8888 file (GlobalPaletteLength is always 0 for
+    /// those).
     /// </summary>
     internal sealed class ScrubProxyReader : IDisposable
     {
@@ -54,13 +76,20 @@ namespace EditSharp.Composite
         private readonly int _pixelCount;
 
         /// <summary>
-        /// Only allocated/used when PixelFormat is Indexed8 or
-        /// IndexedDelta7 — holds one frame's decompressed (or raw, if
-        /// CompressionScheme.None) control/index bytes before Expand()/
-        /// IndexedDelta7Codec.Decode turns them into _frameBuffer's full
-        /// RGBA8888. Reused across calls exactly like _frameBuffer.
+        /// Only allocated/used when PixelFormat is IndexedDelta7 — holds
+        /// one frame's decompressed (or raw, if CompressionScheme.None)
+        /// control bytes before IndexedDelta7Codec.Decode turns them into
+        /// _frameBuffer's full RGBA8888. Reused across calls exactly like
+        /// _frameBuffer.
         /// </summary>
         private readonly byte[]? _indexScratchBuffer;
+
+        /// <summary>
+        /// See class remarks, SHARED/GLOBAL PALETTE FOR IndexedDelta7 (V6).
+        /// Read once, in full, at Open() time from the file's own
+        /// [GlobalPalette] section; null for an Rgba8888 file.
+        /// </summary>
+        private readonly byte[]? _globalPalette;
 
         private readonly (long Offset, int Length)[] _frameIndex;
         private readonly ScrubProxyPixelFormat _pixelFormat;
@@ -82,7 +111,7 @@ namespace EditSharp.Composite
 
         private ScrubProxyReader(
             SafeFileHandle handle, string path, ScrubProxyFormat.Header header,
-            (long Offset, int Length)[] frameIndex, ScrubProxyMeta meta)
+            (long Offset, int Length)[] frameIndex, byte[]? globalPalette, ScrubProxyMeta meta)
         {
             _handle = handle;
             Path = path;
@@ -96,18 +125,20 @@ namespace EditSharp.Composite
             _frameByteSize = _pixelCount * 4;
             _frameBuffer = new byte[_frameByteSize];
             _indexScratchBuffer =
-                _pixelFormat is ScrubProxyPixelFormat.Indexed8 or ScrubProxyPixelFormat.IndexedDelta7
+                _pixelFormat == ScrubProxyPixelFormat.IndexedDelta7
                     ? new byte[_pixelCount]
                     : null;
+            _globalPalette = globalPalette;
             _frameIndex = frameIndex;
             Meta = meta;
         }
 
         /// <summary>
         /// Opens `path`, reads its fixed header, embedded metadata blob,
-        /// and full frame index table, and returns a reader ready for
-        /// GetFrameAt calls. The handle stays open for this reader's whole
-        /// life — see class remarks.
+        /// shared-palette section (if any — see class remarks), and full
+        /// frame index table, and returns a reader ready for GetFrameAt
+        /// calls. The handle stays open for this reader's whole life — see
+        /// class remarks.
         /// </summary>
         public static ScrubProxyReader Open(string path)
         {
@@ -123,7 +154,17 @@ namespace EditSharp.Composite
             {
                 (ScrubProxyFormat.Header header, ScrubProxyMeta meta) = ReadHeaderAndMetaFromHandle(handle, path);
 
-                long frameIndexOffset = ScrubProxyFormat.FrameIndexOffset(header.MetaBlobLength);
+                byte[]? globalPalette = null;
+                if (header.GlobalPaletteLength > 0)
+                {
+                    long globalPaletteOffset = ScrubProxyFormat.GlobalPaletteOffset(header.MetaBlobLength);
+                    globalPalette = new byte[header.GlobalPaletteLength];
+                    if (ReadFullyAt(handle, globalPalette, globalPaletteOffset) != globalPalette.Length)
+                        throw new InvalidDataException($"'{path}' is truncated — could not read its shared palette.");
+                }
+
+                long frameIndexOffset =
+                    ScrubProxyFormat.FrameIndexOffset(header.MetaBlobLength, header.GlobalPaletteLength);
                 int frameIndexByteSize = header.FrameCount * ScrubProxyFormat.FrameIndexEntrySize;
                 byte[] frameIndexBytes = new byte[frameIndexByteSize];
                 if (ReadFullyAt(handle, frameIndexBytes, frameIndexOffset) != frameIndexBytes.Length)
@@ -137,7 +178,7 @@ namespace EditSharp.Composite
                             i * ScrubProxyFormat.FrameIndexEntrySize, ScrubProxyFormat.FrameIndexEntrySize));
                 }
 
-                return new ScrubProxyReader(handle, path, header, frameIndex, meta);
+                return new ScrubProxyReader(handle, path, header, frameIndex, globalPalette, meta);
             }
             catch
             {
@@ -148,10 +189,11 @@ namespace EditSharp.Composite
 
         /// <summary>
         /// Reads just the fixed header and embedded metadata blob of
-        /// `path` — NOT the frame index, and doesn't keep the file open —
-        /// for a caller (ScrubProxyCache.TryLoadExistingAsync) that only
-        /// needs to validate/describe an entry, not actually read frames
-        /// from it. Cheaper than a full Open() for that purpose alone.
+        /// `path` — NOT the shared-palette section or the frame index, and
+        /// doesn't keep the file open — for a caller (ScrubProxyCache.
+        /// TryLoadExisting) that only needs to validate/describe an entry,
+        /// not actually read frames from it. Cheaper than a full Open() for
+        /// that purpose alone.
         /// </summary>
         public static (ScrubProxyFormat.Header Header, ScrubProxyMeta Meta) ReadHeaderAndMeta(string path)
         {
@@ -205,12 +247,7 @@ namespace EditSharp.Composite
         /// (via SKData.CreateCopy) — safe to keep/dispose independently of
         /// this reader's internal reusable buffer, which the NEXT call to
         /// this method overwrites. ALWAYS returns full RGBA8888 pixels
-        /// regardless of this file's own on-disk PixelFormat — an
-        /// Indexed8 file's palette+index blob is expanded into
-        /// `_frameBuffer` via ColorQuantizer.Expand, and an IndexedDelta7
-        /// file's palette+control-byte blob via IndexedDelta7Codec.Decode,
-        /// before the SKImage is built, so ScrubFrameSource/Playback need
-        /// zero awareness of PixelFormat at all.
+        /// regardless of this file's own on-disk PixelFormat.
         /// </summary>
         public SKImage GetFrameAt(double seconds)
         {
@@ -221,9 +258,6 @@ namespace EditSharp.Composite
 
             switch (_pixelFormat)
             {
-                case ScrubProxyPixelFormat.Indexed8:
-                    ReadIndexedFrame(offset, length, index);
-                    break;
                 case ScrubProxyPixelFormat.IndexedDelta7:
                     ReadIndexedDelta7Frame(offset, length, index);
                     break;
@@ -238,10 +272,10 @@ namespace EditSharp.Composite
         }
 
         /// <summary>
-        /// Rgba8888 path — unchanged from v2's own GetFrameAt logic:
-        /// either a direct read straight into `_frameBuffer` (None), or a
-        /// rented-scratch read followed by an in-place Rle decode into
-        /// `_frameBuffer` (Rle).
+        /// Rgba8888 path: either a direct read straight into `_frameBuffer`
+        /// (None — no rented scratch buffer needed at all), or a rented-
+        /// scratch read followed by DecompressPlane into `_frameBuffer`
+        /// (Zstd).
         /// </summary>
         private void ReadRgba8888Frame(long offset, int length, int frameIndex)
         {
@@ -255,10 +289,6 @@ namespace EditSharp.Composite
                 return;
             }
 
-            // Only None/Rle are valid CompressionScheme values — ReadHeader
-            // already rejects anything else — so this is deliberately a
-            // plain else, not a switch. A future third scheme would need
-            // this changed to a real switch.
             byte[] compressed = ArrayPool<byte>.Shared.Rent(length);
             try
             {
@@ -268,7 +298,7 @@ namespace EditSharp.Composite
                         $"ScrubProxyReader('{Path}') read {totalRead}/{length} compressed bytes for frame " +
                         $"{frameIndex} at offset {offset} — the file may be truncated or corrupt.");
 
-                ScrubProxyRle.Decode(compressed.AsSpan(0, length), _frameBuffer);
+                DecompressPlane(compressed.AsSpan(0, length), _frameBuffer, frameIndex, "Rgba8888");
             }
             finally
             {
@@ -277,82 +307,21 @@ namespace EditSharp.Composite
         }
 
         /// <summary>
-        /// Indexed8 path — see ScrubProxyPixelFormat.Indexed8's own remarks
-        /// for the on-disk shape: this frame's whole `length`-byte blob is
-        /// [256*4-byte raw palette][index bytes, optionally Rle'd]. Reads
-        /// the WHOLE blob into a rented scratch buffer (unlike Rgba8888's
-        /// None case, which can read straight into `_frameBuffer` — here
-        /// the palette has to be split off first regardless of
-        /// CompressionScheme, so there's no equivalent direct-read
-        /// shortcut), splits it at the fixed 1024-byte palette boundary,
-        /// decodes the index bytes (Rle or a straight copy) into
-        /// `_indexScratchBuffer`, and finally expands palette+indices into
-        /// `_frameBuffer` via ColorQuantizer.Expand.
-        /// </summary>
-        private void ReadIndexedFrame(long offset, int length, int frameIndex)
-        {
-            const int paletteSize = ScrubProxyFormat.IndexedPaletteByteSize;
-
-            if (length < paletteSize)
-                throw new InvalidOperationException(
-                    $"ScrubProxyReader('{Path}') found a frame {frameIndex} blob of only {length} bytes — " +
-                    $"too short to contain even an Indexed8 palette ({paletteSize} bytes). The file may be " +
-                    "truncated or corrupt.");
-
-            byte[] rented = ArrayPool<byte>.Shared.Rent(length);
-            try
-            {
-                int totalRead = ReadFullyAt(_handle, rented.AsSpan(0, length), offset);
-                if (totalRead != length)
-                    throw new InvalidOperationException(
-                        $"ScrubProxyReader('{Path}') read {totalRead}/{length} bytes for Indexed8 frame " +
-                        $"{frameIndex} at offset {offset} — the file may be truncated or corrupt.");
-
-                ReadOnlySpan<byte> palette = rented.AsSpan(0, paletteSize);
-                ReadOnlySpan<byte> indexBytes = rented.AsSpan(paletteSize, length - paletteSize);
-
-                if (_compressionScheme == ScrubProxyCompressionScheme.None)
-                {
-                    if (indexBytes.Length != _pixelCount)
-                        throw new InvalidOperationException(
-                            $"ScrubProxyReader('{Path}') found {indexBytes.Length} raw index bytes for frame " +
-                            $"{frameIndex}, expected exactly {_pixelCount} — the file may be truncated or corrupt.");
-                    indexBytes.CopyTo(_indexScratchBuffer!);
-                }
-                else
-                {
-                    ScrubProxyRle.Decode(indexBytes, _indexScratchBuffer!);
-                }
-
-                ColorQuantizer.Expand(palette, _indexScratchBuffer!, _frameBuffer);
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
-        }
-
-        /// <summary>
-        /// IndexedDelta7 path — see ScrubProxyPixelFormat.IndexedDelta7's
-        /// own remarks for the on-disk shape: this frame's whole
-        /// `length`-byte blob is [128*3-byte raw RGB palette][control
-        /// bytes, optionally Rle'd]. Structurally an exact mirror of
-        /// ReadIndexedFrame immediately above, just with
-        /// Delta7PaletteByteSize (384, not 1024) as the palette boundary
-        /// and IndexedDelta7Codec.Decode (not ColorQuantizer.Expand) as the
-        /// final expansion step.
+        /// IndexedDelta7 path — this frame's whole `length`-byte blob is
+        /// JUST its control-byte plane — no embedded palette to split off
+        /// (that lives in `_globalPalette`, read once at Open() time).
+        /// Reads the whole blob into a rented scratch buffer, decompresses
+        /// it directly into `_indexScratchBuffer` via DecompressPlane, and
+        /// expands against `_globalPalette` via IndexedDelta7Codec.Decode.
         /// </summary>
         private void ReadIndexedDelta7Frame(long offset, int length, int frameIndex)
         {
-            const int paletteSize = ScrubProxyFormat.Delta7PaletteByteSize;
-
-            if (length < paletteSize)
+            if (_globalPalette == null)
                 throw new InvalidOperationException(
-                    $"ScrubProxyReader('{Path}') found a frame {frameIndex} blob of only {length} bytes — " +
-                    $"too short to contain even an IndexedDelta7 palette ({paletteSize} bytes). The file may " +
-                    "be truncated or corrupt.");
+                    $"ScrubProxyReader('{Path}') is an IndexedDelta7 file with no shared palette recorded — " +
+                    "the file is corrupt or was written by an incompatible build.");
 
-            byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+            byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
             try
             {
                 int totalRead = ReadFullyAt(_handle, rented.AsSpan(0, length), offset);
@@ -361,27 +330,48 @@ namespace EditSharp.Composite
                         $"ScrubProxyReader('{Path}') read {totalRead}/{length} bytes for IndexedDelta7 frame " +
                         $"{frameIndex} at offset {offset} — the file may be truncated or corrupt.");
 
-                ReadOnlySpan<byte> palette = rented.AsSpan(0, paletteSize);
-                ReadOnlySpan<byte> pixelCodes = rented.AsSpan(paletteSize, length - paletteSize);
+                ReadOnlySpan<byte> pixelCodes = rented.AsSpan(0, length);
 
-                if (_compressionScheme == ScrubProxyCompressionScheme.None)
-                {
-                    if (pixelCodes.Length != _pixelCount)
-                        throw new InvalidOperationException(
-                            $"ScrubProxyReader('{Path}') found {pixelCodes.Length} raw control bytes for frame " +
-                            $"{frameIndex}, expected exactly {_pixelCount} — the file may be truncated or corrupt.");
-                    pixelCodes.CopyTo(_indexScratchBuffer!);
-                }
-                else
-                {
-                    ScrubProxyRle.Decode(pixelCodes, _indexScratchBuffer!);
-                }
+                DecompressPlane(pixelCodes, _indexScratchBuffer!, frameIndex, "IndexedDelta7");
 
-                IndexedDelta7Codec.Decode(palette, _indexScratchBuffer!, Width, Height, _frameBuffer);
+                IndexedDelta7Codec.Decode(_globalPalette, _indexScratchBuffer!, Width, Height, _frameBuffer);
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(rented);
+            }
+        }
+
+        /// <summary>
+        /// SHARED None/Zstd DISPATCH. Turns `compressed` (this frame's own
+        /// stored plane bytes — never a palette, and never more than one
+        /// frame's worth) into `plane` (an already-correctly-sized
+        /// destination — either `_frameBuffer` directly for the Rgba8888
+        /// case, or `_indexScratchBuffer` for IndexedDelta7), dispatching
+        /// on `_compressionScheme`. `frameKind` is purely for a clearer
+        /// exception message.
+        /// </summary>
+        private void DecompressPlane(ReadOnlySpan<byte> compressed, Span<byte> plane, int frameIndex, string frameKind)
+        {
+            switch (_compressionScheme)
+            {
+                case ScrubProxyCompressionScheme.None:
+                    if (compressed.Length != plane.Length)
+                        throw new InvalidOperationException(
+                            $"ScrubProxyReader('{Path}') found {compressed.Length} raw {frameKind} plane bytes " +
+                            $"for frame {frameIndex}, expected exactly {plane.Length} — the file may be " +
+                            "truncated or corrupt.");
+                    compressed.CopyTo(plane);
+                    break;
+
+                case ScrubProxyCompressionScheme.Zstd:
+                    ScrubProxyZstd.Decode(compressed, plane);
+                    break;
+
+                default:
+                    throw new InvalidOperationException(
+                        $"ScrubProxyReader('{Path}') encountered an unknown compression scheme " +
+                        $"'{_compressionScheme}' while reading frame {frameIndex}'s {frameKind} plane.");
             }
         }
 

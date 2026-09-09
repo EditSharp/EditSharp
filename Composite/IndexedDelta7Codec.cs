@@ -7,35 +7,28 @@ namespace EditSharp.Composite
     /// Encoder/decoder for ScrubProxyPixelFormat.IndexedDelta7 — DIRECT
     /// IMPLEMENTATION OF A USER-PROPOSED PSEUDOCODE DESIGN: every pixel is
     /// stored as ONE control byte that is EITHER "the nearest color in this
-    /// frame's own small palette" OR "a small modulation of the pixel
+    /// file's own small palette" OR "a small modulation of the pixel
     /// immediately to my left," whichever one lands closer to the real
     /// source color — chosen per-pixel, not per-frame.
     ///
-    /// WHY THIS EXISTS, BEYOND Indexed8 (the size-down/quality-up case the
-    /// user asked for): Indexed8's ordered (Bayer) dithering exists purely
-    /// to fake extra perceived color depth out of a fixed 256-color
-    /// palette by deliberately varying neighboring pixels' chosen index —
-    /// which is exactly what makes a dithered index plane compress poorly
-    /// under PackBits RLE (see ScrubProxyRle's own remarks on the
-    /// production bug a pathological, dither-like repeating pattern
-    /// caused). This format removes the need for dithering ENTIRELY: a
-    /// pixel that's close to, but not exactly, a palette color no longer
-    /// needs a faked-in neighboring variation to read as smooth — it can
-    /// instead land on an exact small delta from its own already-chosen
-    /// left neighbor, which (a) is visually more accurate than a dithered
-    /// approximation and (b) is dramatically more RLE-friendly, since a
-    /// flat OR smoothly-gradient region now tends to produce long runs of
-    /// identical or near-identical control bytes instead of a deliberately
-    /// noisy dither pattern. NO DITHERING IS APPLIED ANYWHERE IN THIS
-    /// CODEC — a deliberate omission, not an oversight; see above.
+    /// NO DITHERING IS APPLIED ANYWHERE IN THIS CODEC — a deliberate
+    /// omission, not an oversight: a pixel that's close to, but not
+    /// exactly, a palette color doesn't need a faked-in neighboring
+    /// variation to read as smooth — it can instead land on an exact small
+    /// delta from its own already-chosen left neighbor, which (a) is
+    /// visually more accurate than a dithered approximation and (b) is
+    /// dramatically more compression-friendly, since a flat OR smoothly-
+    /// gradient region now tends to produce long runs of identical or
+    /// near-identical control bytes instead of a deliberately noisy dither
+    /// pattern.
     ///
-    /// PALETTE IS 128 ENTRIES, RGB-ONLY (NOT 256/RGBA LIKE Indexed8) — a
-    /// direct consequence of the byte layout below, not an independent
-    /// choice: the mode bit consumes 1 of the 8 bits, leaving only 7 for a
-    /// palette index, hence at most 128 distinct palette colors. RGB-only
-    /// (no alpha channel in the palette or the delta math) because this
-    /// format is used EXCLUSIVELY for Video-type MediaSourceNode frames
-    /// (see ScrubProxyCache.EncodeFramePixels/ScrubFrameSource — Image/Text
+    /// PALETTE IS 128 ENTRIES, RGB-ONLY — a direct consequence of the byte
+    /// layout below, not an independent choice: the mode bit consumes 1 of
+    /// the 8 bits, leaving only 7 for a palette index, hence at most 128
+    /// distinct palette colors. RGB-only (no alpha channel in the palette
+    /// or the delta math) because this format is used EXCLUSIVELY for
+    /// Video-type MediaSourceNode frames (see
+    /// ScrubProxyCache.EncodeFramePixels/ScrubFrameSource — Image/Text
     /// input nodes never go through a scrub proxy at all), and
     /// SkSourceDecoder's raw pipe always decodes video fully opaque — an
     /// alpha channel would cost real bits for a value that's always 255 in
@@ -67,7 +60,11 @@ namespace EditSharp.Composite
     /// worse-than-expected palette-mode fallback rate (steps too fine to
     /// usefully cover typical deltas), these three constants are the first
     /// thing to retune — nothing else about the format needs to change to
-    /// do that, since ApplyDelta is the only place step size is used.
+    /// do that, since ApplyDelta is the only place step size is used. Noted
+    /// but NOT acted on this round: a luma-weighted re-split of the delta
+    /// bit budget, and a larger/alternate palette size, are both real
+    /// levers still on the table for the 720p30 size target — see
+    /// EditSharpConfig.ScrubProxyPixelFormat's own remarks.
     ///
     /// THE ENCODER MUST MIRROR THE DECODER'S OWN RECONSTRUCTED STATE, NOT
     /// THE ORIGINAL SOURCE PIXELS — the single most important correctness
@@ -79,26 +76,30 @@ namespace EditSharp.Composite
     /// instead used the ORIGINAL (pre-quantization) left pixel, the two
     /// sides would silently drift apart, compounding error every pixel
     /// along a row with no way for a decoder to ever detect or correct it.
-    /// Encode therefore tracks its own "previous" as the actual chosen
-    /// PALETTE or DELTA color for the pixel just written (`prevR/G/B` in
-    /// the row loop below) — never the source's own left-neighbor value —
-    /// and ApplyDelta (the one piece of arithmetic that turns a previous
-    /// color + levels into a new color) is the SAME method Encode's own
+    /// The row loop therefore tracks its own "previous" as the actual
+    /// chosen PALETTE or DELTA color for the pixel just written
+    /// (`prevR/G/B`) — never the source's own left-neighbor value — and
+    /// ApplyDelta (the one piece of arithmetic that turns a previous color
+    /// + levels into a new color) is the SAME method the encode-side
     /// search and Decode both call, so the two can never drift apart by
     /// construction.
     ///
     /// ROW-START BOOTSTRAP (a boundary case the user's pseudocode didn't
     /// address): column 0 of every row has no left-neighbor to delta from
-    /// at all — Encode/Decode both treat x=0 as PALETTE mode unconditionally,
-    /// which needs no previous-pixel state to be well-defined. This also
-    /// matches the user's own stated goal for the left-only dependency
-    /// (\"you could calculate every row all at once\"): every row is
-    /// independently decodable from nothing but its own bytes, so a future
-    /// pass (CPU or GPU) could process every row of a frame in parallel —
-    /// GPU-SHADER DECODE ITSELF IS STILL EXPLICITLY OUT OF SCOPE for this
-    /// round, same as it already is for Indexed8 (see ScrubProxyCache's own
-    /// remarks) — this format is decoded entirely on the CPU today, exactly
-    /// like Indexed8, via ScrubProxyReader.
+    /// at all — encode/decode both treat x=0 as PALETTE mode
+    /// unconditionally, which needs no previous-pixel state to be
+    /// well-defined. This also matches the user's own stated goal for the
+    /// left-only dependency ("you could calculate every row all at once"):
+    /// every row is independently decodable from nothing but its own
+    /// bytes, so a parallel pass (CPU or GPU) can process every row of a
+    /// frame independently — see ScrubProxyGpuEncoder for the GPU BUILD/
+    /// encode path this row-independence (and, within a row, the
+    /// segmented-scan structure PALETTE-mode resets create) makes
+    /// possible. (There is no corresponding GPU decode path in this
+    /// codebase — an earlier one was tried and removed as unneeded
+    /// complexity, since a proxy read is already a cheap, single
+    /// positioned file read regardless of pixel format; see
+    /// ScrubFrameSource's own remarks.)
     ///
     /// PER-PIXEL SEARCH IS EXACT, NOT A PER-CHANNEL APPROXIMATION: for each
     /// pixel needing a delta candidate, FindBestDelta evaluates ALL
@@ -116,15 +117,53 @@ namespace EditSharp.Composite
     /// reconstructed color) is special-cased as an immediate, distance-0
     /// return before the full search runs at all — the extremely common
     /// case for flat regions and slow gradients, and the case that most
-    /// directly produces the long identical-byte runs RLE compresses best.
+    /// directly produces the long identical-byte runs a byte-level or
+    /// general-purpose compressor handles best.
     ///
-    /// EXPERIMENTAL — NOT THE DEFAULT, NOT YET VALIDATED ON REAL CONTENT:
-    /// EditSharpConfig.ScrubProxyPixelFormat still defaults to Indexed8 (a
-    /// proven, already-tested-on-real-hardware format); IndexedDelta7 is
-    /// available as an opt-in value for real-world evaluation, same as
-    /// Indexed8 itself once was before its own hardware confirmation. See
-    /// ScrubProxyPixelFormat.IndexedDelta7's own remarks for the on-disk
-    /// shape this feeds and EditSharpConfig for the build-time knob.
+    /// SHARED/GLOBAL PALETTE (V6, DECIDED IN CONVERSATION) — every stored
+    /// frame USED TO carry its own freshly-built 384-byte palette (v4/v5
+    /// shape); as of format version 6, IndexedDelta7 files instead store
+    /// ONE palette for the WHOLE FILE (built from a sample of frames across
+    /// the source — see ScrubProxyCache.BuildAsync's sampling pass), kept
+    /// once in the file's own layout (see ScrubProxyFormat's VERSION 6
+    /// remarks) and read once by ScrubProxyReader at Open() time, exactly
+    /// like the frame index table already is. This is a genuine ARCHITECTURE
+    /// change to this codec's public surface, split into three pieces so
+    /// each can be tested/reasoned about independently:
+    ///   - AccumulateHistogram: the exact same per-pixel color-counting
+    ///     loop Encode always ran internally, now exposed so a caller can
+    ///     run it across MULTIPLE sampled frames into one shared histogram
+    ///     before building a palette from it — nothing about the counting
+    ///     logic itself changed, it's just no longer scoped to one frame.
+    ///   - BuildPaletteFromHistogram: the exact same median-cut BuildPalette
+    ///     + WritePalette pair Encode always ran internally, now exposed
+    ///     directly so the caller can build ONE palette from the merged
+    ///     multi-frame histogram instead of Encode building a fresh one
+    ///     per frame.
+    ///   - EncodeWithPalette: the exact same per-pixel PALETTE-vs-DELTA row
+    ///     loop Encode always ran, factored out into the shared EncodeRows
+    ///     helper so it can run against an EXTERNALLY SUPPLIED palette
+    ///     (the shared one) instead of building its own. Encode (below)
+    ///     still exists, unchanged in behavior, and still calls EncodeRows
+    ///     too — it's simply no longer what ScrubProxyCache actually calls
+    ///     for a new build; kept as a simple, still-correct, self-contained
+    ///     one-shot entry point (useful for testing this codec against a
+    ///     single frame in isolation, or for any future caller that
+    ///     genuinely wants a fresh per-frame palette again).
+    /// Decode itself needed ZERO changes for this — it already took an
+    /// explicit `palette` parameter rather than assuming a per-frame one,
+    /// so handing it the shared palette (read once, reused for every
+    /// frame) instead of a freshly-read per-frame one is exactly what its
+    /// existing signature was already built to support.
+    ///
+    /// THE DEFAULT PIXEL FORMAT (see EditSharpConfig.ScrubProxyPixelFormat)
+    /// — CONFIRMED ON REAL HARDWARE to deliver a dramatic size reduction
+    /// with correct behavior and good visual quality. The earlier Indexed8
+    /// format it replaced as the default was removed entirely (decided in
+    /// conversation: unnecessary complexity once IndexedDelta7 proved
+    /// better). See ScrubProxyPixelFormat.IndexedDelta7's own remarks for
+    /// the on-disk shape this feeds and EditSharpConfig for the build-time
+    /// knob.
     /// </summary>
     internal static class IndexedDelta7Codec
     {
@@ -149,11 +188,16 @@ namespace EditSharp.Composite
 
         /// <summary>
         /// Quantizes one RGBA8888 frame (`source`, exactly `width * height
-        /// * 4` interleaved bytes, no row padding — same contract as
-        /// ColorQuantizer.Quantize; alpha is read but never used, see class
-        /// remarks) into a 128-entry RGB palette (`paletteOut`, exactly
-        /// Delta7PaletteByteSize bytes) and one control byte per pixel
-        /// (`pixelsOut`, exactly `width * height` bytes).
+        /// * 4` interleaved bytes, no row padding; alpha is read but never
+        /// used, see class remarks) into a FRESH, THIS-FRAME-ONLY 128-entry
+        /// RGB palette
+        /// (`paletteOut`, exactly Delta7PaletteByteSize bytes) and one
+        /// control byte per pixel (`pixelsOut`, exactly `width * height`
+        /// bytes). See class remarks, SHARED/GLOBAL PALETTE (V6) — this
+        /// method is NOT what ScrubProxyCache actually calls for a new
+        /// build any more (that's AccumulateHistogram + BuildPaletteFromHistogram
+        /// + EncodeWithPalette instead), but is kept as a simple, still-
+        /// correct, self-contained one-shot entry point.
         /// </summary>
         public static void Encode(
             ReadOnlySpan<byte> source, int width, int height, Span<byte> paletteOut, Span<byte> pixelsOut)
@@ -167,18 +211,102 @@ namespace EditSharp.Composite
             if (paletteOut.Length != ScrubProxyFormat.Delta7PaletteByteSize)
                 throw new ArgumentException(
                     $"paletteOut must be exactly {ScrubProxyFormat.Delta7PaletteByteSize} bytes.", nameof(paletteOut));
-            if (pixelsOut.Length != pixelCount)
-                throw new ArgumentException($"pixelsOut must be exactly {pixelCount} bytes.", nameof(pixelsOut));
 
             var histogram = new Dictionary<uint, int>();
+            AccumulateHistogram(source, width, height, histogram);
+
+            (uint Color, int Count)[] palette = BuildPalette(histogram);
+            WritePalette(palette, paletteOut);
+
+            EncodeRows(source, width, height, paletteOut, pixelsOut);
+        }
+
+        /// <summary>
+        /// Counts every pixel's (R,G,B) color in `source` (one frame, same
+        /// shape as Encode's own `source`) into `histogram`, ADDING to
+        /// whatever counts it already holds rather than replacing them —
+        /// see class remarks, SHARED/GLOBAL PALETTE (V6). Calling this
+        /// once per sampled frame (against the SAME dictionary instance)
+        /// is exactly how ScrubProxyCache.BuildAsync's sampling pass builds
+        /// a histogram representative of the whole source, not just one
+        /// frame, before calling BuildPaletteFromHistogram on the result.
+        /// Alpha is read but never used, same as everywhere else in this
+        /// codec (see class remarks on why this format carries no alpha).
+        /// </summary>
+        public static void AccumulateHistogram(
+            ReadOnlySpan<byte> source, int width, int height, Dictionary<uint, int> histogram)
+        {
+            int pixelCount = width * height;
+            if (source.Length != pixelCount * 4)
+                throw new ArgumentException(
+                    $"source must be exactly {pixelCount * 4} bytes for a {width}x{height} RGBA8888 frame, got {source.Length}.",
+                    nameof(source));
+
             for (int i = 0; i < source.Length; i += 4)
             {
                 uint key = PackRgb(source[i], source[i + 1], source[i + 2]);
                 histogram[key] = histogram.TryGetValue(key, out int count) ? count + 1 : 1;
             }
+        }
+
+        /// <summary>
+        /// Median-cuts `histogram` (built by one or more AccumulateHistogram
+        /// calls) down to a 128-entry RGB palette and writes it to
+        /// `paletteOut` — the exact same BuildPalette+WritePalette pair
+        /// Encode always ran internally, just exposed directly so
+        /// ScrubProxyCache can build ONE shared palette from a multi-frame
+        /// histogram instead of Encode building a fresh one per frame. See
+        /// class remarks, SHARED/GLOBAL PALETTE (V6).
+        /// </summary>
+        public static void BuildPaletteFromHistogram(Dictionary<uint, int> histogram, Span<byte> paletteOut)
+        {
+            if (paletteOut.Length != ScrubProxyFormat.Delta7PaletteByteSize)
+                throw new ArgumentException(
+                    $"paletteOut must be exactly {ScrubProxyFormat.Delta7PaletteByteSize} bytes.", nameof(paletteOut));
 
             (uint Color, int Count)[] palette = BuildPalette(histogram);
             WritePalette(palette, paletteOut);
+        }
+
+        /// <summary>
+        /// Encodes one frame's control bytes AGAINST AN EXTERNALLY SUPPLIED
+        /// palette (`palette`, exactly Delta7PaletteByteSize bytes — the
+        /// shared/global palette read from, or about to be written to, the
+        /// file's own header-level palette section) rather than building a
+        /// fresh one from this frame alone. See class remarks, SHARED/GLOBAL
+        /// PALETTE (V6) — this is what ScrubProxyCache.EncodeFramePixels
+        /// actually calls for every frame of a new IndexedDelta7 build.
+        /// </summary>
+        public static void EncodeWithPalette(
+            ReadOnlySpan<byte> source, int width, int height, ReadOnlySpan<byte> palette, Span<byte> pixelsOut)
+        {
+            int pixelCount = width * height;
+
+            if (source.Length != pixelCount * 4)
+                throw new ArgumentException(
+                    $"source must be exactly {pixelCount * 4} bytes for a {width}x{height} RGBA8888 frame, got {source.Length}.",
+                    nameof(source));
+            if (palette.Length != ScrubProxyFormat.Delta7PaletteByteSize)
+                throw new ArgumentException(
+                    $"palette must be exactly {ScrubProxyFormat.Delta7PaletteByteSize} bytes.", nameof(palette));
+
+            EncodeRows(source, width, height, palette, pixelsOut);
+        }
+
+        /// <summary>
+        /// THE per-pixel PALETTE-vs-DELTA row loop — shared by Encode (after
+        /// it builds its own per-frame palette) and EncodeWithPalette (given
+        /// an external one). `palette` is always exactly Delta7PaletteByteSize
+        /// raw RGB triples; length/shape validation is the caller's job
+        /// (both public entry points already do it) so this method can stay
+        /// a plain, allocation-light inner loop.
+        /// </summary>
+        private static void EncodeRows(
+            ReadOnlySpan<byte> source, int width, int height, ReadOnlySpan<byte> palette, Span<byte> pixelsOut)
+        {
+            int pixelCount = width * height;
+            if (pixelsOut.Length != pixelCount)
+                throw new ArgumentException($"pixelsOut must be exactly {pixelCount} bytes.", nameof(pixelsOut));
 
             // Cached per DISTINCT SOURCE COLOR (not per pixel, not per
             // (color, previous) pair — see class remarks, PER-PIXEL SEARCH
@@ -203,8 +331,8 @@ namespace EditSharp.Composite
                     if (!nearestPaletteCache.TryGetValue(sourceKey, out var nearest))
                     {
                         byte idx = FindNearestPaletteIndex(palette, r, g, b);
-                        UnpackRgb(palette[idx].Color, out byte pr, out byte pg, out byte pb);
-                        nearest = (idx, pr, pg, pb);
+                        int paletteOffset = idx * 3;
+                        nearest = (idx, palette[paletteOffset], palette[paletteOffset + 1], palette[paletteOffset + 2]);
                         nearestPaletteCache[sourceKey] = nearest;
                     }
 
@@ -258,10 +386,15 @@ namespace EditSharp.Composite
 
         /// <summary>
         /// Expands one IndexedDelta7 frame back to full RGBA8888 — the
-        /// read-side counterpart to Encode, used by
-        /// ScrubProxyReader.GetFrameAt. Alpha is always written as 255
-        /// (opaque) — see class remarks on why this format carries no
-        /// alpha information at all.
+        /// read-side counterpart to Encode/EncodeWithPalette, used by
+        /// ScrubProxyReader.GetFrameAt. `palette` is whatever palette this
+        /// file actually uses for every frame — as of V6, the ONE shared/
+        /// global palette read once at Open() time (see class remarks,
+        /// SHARED/GLOBAL PALETTE (V6)) — this method needed no change at
+        /// all for that: it always took an explicit palette parameter
+        /// rather than assuming a per-frame one. Alpha is always written
+        /// as 255 (opaque) — see class remarks on why this format carries
+        /// no alpha information at all.
         /// </summary>
         public static void Decode(
             ReadOnlySpan<byte> palette, ReadOnlySpan<byte> pixels, int width, int height, Span<byte> destination)
@@ -316,10 +449,18 @@ namespace EditSharp.Composite
 
         /// <summary>
         /// The ONE place previous-color + signed levels turns into an
-        /// actual channel value — called by BOTH Encode's own delta search
+        /// actual channel value — called by BOTH the encode-side search
         /// (via FindBestDelta) and Decode, so the two can never compute the
         /// delta math differently. See class remarks, THE ENCODER MUST
         /// MIRROR THE DECODER'S OWN RECONSTRUCTED STATE.
+        ///
+        /// This same "clamp(prev + offset, 0, 255)" shape is also exactly
+        /// what ScrubProxyGpuEncoder's GPU column scan evaluates per pixel
+        /// when searching DELTA candidates (see that class's own remarks)
+        /// — the two never drift apart because both ultimately implement
+        /// this one clamp/offset formula, even though the encoder's own
+        /// shader is a separate, independent expression of it (no shared
+        /// code between CPU and GPU is possible here).
         /// </summary>
         private static void ApplyDelta(
             byte prevR, byte prevG, byte prevB, int rLevel, int gLevel, int bLevel,
@@ -380,17 +521,12 @@ namespace EditSharp.Composite
         /// <summary>
         /// Median-cut over `histogram`'s distinct (color, count) entries in
         /// RGB (3D) space, splitting buckets until PaletteSize (128)
-        /// buckets exist or every bucket is down to one distinct color —
-        /// same algorithm shape as ColorQuantizer.BuildPalette, kept as an
-        /// independent copy rather than a shared/refactored helper
-        /// deliberately: this format is new and unvalidated (see class
-        /// remarks, EXPERIMENTAL), and refactoring ColorQuantizer's own
-        /// already-hardware-confirmed Indexed8 path to share code with it
-        /// would risk that proven path for no benefit to either format —
-        /// the two are RGB vs RGBA, 128 vs 256 buckets, and diverge in the
-        /// caller's own per-pixel loop shape (this format's row-sequential
-        /// delta search has no Indexed8 equivalent at all), so very little
-        /// would actually be shared besides the median-cut skeleton itself.
+        /// buckets exist or every bucket is down to one distinct color.
+        /// UNCHANGED FOR V6 — the only thing that changed is WHICH
+        /// histogram gets handed in (one frame's worth, vs. several sampled
+        /// frames' worth accumulated together — see AccumulateHistogram);
+        /// this method has no notion of "how many frames" at all, it just
+        /// median-cuts whatever counts the histogram already holds.
         /// </summary>
         private static (uint Color, int Count)[] BuildPalette(Dictionary<uint, int> histogram)
         {
@@ -510,15 +646,30 @@ namespace EditSharp.Composite
             return (PackRgb(avgR, avgG, avgB), (int)totalWeight);
         }
 
-        private static byte FindNearestPaletteIndex((uint Color, int Count)[] palette, int r, int g, int b)
+        /// <summary>
+        /// Nearest palette entry to (r,g,b), reading directly from the raw
+        /// on-disk RGB-triple byte layout (`palette`, exactly
+        /// Delta7PaletteByteSize bytes) rather than an intermediate
+        /// (uint Color, int Count)[] array — CHANGED FOR V6: EncodeRows is
+        /// now shared between Encode (which still builds its own tuple-
+        /// array palette internally, then writes it to bytes via
+        /// WritePalette before calling this) and EncodeWithPalette (which
+        /// only ever HAS the byte-array shape, since that's what's actually
+        /// stored on disk/passed around at the ScrubProxyCache layer) — so
+        /// this method reads bytes directly rather than requiring every
+        /// caller to first unpack them back into a tuple array just to
+        /// look a color up.
+        /// </summary>
+        private static byte FindNearestPaletteIndex(ReadOnlySpan<byte> palette, int r, int g, int b)
         {
             byte best = 0;
             long bestDistance = long.MaxValue;
+            int count = palette.Length / 3;
 
-            for (int i = 0; i < palette.Length; i++)
+            for (int i = 0; i < count; i++)
             {
-                UnpackRgb(palette[i].Color, out byte pr, out byte pg, out byte pb);
-                long distance = DistanceSquared(r, g, b, pr, pg, pb);
+                int offset = i * 3;
+                long distance = DistanceSquared(r, g, b, palette[offset], palette[offset + 1], palette[offset + 2]);
                 if (distance < bestDistance)
                 {
                     bestDistance = distance;
@@ -530,11 +681,7 @@ namespace EditSharp.Composite
         }
 
         /// <summary>
-        /// Redmean-style perceptually-weighted squared distance on RGB —
-        /// identical formula/weights to ColorQuantizer's own
-        /// ComputeDistanceSquared, minus the alpha term (this format never
-        /// carries alpha — see class remarks). Kept as its own copy for
-        /// the same reason BuildPalette is: see BuildPalette's own remarks.
+        /// Redmean-style perceptually-weighted squared distance on RGB.
         /// </summary>
         private static long DistanceSquared(int r1, int g1, int b1, int r2, int g2, int b2)
         {
