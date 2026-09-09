@@ -148,15 +148,16 @@ namespace EditSharp
         /// sizes (this is a scrub/rewind indicator, never used for a final
         /// render — see ScrubFrameSource).
         ///
-        /// WORTH REVISITING NOW THAT Indexed8 EXISTS (see
-        /// ScrubProxyPixelFormat.Indexed8's own remarks): the whole point of
-        /// palette quantization's size savings is that they buy back room
-        /// to raise this toward native resolution. Left at its original
-        /// default here rather than changed as part of this round — nothing
-        /// about Indexed8's own correctness depends on a particular target
-        /// short side, so raising this is a separate, purely-quality-vs-
-        /// size tuning decision for later, not bundled into the format
-        /// change itself.
+        /// WORTH REVISITING NOW THAT Indexed8/IndexedDelta7 EXIST (see
+        /// ScrubProxyPixelFormat.Indexed8/IndexedDelta7's own remarks): the
+        /// whole point of both formats' size savings is that they buy back
+        /// room to raise this toward native resolution. Left at its
+        /// original default here rather than changed as part of either
+        /// format's own introduction — nothing about either format's own
+        /// correctness depends on a particular target short side, so
+        /// raising this is a separate, purely-quality-vs-size tuning
+        /// decision for later, not bundled into either format change
+        /// itself.
         /// </summary>
         public static int ScrubProxyTargetShortSide
         {
@@ -217,9 +218,8 @@ namespace EditSharp
         /// already on disk, and there is no need to rebuild existing
         /// entries just because this changed; old and new entries coexist
         /// fine side by side in the same cache directory. APPLIES TO
-        /// Indexed8 FRAMES' INDEX-BYTE PLANE TOO (see
-        /// ScrubProxyPixelFormat.Indexed8's own remarks) — this one knob
-        /// governs both pixel formats' own compressible stream, whichever
+        /// Indexed8/IndexedDelta7 FRAMES' CONTROL-BYTE PLANE TOO (see those
+        /// formats' own remarks) — this one knob governs whichever
         /// ScrubProxyPixelFormat below is also configured.
         /// </summary>
         public static ScrubProxyCompressionScheme ScrubProxyCompressionScheme
@@ -228,30 +228,47 @@ namespace EditSharp
             set => _scrubProxyCompressionScheme = value;
         }
 
-        private static ScrubProxyPixelFormat _scrubProxyPixelFormat = ScrubProxyPixelFormat.Indexed8;
+        private static ScrubProxyPixelFormat _scrubProxyPixelFormat = ScrubProxyPixelFormat.IndexedDelta7;
 
         /// <summary>
         /// How ScrubProxyCache stores each frame's pixels in a NEWLY BUILT
-        /// .esrp scrub proxy — see ScrubProxyFormat.ScrubProxyPixelFormat
-        /// and ColorQuantizer for the actual quantization/dithering
-        /// machinery Indexed8 relies on. DEFAULTS TO Indexed8 — DECIDED IN
-        /// CONVERSATION: this whole format was added specifically because
-        /// its size savings are large enough to be worth taking as the
-        /// default trade-off for a scrub PREVIEW (never used for a final
-        /// render — see ScrubProxyFormat's own class remarks on the
-        /// "accurate to the proxy, not the source" trade-off this whole
-        /// mechanism already makes regardless of pixel format). Set to
-        /// Rgba8888 to build fully lossless (modulo CompressionScheme)
-        /// proxies instead — the original v1/v2 shape, still fully
-        /// supported, just no longer the default now that Indexed8 exists.
+        /// .esrp scrub proxy — see ScrubProxyFormat.ScrubProxyPixelFormat,
+        /// ColorQuantizer (Indexed8's quantization/dithering machinery),
+        /// and IndexedDelta7Codec (IndexedDelta7's own encode/decode
+        /// machinery) for how each format actually works. DEFAULTS TO
+        /// Indexed8 — DECIDED IN CONVERSATION: this format's size savings
+        /// are large enough to be worth taking as the default trade-off for
+        /// a scrub PREVIEW (never used for a final render — see
+        /// ScrubProxyFormat's own class remarks on the "accurate to the
+        /// proxy, not the source" trade-off this whole mechanism already
+        /// makes regardless of pixel format), and it has been confirmed on
+        /// real hardware to produce dramatic size reductions with correct
+        /// behavior.
+        ///
+        /// THREE VALUES AVAILABLE:
+        ///   - Rgba8888: fully lossless (modulo CompressionScheme) — the
+        ///     original v1/v2 shape, still fully supported, just no longer
+        ///     the default now that Indexed8 exists.
+        ///   - Indexed8 (DEFAULT): a 256-color palette quantized per frame,
+        ///     with ordered (Bayer) dithering to reduce visible banding.
+        ///     Proven on real hardware.
+        ///   - IndexedDelta7: a hybrid 128-color palette + per-pixel
+        ///     predictive-delta encoding, direct implementation of a user-
+        ///     proposed design (see IndexedDelta7Codec's own remarks) —
+        ///     EXPERIMENTAL, not yet validated on real hardware, and NOT
+        ///     the default. Intended, per the user's own stated goal, to
+        ///     push size down further than Indexed8 while also IMPROVING
+        ///     visual quality (no dithering, exact per-pixel delta instead)
+        ///     — worth evaluating once real-hardware testing is possible,
+        ///     but not assumed correct until then.
         ///
         /// ONLY AFFECTS NEW BUILDS — same non-retroactive contract as
         /// ScrubProxyCompressionScheme immediately above: an existing
         /// cached .esrp file's own PixelFormat (recorded in its own header
         /// at build time) is what ScrubProxyReader actually honors when
         /// reading it back, so changing this does not touch anything
-        /// already on disk, and Rgba8888/Indexed8 entries coexist fine
-        /// side by side in the same cache directory.
+        /// already on disk, and entries built under any of the three
+        /// values coexist fine side by side in the same cache directory.
         /// </summary>
         public static ScrubProxyPixelFormat ScrubProxyPixelFormat
         {

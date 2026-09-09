@@ -190,6 +190,23 @@ namespace EditSharp.Composite
     /// Indexed8 frame back to full RGBA8888 entirely on the CPU (see that
     /// method's own remarks), so ScrubFrameSource/Playback need zero
     /// awareness this format exists at all.
+    ///
+    /// FORMAT V4 — IndexedDelta7 PIXEL FORMAT (decided in conversation,
+    /// direct implementation of a user-proposed pseudocode design — see
+    /// ScrubProxyPixelFormat.IndexedDelta7 and IndexedDelta7Codec for the
+    /// full design/reasoning): EncodeFramePixels gained a third branch
+    /// alongside Indexed8, calling IndexedDelta7Codec.Encode instead of
+    /// ColorQuantizer.Quantize and using
+    /// ScrubProxyFormat.Delta7PaletteByteSize (384 bytes, not Indexed8's
+    /// 1024) for the palette portion of the concatenated blob — otherwise
+    /// an exact structural mirror of the Indexed8 branch (palette raw
+    /// always, control bytes optionally Rle'd), for the same reason: the
+    /// frame-index/offset bookkeeping in EncodeAsync doesn't care why a
+    /// frame's length varies, only that it does. Same GPU-decode scoping
+    /// as Indexed8 — out of scope for this round, CPU-only for now (see
+    /// IndexedDelta7Codec's own remarks on why this format's row-only
+    /// dependency structure leaves that door open for later, without
+    /// committing to it here).
     /// </summary>
     internal static class ScrubProxyCache
     {
@@ -514,6 +531,12 @@ namespace EditSharp.Composite
         ///     Rgba8888 frame's own bytes would be. The two pieces are
         ///     concatenated (palette first, at the fixed 1024-byte offset
         ///     ScrubProxyReader expects) into the single returned blob.
+        ///   - IndexedDelta7: IndexedDelta7Codec.Encode builds this frame's
+        ///     own 128-color RGB palette and per-pixel control-byte plane
+        ///     (see ScrubProxyPixelFormat.IndexedDelta7's own remarks) —
+        ///     otherwise an exact structural mirror of the Indexed8 case
+        ///     immediately above, just with a 384-byte (not 1024-byte)
+        ///     palette region.
         /// `frame`/`sourcePath`/`frameIndex` are used only to produce a
         /// clear exception message on the (rare, but real — see
         /// BuildAndTrackAsync's own catch, now logged) PeekPixels() failure
@@ -523,8 +546,8 @@ namespace EditSharp.Composite
         /// SkSourceDecoder's own WrapAsImage always builds its SKImage with
         /// rowBytes == width * 4 (no padding) — GetPixelSpan is therefore
         /// already exactly frameByteSize contiguous bytes, matching what
-        /// both ScrubProxyRle.Encode/the raw path and ColorQuantizer.Quantize
-        /// expect.
+        /// both ScrubProxyRle.Encode/the raw path and
+        /// ColorQuantizer.Quantize/IndexedDelta7Codec.Encode expect.
         /// </summary>
         private static byte[] EncodeFramePixels(
             SKImage frame, string sourcePath, int frameIndex, int width, int height,
@@ -550,6 +573,22 @@ namespace EditSharp.Composite
                 byte[] combined = new byte[palette.Length + storedIndices.Length];
                 palette.CopyTo(combined, 0);
                 storedIndices.CopyTo(combined, palette.Length);
+                return combined;
+            }
+
+            if (pixelFormat == ScrubProxyPixelFormat.IndexedDelta7)
+            {
+                byte[] palette = new byte[ScrubProxyFormat.Delta7PaletteByteSize];
+                byte[] pixelCodes = new byte[width * height];
+                IndexedDelta7Codec.Encode(raw, width, height, palette, pixelCodes);
+
+                byte[] storedPixelCodes = compressionScheme == ScrubProxyCompressionScheme.Rle
+                    ? ScrubProxyRle.Encode(pixelCodes)
+                    : pixelCodes;
+
+                byte[] combined = new byte[palette.Length + storedPixelCodes.Length];
+                palette.CopyTo(combined, 0);
+                storedPixelCodes.CopyTo(combined, palette.Length);
                 return combined;
             }
 

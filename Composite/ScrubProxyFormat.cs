@@ -10,10 +10,11 @@ namespace EditSharp.Composite
     /// actual Rle codec and EditSharpConfig.ScrubProxyCompressionScheme for
     /// the build-time default.
     ///
-    /// APPLIES TO Indexed8 FRAMES TOO (see ScrubProxyPixelFormat below) —
-    /// specifically to that format's INDEX-BYTE stream only, never to its
-    /// embedded palette (see ScrubProxyPixelFormat's own remarks for why
-    /// the palette is always stored raw).
+    /// APPLIES TO Indexed8/IndexedDelta7 FRAMES TOO (see
+    /// ScrubProxyPixelFormat below) — specifically to those formats'
+    /// per-pixel control-byte stream only, never to their embedded palette
+    /// (see ScrubProxyPixelFormat's own remarks for why the palette is
+    /// always stored raw).
     /// </summary>
     public enum ScrubProxyCompressionScheme
     {
@@ -34,9 +35,9 @@ namespace EditSharp.Composite
     /// How a stored frame's pixels are laid out on disk — a FILE-WIDE
     /// choice (recorded once in the fixed header), never per-frame, exactly
     /// like ScrubProxyCompressionScheme above. See EditSharpConfig.
-    /// ScrubProxyPixelFormat for the build-time default and
-    /// ColorQuantizer for the actual quantization/dithering machinery
-    /// Indexed8 relies on.
+    /// ScrubProxyPixelFormat for the build-time default, ColorQuantizer for
+    /// Indexed8's quantization/dithering machinery, and IndexedDelta7Codec
+    /// for IndexedDelta7's own encode/decode machinery.
     /// </summary>
     public enum ScrubProxyPixelFormat
     {
@@ -103,6 +104,77 @@ namespace EditSharp.Composite
         /// resolution up towards native affordable at all.
         /// </summary>
         Indexed8 = 1,
+
+        /// <summary>
+        /// HYBRID PALETTE + PREDICTIVE-DELTA ENCODING — DECIDED IN
+        /// CONVERSATION, DIRECT IMPLEMENTATION OF A USER-PROPOSED
+        /// PSEUDOCODE DESIGN, ADDED AS A THIRD FORMAT ALONGSIDE Rgba8888/
+        /// Indexed8 RATHER THAN REPLACING EITHER (same "new enum value,
+        /// nothing removed" pattern Indexed8 itself used). See
+        /// IndexedDelta7Codec for the full encode/decode machinery and
+        /// design reasoning — summarized here for the on-disk shape:
+        ///
+        /// Every stored frame is:
+        ///   [Palette]  128 * 3 bytes (RGB, NOT RGBA — see below) — 128
+        ///              colors, ALWAYS STORED RAW/UNCOMPRESSED, same
+        ///              reasoning as Indexed8's own palette (negligible
+        ///              size, compresses poorly under RLE anyway).
+        ///   [Pixels]   width * height bytes — one CONTROL byte per pixel:
+        ///              its top bit selects PALETTE mode (a 7-bit index
+        ///              into the palette above, 0-127) or DELTA mode (a
+        ///              small signed modulation of the pixel immediately
+        ///              to its LEFT, split 2/3/2 bits across R/G/B — green
+        ///              gets the most bits since the eye is most sensitive
+        ///              to it). Whichever mode lands closer to the real
+        ///              source pixel is chosen, per pixel. THIS part is
+        ///              subject to the file's own CompressionScheme (Rle
+        ///              or None), exactly like Indexed8's own index bytes.
+        /// A frame's TOTAL on-disk length (palette + stored pixel bytes) is
+        /// recorded in the file's frame index exactly like every other
+        /// format — the palette/pixel SPLIT is always at the fixed
+        /// Delta7PaletteByteSize (384-byte) boundary.
+        ///
+        /// RGB-ONLY (NOT RGBA) — UNLIKE Indexed8, DELIBERATELY: this
+        /// format's byte budget (1 mode bit, 7 remaining bits) has no room
+        /// left for an alpha term at all, and it doesn't need one — this
+        /// format is used EXCLUSIVELY for Video-type MediaSourceNode
+        /// frames (Image/Text input nodes never go through a scrub proxy
+        /// at all — see ScrubFrameSource), which SkSourceDecoder's raw
+        /// pipe always decodes fully opaque. Decoded frames always carry
+        /// A=255.
+        ///
+        /// NO DITHERING — UNLIKE Indexed8, DELIBERATELY: Indexed8's ordered
+        /// (Bayer) dithering exists to fake extra perceived color depth out
+        /// of a fixed palette by deliberately varying neighboring pixels'
+        /// chosen index, which is exactly what makes a dithered index plane
+        /// compress poorly under RLE (see ScrubProxyRle's own remarks on
+        /// the production bug a dither-like repeating pattern caused). This
+        /// format's DELTA mode already gives an exact, non-dithered escape
+        /// hatch for a pixel that's close to but not exactly a palette
+        /// color — a real improvement in both directions at once: more
+        /// accurate than a dithered approximation, AND far more
+        /// RLE-friendly (flat and smoothly-gradient regions now tend to
+        /// produce long runs of identical or near-identical control bytes,
+        /// rather than a deliberately noisy dither pattern).
+        ///
+        /// LOSSY, NAMED NOT HIDDEN, SAME TRADE-OFF FAMILY AS Indexed8: this
+        /// format additionally quantizes color the same general way
+        /// Indexed8 does (a palette AND, here, a bounded per-pixel delta
+        /// range), for the same reason — trading some of the same "accurate
+        /// to the proxy, not the source" accuracy this whole mechanism
+        /// already trades on resolution/frame rate for a further size
+        /// reduction (and, per the user's own stated goal, a quality
+        /// improvement in exchange too — see IndexedDelta7Codec's own
+        /// remarks for the mechanism).
+        ///
+        /// EXPERIMENTAL — NOT THE DEFAULT: EditSharpConfig.
+        /// ScrubProxyPixelFormat still defaults to Indexed8 (proven, real-
+        /// hardware-confirmed); this format is available as an opt-in value
+        /// pending its own real-hardware evaluation — see
+        /// IndexedDelta7Codec's own remarks on why its exact step-size
+        /// constants are flagged as unvalidated starting points.
+        /// </summary>
+        IndexedDelta7 = 2,
     }
 
     /// <summary>
@@ -119,17 +191,18 @@ namespace EditSharp.Composite
     /// a real decoder (process spawn, stream probing, however cheap) on
     /// every tick. This format needs none of that at all — every stored
     /// frame is a fixed-rate sample of pixels (RGBA8888 directly, or
-    /// Indexed8 — see ScrubProxyPixelFormat), so "read the frame nearest
-    /// this timestamp" is a frame-index lookup (see LAYOUT below) followed
-    /// by one pread-style read (see ScrubProxyReader, which uses
-    /// System.IO.RandomAccess so concurrent/rapid seeks never contend on a
-    /// shared stream position or spawn anything). No child process, no
+    /// Indexed8/IndexedDelta7 — see ScrubProxyPixelFormat), so "read the
+    /// frame nearest this timestamp" is a frame-index lookup (see LAYOUT
+    /// below) followed by one pread-style read (see ScrubProxyReader, which
+    /// uses System.IO.RandomAccess so concurrent/rapid seeks never contend
+    /// on a shared stream position or spawn anything). No child process, no
     /// video-codec decode, no GOP/keyframe concept at all — which is also
     /// what lets the real forward-playback GPU decoder stay alive and
     /// undisturbed for the whole time a scrub session is active (see
-    /// Playback's own remarks). Indexed8's own per-frame index-to-RGBA
-    /// expansion (see ScrubProxyReader.GetFrameAt) is a cheap in-memory
-    /// palette lookup, not a decode in this sense at all.
+    /// Playback's own remarks). Indexed8/IndexedDelta7's own per-frame
+    /// expansion back to RGBA (see ScrubProxyReader.GetFrameAt) is a cheap
+    /// in-memory lookup/small-delta-arithmetic pass, not a decode in this
+    /// sense at all.
     ///
     /// FIXED SAMPLE RATE, NOT THE SOURCE'S OWN KEYFRAME SPACING: unlike the
     /// old keyframe-snapped approach, this format's frame density is a
@@ -147,7 +220,8 @@ namespace EditSharp.Composite
     /// returns it (matches SkSourceDecoder's own raw pipe format exactly,
     /// so an SKImage needs zero further conversion), but HOW that RGBA8888
     /// is actually stored on disk now varies by PixelFormat — see
-    /// ScrubProxyPixelFormat's own remarks for the Indexed8 on-disk shape.
+    /// ScrubProxyPixelFormat's own remarks for the Indexed8/IndexedDelta7
+    /// on-disk shapes.
     ///
     /// VERSION 2 — METADATA EMBEDDED, PER-FRAME RANDOM ACCESS VIA A FRAME
     /// INDEX, OPTIONAL COMPRESSION (all decided in conversation, once the
@@ -177,10 +251,11 @@ namespace EditSharp.Composite
     ///     CompressionScheme (even None/raw, where every entry's Length is
     ///     the same constant) — one code path for both cases, at a fixed,
     ///     small, per-frame cost (12 bytes) that's negligible next to real
-    ///     frame data. UNCHANGED BY Indexed8: that format's frames simply
-    ///     vary in length by a different amount (palette + compressed-or-
-    ///     not index bytes, rather than compressed-or-not raw RGBA), the
-    ///     table itself doesn't care why a frame's length varies.
+    ///     frame data. UNCHANGED BY Indexed8/IndexedDelta7: those formats'
+    ///     frames simply vary in length by a different amount (palette +
+    ///     compressed-or-not control bytes, rather than compressed-or-not
+    ///     raw RGBA), the table itself doesn't care why a frame's length
+    ///     varies.
     ///   - CompressionScheme (see the enum above) records which transform,
     ///     if any, every frame's stored bytes went through — see
     ///     ScrubProxyRle for the actual codec. A FILE-WIDE choice, not
@@ -193,16 +268,23 @@ namespace EditSharp.Composite
     /// VERSION 3 — Indexed8 PIXEL FORMAT (decided in conversation, see
     /// ScrubProxyPixelFormat's own remarks for the full reasoning): the
     /// header's pixelFormat field, previously always written/validated as
-    /// the single hardcoded Rgba8888 value, is now a real, validated
+    /// the single hardcoded Rgba8888 value, became a real, validated
     /// ScrubProxyPixelFormat discriminator a file can carry either value
-    /// of. Bumped because the MEANING of "how many bytes does frame N's own
-    /// slot decode into, and how" now depends on this field in a way v2
-    /// readers never accounted for — an old reader must not silently
-    /// misinterpret a new Indexed8 file's frame bytes as raw/RLE'd RGBA8888,
-    /// hence the version bump forces exactly that "treat as a miss and
-    /// rebuild" fallback for a v3 file opened by any earlier build. The
-    /// header's own BYTE SIZE is unchanged (still 40 bytes) — only the
-    /// legal/interpreted range of the existing pixelFormat field changed.
+    /// of.
+    ///
+    /// VERSION 4 — IndexedDelta7 PIXEL FORMAT (decided in conversation, see
+    /// ScrubProxyPixelFormat.IndexedDelta7's own remarks and
+    /// IndexedDelta7Codec for the full reasoning): the header's
+    /// pixelFormat field's valid/interpreted range widened again to
+    /// include this third value. Bumped for the exact same reason v3 was —
+    /// the MEANING of "how many bytes does frame N's own slot decode into,
+    /// and how" now depends on this field in a way a v3-or-earlier reader
+    /// never accounted for, so an old reader must not silently misinterpret
+    /// a new IndexedDelta7 file's frame bytes as Indexed8 or raw/RLE'd
+    /// RGBA8888 — hence the version bump forces the same "treat as a miss
+    /// and rebuild" fallback v3's own bump did. The header's own BYTE SIZE
+    /// is unchanged (still 40 bytes) — only the legal/interpreted range of
+    /// the existing pixelFormat field changed, same as last time.
     ///
     /// LAYOUT, IN ORDER:
     ///   [FixedHeader]  HeaderSize (40) bytes — see WriteHeader/ReadHeader.
@@ -214,19 +296,29 @@ namespace EditSharp.Composite
     ///                  writer emits them in order, but a reader must
     ///                  trust the recorded offset, not assume that). For
     ///                  PixelFormat.Indexed8, each frame's own blob is
-    ///                  itself [256*4-byte raw palette][index bytes] — see
-    ///                  ScrubProxyPixelFormat's own remarks.
+    ///                  itself [256*4-byte raw palette][index bytes]; for
+    ///                  PixelFormat.IndexedDelta7, [128*3-byte raw
+    ///                  palette][control bytes] — see ScrubProxyPixelFormat's
+    ///                  own remarks for both.
     /// </summary>
     internal static class ScrubProxyFormat
     {
         /// <summary>ASCII "ESRP", read/written as a little-endian uint32.</summary>
         public const uint Magic = 0x50525345;
 
-        public const int CurrentVersion = 3;
+        public const int CurrentVersion = 4;
 
         /// <summary>256-color palette, 4 bytes (RGBA8888) each — see ScrubProxyPixelFormat.Indexed8.</summary>
         public const int IndexedPaletteEntryCount = 256;
         public const int IndexedPaletteByteSize = IndexedPaletteEntryCount * 4;
+
+        /// <summary>
+        /// 128-color palette, 3 bytes (RGB, no alpha) each — see
+        /// ScrubProxyPixelFormat.IndexedDelta7 and IndexedDelta7Codec for
+        /// why 128 (not 256) entries and why RGB-only.
+        /// </summary>
+        public const int Delta7PaletteEntryCount = 128;
+        public const int Delta7PaletteByteSize = Delta7PaletteEntryCount * 3;
 
         /// <summary>
         /// magic(4) + version(4) + width(4) + height(4) + pixelFormat(4) +
@@ -288,11 +380,13 @@ namespace EditSharp.Composite
             int metaBlobLength = BitConverter.ToInt32(source[36..40]);
 
             if (pixelFormatRaw != (int)ScrubProxyPixelFormat.Rgba8888 &&
-                pixelFormatRaw != (int)ScrubProxyPixelFormat.Indexed8)
+                pixelFormatRaw != (int)ScrubProxyPixelFormat.Indexed8 &&
+                pixelFormatRaw != (int)ScrubProxyPixelFormat.IndexedDelta7)
                 throw new InvalidDataException(
                     $"'{diagnosticPath}' uses scrub-proxy pixel format {pixelFormatRaw}, this build only " +
                     $"reads {(int)ScrubProxyPixelFormat.Rgba8888} (Rgba8888)/{(int)ScrubProxyPixelFormat.Indexed8} " +
-                    "(Indexed8) — treat as a miss and rebuild.");
+                    $"(Indexed8)/{(int)ScrubProxyPixelFormat.IndexedDelta7} (IndexedDelta7) — treat as a miss " +
+                    "and rebuild.");
 
             if (compressionSchemeRaw != (int)ScrubProxyCompressionScheme.None &&
                 compressionSchemeRaw != (int)ScrubProxyCompressionScheme.Rle)
