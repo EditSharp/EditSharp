@@ -156,15 +156,21 @@ namespace EditSharp
         /// 720p30fps at a reasonable size while keeping fully frame-
         /// independent seeking. IndexedDelta7's V6 shared/global palette
         /// (see ScrubProxyFormat's own remarks) is one lever toward that
-        /// target; a GPU-accelerated IndexedDelta7 BUILD path (see
-        /// ScrubProxyGpuEncoder) is meant to make raising this toward 720p
-        /// affordable on the one-time build side too. Left at its
-        /// original default here rather than changed as part of any one
-        /// format/scheme's own introduction — nothing about either's own
-        /// correctness depends on a particular target short side, so
-        /// raising this is a separate, purely-quality-vs-size tuning
-        /// decision for later, not bundled into any one of those changes
-        /// itself.
+        /// target. A GPU-accelerated IndexedDelta7 BUILD path was also
+        /// tried as a second lever (ScrubProxyGpuEncoder) but was measured
+        /// to be dramatically slower than the plain CPU encode at typical
+        /// proxy resolutions, and produced incorrect output besides — it
+        /// was reverted entirely (see ScrubProxyCache's own class remarks).
+        /// IndexedDelta7 is understood as this cache's deliberately low-
+        /// resolution/low-power-device option now (trading encode speed
+        /// and build-time CPU cost for on-disk size), not something this
+        /// cache accelerates with hardware — so raising this value trades
+        /// straightforwardly against CPU-only build time, with no GPU
+        /// lever in play. Left at its original default here rather than
+        /// changed as part of any one format/scheme's own introduction —
+        /// nothing about either's own correctness depends on a particular
+        /// target short side, so raising this is a separate, purely-
+        /// quality-vs-size tuning decision for later.
         /// </summary>
         public static int ScrubProxyTargetShortSide
         {
@@ -270,7 +276,18 @@ namespace EditSharp
         ///     best-performing combination this cache builds — the
         ///     earlier Indexed8 format it replaced as the default was
         ///     removed entirely (decided in conversation: unnecessary
-        ///     complexity once IndexedDelta7 proved better).
+        ///     complexity once IndexedDelta7 proved better). NOW
+        ///     UNDERSTOOD AS A LOW-RESOLUTION/LOW-POWER-DEVICE OPTION,
+        ///     ENCODED CPU-ONLY (decided in conversation, after a GPU
+        ///     encode attempt — ScrubProxyGpuEncoder — was measured to be
+        ///     dramatically slower than the CPU path and produced visibly
+        ///     wrong output; that attempt was reverted entirely — see
+        ///     ScrubProxyCache's own class remarks): it trades encode
+        ///     speed and build-time CPU cost against Rgba8888 for a
+        ///     smaller on-disk footprint, which is exactly the right
+        ///     trade for a lower-end device building proxies at a smaller
+        ///     target resolution, not a format this cache tries to
+        ///     accelerate with hardware.
         ///
         ///     V6 FORMAT CHANGE, DECIDED IN CONVERSATION: IndexedDelta7 now
         ///     stores exactly ONE palette for the whole file (built from a
@@ -279,18 +296,20 @@ namespace EditSharp
         ///     BuildGlobalDelta7Palette), rather than a fresh palette per
         ///     frame — a further size lever toward the user's stated ideal
         ///     target of 720p30fps at a reasonable size with fully
-        ///     frame-independent seeking, pursued alongside a GPU-
-        ///     accelerated build/encode path (see ScrubProxyGpuEncoder)
-        ///     rather than instead of it. This bumped
+        ///     frame-independent seeking. This bumped
         ///     ScrubProxyFormat.CurrentVersion 5 -> 6 and the
         ///     fixed header from 40 to 44 bytes — any pre-V6 cached file is
         ///     treated as a cache miss and rebuilt, same as every earlier
         ///     format-version bump. NOTED FOR LATER, NOT YET PURSUED
         ///     alongside this: re-tuning the delta bit-split/color-space
         ///     weighting (IndexedDelta7Codec's RStep/GStep/BStep
-        ///     constants), and a larger/alternate palette+delta format
-        ///     variant — both raised as further size/quality levers and
-        ///     deliberately deferred in favor of the shared palette.
+        ///     constants), a larger/alternate palette+delta format
+        ///     variant, and a genuinely GPU-friendly proxy-encode
+        ///     accelerator (a small per-tile learned autoencoder was
+        ///     discussed as a promising direction, since it has no
+        ///     cross-tile sequential dependency, unlike the reverted
+        ///     shader approach) — all raised as further size/speed levers
+        ///     and deliberately deferred, none of them wired in here yet.
         ///
         /// ONLY AFFECTS NEW BUILDS — same non-retroactive contract as
         /// ScrubProxyCompressionScheme immediately above: an existing
