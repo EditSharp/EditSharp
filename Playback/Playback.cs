@@ -9,9 +9,15 @@ using System.Threading;
 using System.Threading.Tasks;
 using EditSharp;
 using EditSharp.Components;
+using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
-using EditSharp.Components.Nodes.Sources.Video;
-using EditSharp.Composite;
+using EditSharp.Components.Nodes.Sources;
+using EditSharp.Caching.ScrubProxy;
+using EditSharp.Compositing;
+using EditSharp.Compositing.Gpu;
+using EditSharp.Compositing.Sources;
+using EditSharp.Rendering;
+using EditSharp.Video;
 
 namespace EditSharp.Playback
 {
@@ -19,14 +25,14 @@ namespace EditSharp.Playback
     /// Audio-based playback for timelines.
     ///
     /// Built directly on top of Renderer's Skia compositor primitives
-    /// (RenderContentPreparation, SkClipContentSource, SkFrameCompositor,
-    /// GpuContext, SkSurfacePool) rather than re-deriving them.
+    /// (ContentPreparation, ClipContentSource, FrameCompositor,
+    /// GpuContext, SurfacePool) rather than re-deriving them.
     ///
-    /// "CLIPS ARE GRAPHS" REWRITE: RenderContentPreparation's
+    /// "CLIPS ARE GRAPHS" REWRITE: ContentPreparation's
     /// nativeSizes/decodePlans/decodeSourcePaths dictionaries are now keyed
     /// by InputNode Id (Guid), not by Clip — a VideoClip's graph can contain
     /// more than one VideoSourceNode; staticImagePaths is gone entirely (text
-    /// rasterization moved into SkClipContentSource itself). The two
+    /// rasterization moved into ClipContentSource itself). The two
     /// pattern-match sites that used to match `VideoClip { Source.Type:
     /// SourceType.Video }` directly (AllVideoClipsRedirectedToCache,
     /// ComputeSeekOffsets) now walk each VideoClip's own graph for its
@@ -38,12 +44,12 @@ namespace EditSharp.Playback
     /// ComputeSeekOffsets walk timeline.VideoChannels directly now, rather
     /// than timeline.Channels filtered by `is not VideoClip` — Timeline keeps
     /// VideoChannel and AudioChannel as two separate lists (see Timeline.cs's
-    /// own remarks). The two SkSurfacePool seedCount call sites below
+    /// own remarks). The two SurfacePool seedCount call sites below
     /// (VideoLoopAsync, ReverseVideoLoopAsync) now seed off
     /// Timeline.VideoChannels.Count specifically rather than the old mixed
     /// Timeline.Channels.Count — an AudioChannel never needs a GPU-backed
     /// canvas surface, so counting it toward the warm-start heuristic never
-    /// bought anything (see SkSurfacePool's own remarks: this is a warm-start
+    /// bought anything (see SurfacePool's own remarks: this is a warm-start
     /// guess, not a hard cap, so this is a correctness/clarity fix, not a
     /// behavior-changing one).
     ///
@@ -90,7 +96,7 @@ namespace EditSharp.Playback
     /// ReverseVideoLoopAsync is always the sole leader of its own session.
     ///
     /// PAUSE VS STOP (PlaybackPauseGate): genuinely different operations. A
-    /// paused session's GpuContext/SkSurfacePool/decoders stay fully alive
+    /// paused session's GpuContext/SurfacePool/decoders stay fully alive
     /// (see EAGER RELEASE ON PAUSE, REVERTED below) — pausing is meant to
     /// be, and is, an essentially free, instantly-resumable operation
     /// UNLESS a scrub actually moved the position during that pause — see
@@ -164,7 +170,7 @@ namespace EditSharp.Playback
     ///
     /// WHY NO ffmpeg PROCESS EVER RUNS DURING A SCRUB/REVERSE TICK, AND WHY
     /// THAT MATTERS BEYOND SPEED: it also means the persistent GPU decoder
-    /// backing REAL forward playback (SkSourceDecoder.Start/NextFrame, and
+    /// backing REAL forward playback (SourceDecoder.Start/NextFrame, and
     /// its GpuContext) is never touched, paused, or contended for while a
     /// scrub/reverse session is active — it can stay warm and simply resume
     /// smoothly the moment scrubbing ends, since nothing about scrubbing
@@ -341,7 +347,7 @@ namespace EditSharp.Playback
     /// a text node that fails to rasterize. See ScrubFrameSource's own
     /// class remarks, MEDIA-OFFLINE PLACEHOLDER, for the full per-case
     /// behavior. DELIBERATELY SCOPED TO SCRUB/REVERSE ONLY, NOT
-    /// SkClipContentSource, per direct user decision — forward Playback and
+    /// ClipContentSource, per direct user decision — forward Playback and
     /// Render/* keep throwing on broken/missing media; silently masking
     /// that in a real export or live playback could hide a real problem,
     /// whereas scrub/reverse is already an approximate preview by nature
@@ -370,10 +376,10 @@ namespace EditSharp.Playback
     /// Pause()/Stop(), not a playback rate) — only that one case still
     /// throws from Play(); any negative Speed is now a normal input.
     ///
-    /// OPTIMIZED-MEDIA CACHE (OptimizedMediaCache, EditSharp.Composite): a
+    /// OPTIMIZED-MEDIA CACHE (OptimizedMediaCache, EditSharp.Caching): a
     /// video clip's decoder in the FORWARD playback path may open against a
     /// persistent, content-addressed proxy instead of the clip's true
-    /// original source file, whenever RenderContentPreparation.
+    /// original source file, whenever ContentPreparation.
     /// ProbeVideoAsync finds one already built and big enough. Scrubbing and
     /// reverse playback consult a COMPLETELY SEPARATE cache
     /// (ScrubProxyCache) instead — see the section above.
@@ -401,14 +407,14 @@ namespace EditSharp.Playback
     /// scrubbing while paused stood up a scrub session's own GpuContext
     /// alongside a paused forward-playback session's still-alive one (two
     /// live GPU contexts at once). A first fix had each loop eagerly
-    /// dispose its own GpuContext/SkSurfacePool/decoders the moment it
+    /// dispose its own GpuContext/SurfacePool/decoders the moment it
     /// noticed `pauseGate.IsPaused`, reacquiring only once actually
     /// resumed. That did NOT resolve the freezes still being reported, and
     /// it cost real playback smoothness — resuming from a pause stopped
     /// being free (it paid roughly a fresh Play()-setup cost every time),
     /// which the user explicitly called out as not worth it. REVERTED per
     /// direct instruction: VideoLoopAsync/ReverseVideoLoopAsync are back to
-    /// a single GpuContext/SkSurfacePool/decoder set for the WHOLE forward-
+    /// a single GpuContext/SurfacePool/decoder set for the WHOLE forward-
     /// playback or reverse session, created once and torn down only at
     /// Stop()/natural end — pausing is, again, a cheap, instantly-resumable
     /// no-op for these resources UNLESS a scrub actually moved the position
@@ -416,7 +422,7 @@ namespace EditSharp.Playback
     /// RESUME below — that is a NEW, separate, narrowly-scoped mechanism,
     /// not a reintroduction of this reverted one: it only pays a restart
     /// cost when the position genuinely changed, never on every pause).
-    /// SkSourceDecoder.Dispose()'s own WaitForExit-after-Kill fix (see that
+    /// SourceDecoder.Dispose()'s own WaitForExit-after-Kill fix (see that
     /// class's own remarks) is UNRELATED and STAYS — it's a real
     /// correctness fix regardless of when/whether a decoder gets disposed.
     ///
@@ -472,8 +478,8 @@ namespace EditSharp.Playback
     /// SynchronizationContext's own queue or by the plain ThreadPool, the
     /// specific thread it actually runs on from one await to the next is
     /// not guaranteed to be the same one. That means every GPU-touching
-    /// call this file makes (GpuContext.Create, SkSurfacePool's
-    /// Rent/CreateSurface, SkFrameCompositor.RenderFrame, GpuContext.Dispose)
+    /// call this file makes (GpuContext.Create, SurfacePool's
+    /// Rent/CreateSurface, FrameCompositor.RenderFrame, GpuContext.Dispose)
     /// could land on a different thread than the call before/after it,
     /// purely as an artifact of scheduling — true from the very first
     /// version of the scrub rewrite, independent of every fix tried above.
@@ -488,13 +494,13 @@ namespace EditSharp.Playback
     /// succeeded, later calls in the same process keep landing on threads
     /// already warmed up for this workload, which is why it then "stays
     /// fixed"). FIX: GpuThreadDispatcher (Composite/GpuThreadDispatcher.cs)
-    /// confines every GPU-touching call for a given GpuContext/SkSurfacePool
+    /// confines every GPU-touching call for a given GpuContext/SurfacePool
     /// pair to ONE dedicated background thread, for as long as that pair is
     /// alive — used for the scrub GPU context/pool (`_scrubGpuThread`,
     /// persistent — see SCRUB GPU CONTEXT IS NOW PERSISTENT below) and for a
     /// session-scoped dispatcher inside both VideoLoopAsync and
     /// ReverseVideoLoopAsync (created and disposed alongside that session's
-    /// own GpuContext/SkSurfacePool). Every PrefetchAsync/RenderFrame/
+    /// own GpuContext/SurfacePool). Every PrefetchAsync/RenderFrame/
     /// Create/Dispose call for a given context now happens on that context's
     /// own single thread, every time, structurally — not by hoping the
     /// scheduler behaves favorably. CONFIRMED ON REAL HARDWARE — the
@@ -519,7 +525,7 @@ namespace EditSharp.Playback
     /// Resolution/Framerate stay constant for this Playback instance's
     /// whole life — true for how this class is actually constructed today
     /// (see EditSharp's own usage), but flagged here since a persisted
-    /// SkSurfacePool sized for the FIRST scrub session's width/height would
+    /// SurfacePool sized for the FIRST scrub session's width/height would
     /// silently be wrong for a later session at a different resolution;
     /// revisit if RenderSettings ever needs to change on a live instance.
     ///
@@ -538,8 +544,8 @@ namespace EditSharp.Playback
     /// SCRUB DURING PAUSE FORCES A REAL SEEK ON RESUME (root cause of two
     /// reported bugs, both fixed): previously, a scrub taken while paused
     /// updated `_referenceClock`/Position (see directly above) but NOTHING
-    /// ELSE — the video loop's persistent decode pipe (SkClipContentSource/
-    /// SkSourceDecoder, which can only move FORWARD) and the audio engine's
+    /// ELSE — the video loop's persistent decode pipe (ClipContentSource/
+    /// SourceDecoder, which can only move FORWARD) and the audio engine's
     /// own byte-offset pump both kept whatever position they were at before
     /// the pause, completely unaware a scrub had ever happened. A plain
     /// Play() resume just released the pause gate and resumed the wall
@@ -816,7 +822,7 @@ namespace EditSharp.Playback
         // remarks, GPU WORK MUST STAY ON ONE THREAD.
         private GpuThreadDispatcher? _scrubGpuThread;
         private GpuContext? _scrubGpuContext;
-        private SkSurfacePool? _scrubSurfacePool;
+        private SurfacePool? _scrubSurfacePool;
 
         // Rebuilt every scrub session (EndScrubbing -> next
         // BuildScrubSessionAsync) — plain file handles/dictionaries, no GPU
@@ -1194,7 +1200,7 @@ namespace EditSharp.Playback
         /// EVERY GPU-TOUCHING STEP — including PrefetchAsync, which for
         /// generator/noise/nested-timeline nodes rents/creates surfaces
         /// through `pool` and therefore through its backing GRContext, not
-        /// just SkFrameCompositor.RenderFrame itself — runs as ONE unit of
+        /// just FrameCompositor.RenderFrame itself — runs as ONE unit of
         /// work on `gpuThread`, the dedicated thread that owns `pool`'s
         /// GpuContext. See class remarks, GPU WORK MUST STAY ON ONE
         /// THREAD. PrefetchAsync is blocked on synchronously
@@ -1208,7 +1214,7 @@ namespace EditSharp.Playback
         /// itself.
         /// </summary>
         private Task<(byte[] Buffer, int Length)> ComposeInstantFrameAsync(
-            ScrubFrameSource contentSource, SkSurfacePool pool, GpuThreadDispatcher gpuThread,
+            ScrubFrameSource contentSource, SurfacePool pool, GpuThreadDispatcher gpuThread,
             TimeSpan position, int width, int height, int fps, CancellationToken ct = default)
         {
             int frameIndex = (int)(position.TotalSeconds * fps);
@@ -1228,7 +1234,7 @@ namespace EditSharp.Playback
                     }
                 }
 
-                (byte[] buffer, int length) = SkFrameCompositor.RenderFrame(
+                (byte[] buffer, int length) = FrameCompositor.RenderFrame(
                     state, contentSource, width, height, fps, pool);
 
                 contentSource.ClearPrefetch();
@@ -1254,7 +1260,7 @@ namespace EditSharp.Playback
         /// creates `_scrubGpuThread`/`_scrubGpuContext`/`_scrubSurfacePool`
         /// AT MOST ONCE for this Playback instance's whole life — see class
         /// remarks, SCRUB GPU CONTEXT IS NOW PERSISTENT. GpuContext.Create
-        /// and the SkSurfacePool constructor both run on `_scrubGpuThread`
+        /// and the SurfacePool constructor both run on `_scrubGpuThread`
         /// itself (see class remarks, GPU WORK MUST STAY ON ONE THREAD), so
         /// this method's own await here is what actually makes that
         /// thread-confinement possible.
@@ -1281,11 +1287,11 @@ namespace EditSharp.Playback
             {
                 _scrubGpuThread ??= new GpuThreadDispatcher("EditSharp-ScrubGPU");
 
-                (GpuContext context, SkSurfacePool pool) = await _scrubGpuThread.RunAsync(() =>
+                (GpuContext context, SurfacePool pool) = await _scrubGpuThread.RunAsync(() =>
                 {
                     GpuContext ctx = GpuContext.Create(
                         RenderSettings.HardwareAccelerator, RenderSettings.GpuAdapterIndex);
-                    var surfacePool = new SkSurfacePool(ctx.GRContext, width, height, Timeline.VideoChannels.Count);
+                    var surfacePool = new SurfacePool(ctx.GRContext, width, height, Timeline.VideoChannels.Count);
                     return (ctx, surfacePool);
                 });
 
@@ -1339,7 +1345,7 @@ namespace EditSharp.Playback
         /// BUILD PER DISTINCT SOURCE PATH, NOT PER NODE — as an independent
         /// background task each (see KickOffProxyResolution) and returns
         /// IMMEDIATELY, without waiting for any of them. Deliberately NOT
-        /// RenderContentPreparation.PrepareContentAsync, which probes
+        /// ContentPreparation.PrepareContentAsync, which probes
         /// native size/decode plan and consults OptimizedMediaCache — none
         /// of that applies here at all any more; this only ever needs each
         /// source's already-resolved-or-built ScrubProxyEntry.
@@ -1431,7 +1437,7 @@ namespace EditSharp.Playback
 
         /// <summary>
         /// BUG FOUND IN THE FIELD (fixed here): setup (PrepareContentAsync,
-        /// GpuContext.Create, SkSurfacePool construction, the warm-up
+        /// GpuContext.Create, SurfacePool construction, the warm-up
         /// render) used to run with no surrounding try/catch of its own —
         /// any exception there propagated straight out of this Task.Run'd
         /// method without ever calling `startGate.Fault(...)`. When audio
@@ -1443,7 +1449,7 @@ namespace EditSharp.Playback
         /// the whole loop and calling Fault() on any failure that isn't an
         /// expected OperationCanceledException from Stop()/Dispose().
         ///
-        /// GpuContext/SkSurfacePool/decoders (contentSource) are `using`-
+        /// GpuContext/SurfacePool/decoders (contentSource) are `using`-
         /// scoped for the WHOLE session here, created once and torn down
         /// only when this method returns (Stop()/natural end/fault) — a
         /// pause is a cheap, instantly-resumable no-op for these resources.
@@ -1461,7 +1467,7 @@ namespace EditSharp.Playback
         /// resume on a different thread each time just like ScrubToAsync's
         /// could, since nothing about that scheduling is pinned to one
         /// thread by default — so without this, every per-frame
-        /// SkFrameCompositor.RenderFrame call here carried the same
+        /// FrameCompositor.RenderFrame call here carried the same
         /// cross-thread GRContext hazard scrubbing did.
         /// </summary>
         private async Task VideoLoopAsync(
@@ -1481,24 +1487,24 @@ namespace EditSharp.Playback
             {
                 try
                 {
-                    await RenderContentPreparation.PrepareContentAsync(
+                    await ContentPreparation.PrepareContentAsync(
                         Timeline, width, height, RenderSettings.HardwareAccelerator,
                         nativeSizes, decodePlans, decodeSourcePaths);
 
                     Dictionary<Clip, TimeSpan> seekOffsets = ComputeSeekOffsets(Timeline, startPosition);
 
                     Dictionary<int, List<Clip>> decoderReleaseSchedule =
-                        RenderContentPreparation.BuildDecoderReleaseSchedule(Timeline, fps);
+                        ContentPreparation.BuildDecoderReleaseSchedule(Timeline, fps);
 
-                    using var contentSource = new SkClipContentSource(
+                    using var contentSource = new ClipContentSource(
                         fps, RenderSettings.HardwareAccelerator, nativeSizes, decodePlans, seekOffsets, decodeSourcePaths);
 
                     using var videoGpuThread = new GpuThreadDispatcher("EditSharp-VideoGPU");
 
                     GpuContext gpuContext = await videoGpuThread.RunAsync(() =>
                         GpuContext.Create(RenderSettings.HardwareAccelerator, RenderSettings.GpuAdapterIndex));
-                    SkSurfacePool surfacePool = await videoGpuThread.RunAsync(() =>
-                        new SkSurfacePool(gpuContext.GRContext, width, height, Timeline.VideoChannels.Count));
+                    SurfacePool surfacePool = await videoGpuThread.RunAsync(() =>
+                        new SurfacePool(gpuContext.GRContext, width, height, Timeline.VideoChannels.Count));
 
                     try
                     {
@@ -1507,7 +1513,7 @@ namespace EditSharp.Playback
 
                         FrameState warmupState = FrameStateResolver.Resolve(Timeline, startFrame, fps);
                         (byte[] warmupBuffer, int warmupLength) = await videoGpuThread.RunAsync(() =>
-                            SkFrameCompositor.RenderFrame(warmupState, contentSource, width, height, fps, surfacePool));
+                            FrameCompositor.RenderFrame(warmupState, contentSource, width, height, fps, surfacePool));
                         EditSharpConfig.Logger.LogVerbose("Video warm-up frame rendered.");
 
                         await startGate.ReadyAndWaitAsync(token);
@@ -1571,7 +1577,7 @@ namespace EditSharp.Playback
                             FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps);
 
                             (byte[] buffer, int length) = await videoGpuThread.RunAsync(() =>
-                                SkFrameCompositor.RenderFrame(state, contentSource, width, height, fps, surfacePool));
+                                FrameCompositor.RenderFrame(state, contentSource, width, height, fps, surfacePool));
 
                             if (!followsReferenceClock)
                             {
@@ -1645,7 +1651,7 @@ namespace EditSharp.Playback
         /// timeline, reusing the exact same instant, decoder-less raw scrub
         /// proxy read ScrubToAsync uses (ScrubFrameSource / ScrubProxyCache
         /// / ScrubProxyReader), NOT the persistent forward-only
-        /// SkSourceDecoder pipe VideoLoopAsync uses, which structurally
+        /// SourceDecoder pipe VideoLoopAsync uses, which structurally
         /// cannot move backward at all. See Playback's class remarks,
         /// SCRUB/REVERSE VIA RAW SCRUB PROXIES.
         ///
@@ -1680,12 +1686,12 @@ namespace EditSharp.Playback
         /// ScrubFrameSource's own remarks) without waiting on any source's
         /// build to finish first.
         ///
-        /// GpuContext/SkSurfacePool/contentSource are session-scoped here
+        /// GpuContext/SurfacePool/contentSource are session-scoped here
         /// too — same revert as VideoLoopAsync, see class remarks, EAGER
         /// RELEASE ON PAUSE, REVERTED. Uses its OWN session-scoped
         /// `reverseGpuThread` (NOT the persistent `_scrubGpuThread` scrub
         /// sessions use) — a reverse session already creates and tears down
-        /// its own GpuContext/SkSurfacePool every time it starts/stops
+        /// its own GpuContext/SurfacePool every time it starts/stops
         /// (unlike scrubbing, this wasn't changed to be persistent, since
         /// the user's request to preserve the GPU context was specifically
         /// about scrubbing), so a matching session-scoped dispatcher is the
@@ -1717,8 +1723,8 @@ namespace EditSharp.Playback
 
                     GpuContext gpuContext = await reverseGpuThread.RunAsync(() =>
                         GpuContext.Create(RenderSettings.HardwareAccelerator, RenderSettings.GpuAdapterIndex));
-                    SkSurfacePool surfacePool = await reverseGpuThread.RunAsync(() =>
-                        new SkSurfacePool(gpuContext.GRContext, width, height, Timeline.VideoChannels.Count));
+                    SurfacePool surfacePool = await reverseGpuThread.RunAsync(() =>
+                        new SurfacePool(gpuContext.GRContext, width, height, Timeline.VideoChannels.Count));
 
                     var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
 
@@ -1862,7 +1868,7 @@ namespace EditSharp.Playback
         /// additional offset (beyond the clip's own trim start) its
         /// decoder(s) need to open at. Still keyed by Clip, not by node — a
         /// clip's media inputs all start that same amount further in,
-        /// regardless of how many it has (see SkClipContentSource.GetOrOpenDecoder).
+        /// regardless of how many it has (see ClipContentSource.GetOrOpenDecoder).
         /// </summary>
         private static Dictionary<Clip, TimeSpan> ComputeSeekOffsets(Timeline timeline, TimeSpan position)
         {
@@ -1887,7 +1893,7 @@ namespace EditSharp.Playback
         /// Tears down EVERYTHING, including the persistent scrub GPU
         /// resources EndScrubbing() deliberately leaves alone — see class
         /// remarks, SCRUB GPU CONTEXT IS NOW PERSISTENT. The final
-        /// GpuContext/SkSurfacePool disposal still runs on
+        /// GpuContext/SurfacePool disposal still runs on
         /// `_scrubGpuThread` itself (consistent with every other GPU call
         /// in this file — see GPU WORK MUST STAY ON ONE THREAD), blocked on
         /// synchronously since Dispose() is conventionally synchronous;

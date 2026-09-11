@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using EditSharp.Components;
+using EditSharp.Components.Channels;
 using EditSharp.Components.Nodes;
  
 namespace EditSharp.Components.Nodes.Effects

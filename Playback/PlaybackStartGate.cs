@@ -11,8 +11,8 @@ namespace EditSharp.Playback
     ///
     /// THIS IS THE FIX for the video/audio desync bug from the first full
     /// playback test. The actual mechanism: video's setup
-    /// (RenderContentPreparation — MediaProbe + FfmpegRunner
-    /// .GetDecodePlanAsync per video clip, plus GpuContext/SkSurfacePool
+    /// (ContentPreparation — MediaProbe + FfmpegRunner
+    /// .GetDecodePlanAsync per video clip, plus GpuContext/SurfacePool
     /// construction) is genuinely heavier than audio's setup (build one
     /// filter graph, spawn one ffmpeg process). Without this gate, that
     /// asymmetry means the two loops' own Stopwatch.StartNew() calls fire

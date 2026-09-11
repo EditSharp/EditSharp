@@ -1,7 +1,7 @@
 using System;
 using SkiaSharp;
 using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources.Video;
+using EditSharp.Components.Nodes.Sources;
 using EditSharp.Components; // Source, FontFace
  
 namespace EditSharp.Components.Clips
@@ -13,7 +13,7 @@ namespace EditSharp.Components.Clips
     /// VideoClip's own flat Source property are now all just different
     /// InputNode types wired into this class's single Image-domain
     /// Graph — see the static factory methods below and
-    /// EditSharp.Components.Nodes.Sources.Video.
+    /// EditSharp.Components.Nodes.Sources.
     ///
     /// Sealed and otherwise data-less beyond Start/Duration/LinkGroupId
     /// (inherited from Clip) and Graph — everything else a visual clip

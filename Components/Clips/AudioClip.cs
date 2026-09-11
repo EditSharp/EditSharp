@@ -1,6 +1,6 @@
 using System;
 using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources.Audio;
+using EditSharp.Components.Nodes.Sources;
 using EditSharp.Components; // Source
  
 namespace EditSharp.Components.Clips
@@ -11,7 +11,7 @@ namespace EditSharp.Components.Clips
     /// and the distinct TimelineAudioClip Clip subtype are now InputNode
     /// types wired into this class's single Audio-domain Graph — see
     /// the static factory methods below and
-    /// EditSharp.Components.Nodes.Sources.Audio. Also new
+    /// EditSharp.Components.Nodes.Sources. Also new
     /// in this rewrite: CreateTone, wrapping the brand-new
     /// ToneGeneratorInputNode (there was no synthesized-tone clip type at
     /// all before this).

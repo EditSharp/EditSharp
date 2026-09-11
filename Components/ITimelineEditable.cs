@@ -1,4 +1,5 @@
 using System;
+using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
  
 namespace EditSharp.Components

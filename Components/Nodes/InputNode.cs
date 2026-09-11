@@ -10,7 +10,7 @@ namespace EditSharp.Components.Nodes
     /// OutputNode to render anything, but that's not tracked as a separate
     /// structural invariant here — it falls out naturally from the exact
     /// same "Output has no incoming connection" check every evaluator
-    /// already performs (see EffectGraphEvaluatorSk/AudioEffectGraphEvaluator),
+    /// already performs (see ImageGraphEvaluator/AudioGraphEvaluator),
     /// the same way it always has for a disconnected Output. This is also
     /// what makes a MULTI-input graph (two media sources merged via
     /// MergeNode/AudioMixNode, say) nothing special: it's just a graph
@@ -19,9 +19,9 @@ namespace EditSharp.Components.Nodes
     ///
     /// Concrete video-domain InputNodes: VideoSourceNode, TextInputNode,
     /// ColorGeneratorInputNode, NoiseInputNode, TimelineVideoInputNode (see
-    /// EditSharp.Components.Nodes.Sources.Video). Concrete audio-domain
+    /// EditSharp.Components.Nodes.Sources). Concrete audio-domain
     /// InputNodes: AudioSourceNode, ToneGeneratorInputNode,
-    /// TimelineAudioInputNode (see EditSharp.Components.Nodes.Sources.Audio).
+    /// TimelineAudioInputNode (see EditSharp.Components.Nodes.Sources).
     /// These are what replaced the old VideoClip.Source-is-the-whole-clip /
     /// TextClip / GeneratorClip / NoiseClip / TimelineVideoClip /
     /// TimelineAudioClip Clip subtypes — the ONLY remaining concrete Clip

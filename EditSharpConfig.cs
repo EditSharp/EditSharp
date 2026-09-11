@@ -1,5 +1,6 @@
 using System;
-using EditSharp.Composite;
+using EditSharp.Caching.ScrubProxy;
+using EditSharp.Video;
 
 namespace EditSharp
 {
@@ -101,7 +102,7 @@ namespace EditSharp
         /// full reasoning, including what happens when a clip actually
         /// needs MORE resolution than this cap provides (falls back to the
         /// true original source rather than upscaling from the proxy — see
-        /// RenderContentPreparation.ProbeVideoAsync).
+        /// ContentPreparation.ProbeVideoAsync).
         /// </summary>
         public static int OptimizedMediaMaxDimension
         {
@@ -388,7 +389,7 @@ namespace EditSharp
         /// (ClipVideoChain.Build always calls ApplyTransform, identity
         /// transform or not), `scale` several times including the
         /// MaskSupersample up/down pair, and the accumulator's own starting
-        /// frame (GraphUtilities.BuildTransparentBlank) is built fresh on
+        /// frame (FfmpegArgs.BuildTransparentBlank) is built fresh on
         /// every single render regardless of blueprint — all filters
         /// libavfilter is free to slice across threads. Worth knowing for
         /// anyone revisiting this: ffmpeg 8.0 (this project's target) ships a
@@ -408,7 +409,7 @@ namespace EditSharp
         /// left inconsistent between the two runs, not a cost of the pin
         /// itself. Re-measured at matched concurrency, the global pin's actual
         /// cost was negligible on this blueprint and every other one tested.
-        /// The per-filter mechanism (GraphUtilities.ThreadPin and a `threads=1`
+        /// The per-filter mechanism (FfmpegArgs.ThreadPin and a `threads=1`
         /// suffix threaded through every filter emission in ClipVideoChain and
         /// FrameFilterChain) was real code paid for under a false premise, so
         /// it was removed rather than kept "just in case" — simplicity won

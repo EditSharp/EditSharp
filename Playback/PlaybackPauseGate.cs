@@ -6,8 +6,8 @@ namespace EditSharp.Playback
 {
     /// <summary>
     /// Lets Pause()/Resume() halt the video and audio loops IN PLACE —
-    /// without cancelling them, so nothing they own (SkSourceDecoder
-    /// instances, the GpuContext/SkSurfacePool, PlaybackAudioEngine's
+    /// without cancelling them, so nothing they own (SourceDecoder
+    /// instances, the GpuContext/SurfacePool, PlaybackAudioEngine's
     /// ffmpeg process) gets torn down the way Stop() tears it down. See
     /// Playback's own remarks on why Pause and Stop are deliberately
     /// different operations.
@@ -19,7 +19,7 @@ namespace EditSharp.Playback
     /// ffmpeg process's stdout pipe while paused means the OS pipe buffer
     /// fills and ffmpeg's own writes BLOCK — its decode pipeline
     /// self-throttles to a stop with zero signaling needed from us, the
-    /// same backpressure SkSourceDecoder already relies on for ordinary
+    /// same backpressure SourceDecoder already relies on for ordinary
     /// pacing.
     ///
     /// Unlike PlaybackStartGate (fires exactly once, permanently open

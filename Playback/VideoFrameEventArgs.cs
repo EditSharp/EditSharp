@@ -3,7 +3,7 @@ using System;
 namespace EditSharp.Playback
 {
     /// <summary>
-    /// One rendered output frame, raw RGBA8888 (SkOutputFormat), straight
+    /// One rendered output frame, raw RGBA8888 (OutputFormat), straight
     /// alpha, no row padding — the exact same byte layout Renderer's
     /// accumulator writes.
     ///
