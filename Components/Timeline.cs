@@ -140,6 +140,46 @@ namespace EditSharp.Components
         }
 
         // ---------------------------------------------------------------
+        // Channel index / reordering — Channel.Index/MoveUp/MoveDown (see
+        // Channel.cs) are the normal way callers reach these; both dispatch
+        // on the channel's own kind exactly like AddChannel/RemoveChannel
+        // above, since VideoChannels and AudioChannels are separate lists.
+        // Reordering only ever swaps two EXISTING channels — unlike
+        // ResolveChannelDeltaCore below, it never creates a new one, since
+        // there's no "past the top" here: moving the topmost channel up,
+        // or the bottommost down, is simply a no-op.
+        // ---------------------------------------------------------------
+
+        internal int IndexOf(Channel channel) => channel switch
+        {
+            VideoChannel video => _videoChannels.IndexOf(video),
+            AudioChannel audio => _audioChannels.IndexOf(audio),
+            _ => throw new NotSupportedException($"Unknown channel type {channel.GetType().Name}."),
+        };
+
+        internal void SwapChannel(Channel channel, int direction)
+        {
+            switch (channel)
+            {
+                case VideoChannel video: SwapChannelCore(_videoChannels, video, direction); break;
+                case AudioChannel audio: SwapChannelCore(_audioChannels, audio, direction); break;
+                default: throw new NotSupportedException($"Unknown channel type {channel.GetType().Name}.");
+            }
+        }
+
+        private static void SwapChannelCore<T>(List<T> list, T channel, int direction) where T : Channel
+        {
+            int index = list.IndexOf(channel);
+            if (index < 0)
+                throw new InvalidOperationException("This channel does not belong to this timeline.");
+
+            int target = index + direction;
+            if (target < 0 || target >= list.Count) return; //already at that end — nothing to swap with
+
+            (list[index], list[target]) = (list[target], list[index]);
+        }
+
+        // ---------------------------------------------------------------
         // Channel-delta resolution — used by LinkGroup.MoveChannel/
         // RippleMoveChannel (see LinkGroup.cs) to answer \"what channel is
         // `delta` steps away from `current`, among channels of its own

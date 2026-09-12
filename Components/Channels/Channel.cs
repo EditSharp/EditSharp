@@ -37,6 +37,26 @@ namespace EditSharp.Components.Channels
  
         public Timeline? Timeline { get; internal set; }
  
+        /// <summary>
+        /// This channel's position among channels of its own kind — 0 is
+        /// the bottom layer, matching VideoChannels'/AudioChannels' own
+        /// index order (see Timeline's remarks on the video/audio split).
+        /// -1 if this channel isn't currently placed on any Timeline.
+        /// </summary>
+        public int Index => Timeline?.IndexOf(this) ?? -1;
+
+        /// <summary>
+        /// Swaps this channel with the one directly above it (higher index
+        /// — for VideoChannels that's the next layer drawn on top;
+        /// AudioChannels' order carries no acoustic meaning, only UI
+        /// listing order — see AudioMixer). No-op if this channel is
+        /// already the topmost of its kind, or isn't placed on a Timeline.
+        /// </summary>
+        public void MoveUp() => Timeline?.SwapChannel(this, +1);
+
+        /// <summary>Swaps this channel with the one directly below it. No-op at the bottom.</summary>
+        public void MoveDown() => Timeline?.SwapChannel(this, -1);
+ 
         public TimeSpan End => _clips.Count == 0 ? TimeSpan.Zero : _clips.Values.Max(c => c.End);
  
         protected internal abstract bool IsValidClipType(Clip clip);
