@@ -33,8 +33,10 @@ namespace EditSharp.Components
         }
     }
 
-    public class Keyframe<T>
+    public class Keyframe<T> : IKeyframe
     {
+        object? IKeyframe.Value => Value;
+
         //relative to the clip/track's own beginning — see the "Keyframe
         //anchoring under Trim" section of the schema doc for why Trim never
         //has to touch this

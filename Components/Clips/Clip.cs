@@ -2,7 +2,8 @@ using System;
 using System.Linq;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Nodes;
-using EditSharp.History;
+using EditSharp.History;
+
 using EditSharp.Editing;
  
 namespace EditSharp.Components.Clips
@@ -53,7 +54,7 @@ namespace EditSharp.Components.Clips
         /// on a retimed clip still lands on the right content.
         /// </summary>
         double _speed = 1d;
-        [Editable("Speed", Order = 3, Min = 0.01, Max = 100, Step = 0.01, Editor = PropertyEditor.Percent)]
+        [Editable("Speed", Order = 3, Min = 0.01, Max = 100, Step = 0.01, Editor = PropertyEditor.Percent, Default = 1.0)]
         public double Speed { get => _speed; set => Transaction.Set(this, ref _speed, value, static (o, v) => o._speed = v); }
 
         /// <summary>The span of content this clip covers — Duration scaled by Speed.</summary>

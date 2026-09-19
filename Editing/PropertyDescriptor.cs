@@ -151,6 +151,70 @@ namespace EditSharp.Editing
         public IAnimatable? GetAnimatable(object target)
             => IsAnimatable ? _property.GetValue(Holder(target)) as IAnimatable : null;
 
+        // ---------------------------------------------------------------
+        // Defaults
+        // ---------------------------------------------------------------
+
+        /// <summary>
+        /// The value a reset returns this property to on this object, if
+        /// there is one: the attribute's Default, else the value the same
+        /// property has on a freshly constructed object of the holder's
+        /// type. False when neither exists - an abstract holder with no
+        /// attribute default, say.
+        /// </summary>
+        public bool TryGetDefault(object target, out object? value)
+        {
+            if (Attribute.Default is not null)
+            {
+                value = Coerce(Attribute.Default, ValueType);
+                return true;
+            }
+
+            object holder = Holder(target);
+            object? prototype = Prototype.Of(holder.GetType());
+
+            if (prototype is null)
+            {
+                value = null;
+                return false;
+            }
+
+            object? raw = _property.GetValue(prototype);
+            value = IsAnimatable && raw is IAnimatable animatable ? animatable.GetStaticValue() : raw;
+            return true;
+        }
+
+        /// <summary>True when the property holds its default on this object.</summary>
+        public bool IsDefault(object target)
+            => TryGetDefault(target, out object? expected) && Equals(GetValue(target), expected);
+
+        /// <summary>
+        /// One untouched instance per type, made once and never edited,
+        /// for reading the values a type starts with. Null for types that
+        /// cannot be made bare.
+        /// </summary>
+        private static class Prototype
+        {
+            private static readonly ConcurrentDictionary<Type, object?> _cache = new();
+
+            public static object? Of(Type type) => _cache.GetOrAdd(type, Make);
+
+            private static object? Make(Type type)
+            {
+                if (type.IsAbstract || type.IsInterface) return null;
+
+                try
+                {
+                    using var _ = Transaction.Suppress();
+                    return Activator.CreateInstance(type, nonPublic: true);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+        }
+
         /// <summary>Whether the property applies right now, per its VisibleWhen conditions.</summary>
         public bool IsVisible(object target)
         {

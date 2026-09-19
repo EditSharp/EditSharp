@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using EditSharp.History;
  
 namespace EditSharp.Components
@@ -15,6 +17,16 @@ namespace EditSharp.Components
     /// a clip can reach every keyframe track it owns without knowing the
     /// value types — see Node.Animatables and Clip.OnHeadInPointShift.
     /// </summary>
+    /// <summary>
+    /// A keyframe seen without its value type - what an inspector's key
+    /// column or a thumbnail cache needs: when it is, and what it holds.
+    /// </summary>
+    public interface IKeyframe
+    {
+        TimeSpan Start { get; }
+        object? Value { get; }
+    }
+
     public interface IAnimatable
     {
         /// <summary>Moves every keyframe by `amount`. Keyframes are anchored to the content, so a head trim/extend shifts them all.</summary>
@@ -31,6 +43,28 @@ namespace EditSharp.Components
 
         /// <summary>Writes the static value from an untyped editor, coercing numbers and enums.</summary>
         void SetStaticValue(object? value);
+
+        /// <summary>
+        /// Every keyframe on this property, in time order; empty when it
+        /// has no track. Times are content-relative, like everything else
+        /// on a track.
+        /// </summary>
+        IReadOnlyList<IKeyframe> Keyframes { get; }
+
+        /// <summary>The value at a content time, keyframes or not.</summary>
+        object? Evaluate(TimeSpan clipRelativeTime);
+
+        /// <summary>
+        /// Adds a keyframe at the time, or updates the one already there.
+        /// Creates the track if there was none.
+        /// </summary>
+        void SetKeyframe(TimeSpan time, object? value);
+
+        /// <summary>Removes the keyframe at exactly this time, if any.</summary>
+        bool RemoveKeyframeAt(TimeSpan time);
+
+        /// <summary>Drops the track: no keyframes, the static value alone.</summary>
+        void ClearKeyframes();
     }
 
     public sealed class Animatable<T> : IAnimatable
@@ -92,6 +126,23 @@ namespace EditSharp.Components
         public object? GetStaticValue() => StaticValue;
 
         public void SetStaticValue(object? value) => StaticValue = (T)Editing.PropertyDescriptor.Coerce(value, typeof(T))!;
+
+        public IReadOnlyList<IKeyframe> Keyframes => Track?.Keyframes ?? (IReadOnlyList<IKeyframe>)Array.Empty<IKeyframe>();
+
+        object? IAnimatable.Evaluate(TimeSpan clipRelativeTime) => Evaluate(clipRelativeTime);
+
+        public void SetKeyframe(TimeSpan time, object? value)
+            => GetOrCreateTrack().AddKeyframe(time, (T)Editing.PropertyDescriptor.Coerce(value, typeof(T))!);
+
+        public void ClearKeyframes() => ClearTrack();
+
+        public bool RemoveKeyframeAt(TimeSpan time)
+        {
+            Keyframe<T>? keyframe = Track?.Keyframes.FirstOrDefault(k => k.Start == time);
+            if (keyframe is null) return false;
+            Track!.RemoveKeyframe(keyframe);
+            return true;
+        }
 
         /// <summary>
         /// Deep copy. The track copies itself so a subclass (PositionTrack)

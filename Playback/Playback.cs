@@ -18,6 +18,8 @@ using EditSharp.Compositing.Gpu;
 using EditSharp.Compositing.Sources;
 using EditSharp.Rendering;
 using EditSharp.Video;
+using System.Runtime.InteropServices;
+using SkiaSharp;
 
 namespace EditSharp.Playback
 {
@@ -715,6 +717,10 @@ namespace EditSharp.Playback
     ///      frame this file resolves is read on the CPU now, exactly as it
     ///      was before that detour — see ScrubFrameSource's own remarks.
     /// </summary>
+    /// <summary>One clip's frame from <see cref="Playback.RenderClipFrameAsync"/>: tightly packed RGBA8888.</summary>
+    /// <param name="Complete">False when some media in the clip had no proxy yet and rendered as the offline placeholder.</param>
+    public sealed record ClipFrame(byte[] Pixels, int Width, int Height, bool Complete);
+
     public class Playback : IDisposable
     {
         public required Timeline Timeline;
@@ -828,6 +834,7 @@ namespace EditSharp.Playback
         // BuildScrubSessionAsync) — plain file handles/dictionaries, no GPU
         // resources, so there's no reason to make these persistent too.
         private ConcurrentDictionary<Guid, ScrubProxyEntry>? _scrubProxies;
+        private HashSet<Guid>? _scrubProxyRequested;
         private ScrubFrameSource? _scrubContentSource;
 
         // Memoized one-time scrub-session setup — see class remarks, SCRUB
@@ -1304,8 +1311,146 @@ namespace EditSharp.Playback
             KickOffScrubProxyResolution(Timeline, RenderSettings.HardwareAccelerator, proxies);
 
             _scrubProxies = proxies;
+            _scrubProxyRequested = new HashSet<Guid>(
+                Timeline.VideoChannels.SelectMany(c => c.Clips).OfType<VideoClip>()
+                    .SelectMany(v => v.Graph.AllNodes.OfType<VideoSourceNode>())
+                    .Where(m => m.Source.Type == SourceType.Video)
+                    .Select(m => m.Id));
             _scrubContentSource = new ScrubFrameSource(
                 RenderSettings.Framerate, RenderSettings.HardwareAccelerator, proxies);
+        }
+
+        /// <summary>
+        /// One frame of one clip, rendered on its own - the clip's whole
+        /// graph, at a content time, onto a canvas of the given size - and
+        /// handed back as tightly packed RGBA8888 pixels. This is what a
+        /// thumbnail is: the clip as it would look, not its source.
+        /// </summary>
+        /// <remarks>
+        /// Runs on the scrub session, and so shares its GPU context, surface
+        /// pool, proxy readers and proxies with ScrubToAsync; the scrub gate
+        /// serialises the two. The canvas can be any size - transforms are
+        /// canvas-relative, so a small canvas is the same picture, smaller -
+        /// and every size gets its own surfaces in the pool.
+        ///
+        /// A clip whose media proxy is not built yet renders with the
+        /// offline placeholder and <see cref="ClipFrame.Complete"/> false,
+        /// and starts the proxy build if nothing has; <see cref="ScrubProxyReady"/>
+        /// says when to ask again. Content time is clamped at zero.
+        /// </remarks>
+        public async Task<ClipFrame> RenderClipFrameAsync(
+            VideoClip clip, TimeSpan contentTime, int width, int height, CancellationToken ct = default)
+        {
+            ArgumentNullException.ThrowIfNull(clip);
+            if (width <= 0 || height <= 0)
+                throw new ArgumentOutOfRangeException(nameof(width), "width and height must both be positive.");
+
+            int canvasWidth = (int)RenderSettings.Resolution.X;
+            int canvasHeight = (int)RenderSettings.Resolution.Y;
+            int fps = RenderSettings.Framerate;
+            double clipSeconds = Math.Max(0d, contentTime.TotalSeconds);
+
+            await _scrubGate.WaitAsync(ct);
+            try
+            {
+                await EnsureScrubSessionBaseAsync(canvasWidth, canvasHeight).WaitAsync(ct);
+
+                ScrubFrameSource source = _scrubContentSource!;
+                SurfacePool pool = _scrubSurfacePool!;
+                ConcurrentDictionary<Guid, ScrubProxyEntry> proxies = _scrubProxies!;
+                HashSet<Guid> requested = _scrubProxyRequested ??= new HashSet<Guid>();
+
+                bool complete = true;
+                var missing = new Dictionary<string, List<Guid>>();
+
+                foreach (VideoSourceNode media in clip.Graph.AllNodes.OfType<VideoSourceNode>())
+                {
+                    if (media.Source.Type != SourceType.Video || proxies.ContainsKey(media.Id)) continue;
+
+                    complete = false;
+
+                    if (!requested.Add(media.Id)) continue;
+
+                    if (!missing.TryGetValue(media.Source.Path, out List<Guid>? ids))
+                        missing[media.Source.Path] = ids = new List<Guid>();
+
+                    ids.Add(media.Id);
+                }
+
+                foreach (KeyValuePair<string, List<Guid>> entry in missing)
+                    KickOffProxyResolution(entry.Key, entry.Value, RenderSettings.HardwareAccelerator, proxies);
+
+                return await _scrubGpuThread!.RunAsync(() =>
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    source.PrefetchAsync(clip, clipSeconds, width, height, pool, ct).GetAwaiter().GetResult();
+
+                    try
+                    {
+                        IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> resolved =
+                            source.GetContent(clip, clipSeconds, width, height, pool);
+
+                        var plain = new Dictionary<Guid, SKImage>(resolved.Count);
+                        foreach (KeyValuePair<Guid, (SKImage Image, bool Transient)> entry in resolved)
+                            plain[entry.Key] = entry.Value.Image;
+
+                        try
+                        {
+                            var context = new SkClipChainContext(width, height, fps, 1.0 / fps);
+                            SKSurface surface = pool.Rent(width, height);
+
+                            try
+                            {
+                                surface.Canvas.Clear(SKColors.Black);
+                                ClipCompositor.Composite(surface.Canvas, clip, plain, clipSeconds, context, pool);
+
+                                using SKImage image = surface.Snapshot();
+                                return new ClipFrame(ReadPixels(image, width, height), width, height, complete);
+                            }
+                            finally
+                            {
+                                pool.Return(surface, width, height);
+                            }
+                        }
+                        finally
+                        {
+                            foreach (KeyValuePair<Guid, (SKImage Image, bool Transient)> entry in resolved)
+                            {
+                                if (entry.Value.Transient) entry.Value.Image.Dispose();
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        source.ClearPrefetch();
+                    }
+                });
+            }
+            finally
+            {
+                _scrubGate.Release();
+            }
+        }
+
+        private static byte[] ReadPixels(SKImage image, int width, int height)
+        {
+            byte[] pixels = new byte[width * height * 4];
+            GCHandle handle = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+
+            try
+            {
+                var info = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+
+                if (!image.ReadPixels(info, handle.AddrOfPinnedObject(), width * 4))
+                    throw new InvalidOperationException("Failed to read the rendered clip frame's pixels.");
+            }
+            finally
+            {
+                handle.Free();
+            }
+
+            return pixels;
         }
 
         public void EndScrubbing()
@@ -1326,6 +1471,7 @@ namespace EditSharp.Playback
                 _scrubContentSource = null;
 
                 _scrubProxies = null;
+                _scrubProxyRequested = null;
 
                 // `_scrubGpuThread`/`_scrubGpuContext`/`_scrubSurfacePool`
                 // are DELIBERATELY NOT touched here — see class remarks,

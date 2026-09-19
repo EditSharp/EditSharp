@@ -63,6 +63,14 @@ namespace EditSharp.Editing
         /// <summary>Shown but not editable.</summary>
         public bool ReadOnly { get; set; }
 
+        /// <summary>
+        /// The value a reset returns the property to. Attributes only take
+        /// constants, so this covers numbers, strings, bools and enums; a
+        /// property without one falls back to the value a freshly
+        /// constructed object has - see <see cref="PropertyDescriptor.GetDefault"/>.
+        /// </summary>
+        public object? Default { get; set; }
+
         public EditableAttribute(string? displayName = null) => DisplayName = displayName;
     }
 
