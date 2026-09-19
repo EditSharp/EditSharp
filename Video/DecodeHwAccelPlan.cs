@@ -101,15 +101,25 @@ namespace EditSharp.Video
         /// of shipping the common case and flagging the edge case rather than
         /// blocking on it.
         /// </summary>
-        public string BuildFilterGraph(int fps, int width, int height)
+        /// <summary>
+        /// `speed` retimes the stream before it is conformed to `fps`:
+        /// setpts=PTS/speed makes the source play `speed` times faster, and
+        /// the fps filter that follows drops or repeats frames so there is
+        /// still exactly one output frame per timeline frame — see
+        /// Clip.Speed. setpts only rewrites timestamps, so it sits happily
+        /// in front of a GPU-surface chain too.
+        /// </summary>
+        public string BuildFilterGraph(int fps, int width, int height, double speed = 1d)
         {
+            string retime = speed == 1d ? "" : $"setpts=PTS/{FfmpegArgs.Num(speed)},";
+
             string scale = UsesGpuScale
                 ? $"{ScaleFilterName}={width}:{height}"
                 : $"scale={width}:{height}";
- 
+
             string download = UsesGpuScale ? ",hwdownload,format=nv12" : "";
- 
-            return $"fps={fps},{scale}{download},format=rgba,settb=AVTB";
+
+            return $"{retime}fps={fps},{scale}{download},format=rgba,settb=AVTB";
         }
     }
 }

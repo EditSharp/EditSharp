@@ -1,7 +1,8 @@
 using System;
 using SkiaSharp;
 using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Nodes.Sources;
+using EditSharp.History;
 using EditSharp.Components; // Source, FontFace
  
 namespace EditSharp.Components.Clips
@@ -34,14 +35,12 @@ namespace EditSharp.Components.Clips
         // constructing a distinct Clip subtype.
         // ---------------------------------------------------------------
  
-        public static VideoClip CreateFromSource(Source source, TimeSpan start, TimeSpan duration) =>
-            new(Graph.CreateVideoGraph(new VideoSourceNode { Source = source })) { Start = start, Duration = duration };
+        public static VideoClip CreateFromSource(Source source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new VideoSourceNode { Source = source })) { Start = start, Duration = duration });
  
         public static VideoClip CreateText(
             string content, TimeSpan start, TimeSpan duration,
             FontFace fontFace = FontFace.ComicSansMs, SKFontStyle? fontStyle = null,
-            SKTextAlign align = SKTextAlign.Center, int wordsPerLine = int.MaxValue) =>
-            new(Graph.CreateVideoGraph(new TextInputNode
+            SKTextAlign align = SKTextAlign.Center, int wordsPerLine = int.MaxValue) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new TextInputNode
             {
                 Content = content,
                 FontFace = fontFace,
@@ -49,22 +48,19 @@ namespace EditSharp.Components.Clips
                 Align = align,
                 WordsPerLine = wordsPerLine,
             }))
-            { Start = start, Duration = duration };
+            { Start = start, Duration = duration });
  
-        public static VideoClip CreateColorGenerator(SKColor color, TimeSpan start, TimeSpan duration) =>
-            new(Graph.CreateVideoGraph(new ColorGeneratorInputNode { Color = new(color) })) { Start = start, Duration = duration };
+        public static VideoClip CreateColorGenerator(SKColor color, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new ColorGeneratorInputNode { Color = new(color) })) { Start = start, Duration = duration });
  
-        public static VideoClip CreateNoise(TimeSpan start, TimeSpan duration, int? seed = null, float detail = 0.03f, float seetheRate = 0.03f) =>
-            new(Graph.CreateVideoGraph(new NoiseInputNode
+        public static VideoClip CreateNoise(TimeSpan start, TimeSpan duration, int? seed = null, float detail = 0.03f, float seetheRate = 0.03f) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new NoiseInputNode
             {
                 Seed = seed ?? Random.Shared.Next(),
                 Detail = detail,
                 SeetheRate = seetheRate,
             }))
-            { Start = start, Duration = duration };
+            { Start = start, Duration = duration });
  
-        public static VideoClip CreateTimelineEmbed(TimelineReference reference, TimeSpan start, TimeSpan duration) =>
-            new(Graph.CreateVideoGraph(new TimelineVideoInputNode { Reference = reference })) { Start = start, Duration = duration };
+        public static VideoClip CreateTimelineEmbed(TimelineReference reference, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new TimelineVideoInputNode { Reference = reference })) { Start = start, Duration = duration });
  
         /// <summary>
         /// Escape hatch for a fully custom graph — multiple InputNodes,
@@ -79,10 +75,10 @@ namespace EditSharp.Components.Clips
             if (graph.Domain != NodeDomain.Image)
                 throw new ArgumentException("VideoClip requires an Image-domain Graph.", nameof(graph));
  
-            return new VideoClip(graph) { Start = start, Duration = duration };
+            return Transaction.Suppressed(() => new VideoClip(graph) { Start = start, Duration = duration });
         }
  
-        public override VideoClip Duplicate() => new(Graph.Duplicate()) { Start = Start, Duration = Duration };
+        public override VideoClip Duplicate() => Transaction.Suppressed(() => new VideoClip(Graph.Duplicate()) { Start = Start, Duration = Duration, Speed = Speed });
     }
 }
  

@@ -233,10 +233,10 @@ namespace EditSharp.Video
         /// </summary>
         public static SourceDecoder Start(
             string sourcePath, double sourceStartSeconds, int fps, int width, int height,
-            DecodeHwAccelPlan? plan = null, bool fastOpen = false)
+            DecodeHwAccelPlan? plan = null, bool fastOpen = false, double speed = 1d)
         {
             plan ??= DecodeHwAccelPlan.Software;
-            string filter = plan.BuildFilterGraph(fps, width, height);
+            string filter = plan.BuildFilterGraph(fps, width, height, speed);
 
             var args = new List<string>
             {

@@ -3,7 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
-using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Nodes.Sources;
+using EditSharp.History;
 
 namespace EditSharp.Components
 {
@@ -98,14 +99,14 @@ namespace EditSharp.Components
 
         public VideoChannel AddChannel(VideoChannel channel)
         {
-            _videoChannels.Add(channel);
+            Transaction.Apply(() => _videoChannels.Add(channel), () => _videoChannels.Remove(channel), "add channel");
             channel.Timeline = this;
             return channel;
         }
 
         public AudioChannel AddChannel(AudioChannel channel)
         {
-            _audioChannels.Add(channel);
+            Transaction.Apply(() => _audioChannels.Add(channel), () => _audioChannels.Remove(channel), "add channel");
             channel.Timeline = this;
             return channel;
         }
@@ -130,13 +131,35 @@ namespace EditSharp.Components
         {
             switch (channel)
             {
-                case VideoChannel video: _videoChannels.Remove(video); break;
-                case AudioChannel audio: _audioChannels.Remove(audio); break;
+                case VideoChannel video: RemoveChannelCore(_videoChannels, video); break;
+                case AudioChannel audio: RemoveChannelCore(_audioChannels, audio); break;
                 default: throw new ArgumentException(
                     $"Unknown channel type {channel.GetType().Name}.", nameof(channel));
             }
 
             channel.Timeline = null;
+        }
+
+        /// <summary>
+        /// The same range taken out of every channel, each gap closed — the
+        /// whole timeline gets shorter by the range, so nothing on one
+        /// channel drifts against another. A ripple delete that keeps the
+        /// tracks in sync, at the cost of whatever else sat in that range.
+        /// </summary>
+        public void RippleRemoveRange(TimeSpan start, TimeSpan end)
+        {
+            foreach (Channel channel in Channels) channel.RippleRemoveRange(start, end);
+        }
+
+        private static void RemoveChannelCore<T>(List<T> list, T channel) where T : Channel
+        {
+            int index = list.IndexOf(channel);
+            if (index < 0) return;
+
+            Transaction.Apply(
+                () => list.Remove(channel),
+                () => list.Insert(Math.Min(index, list.Count), channel),
+                "remove channel");
         }
 
         // ---------------------------------------------------------------
@@ -176,7 +199,11 @@ namespace EditSharp.Components
             int target = index + direction;
             if (target < 0 || target >= list.Count) return; //already at that end — nothing to swap with
 
-            (list[index], list[target]) = (list[target], list[index]);
+            //a swap is its own inverse
+            Transaction.Apply(
+                () => { (list[index], list[target]) = (list[target], list[index]); },
+                () => { (list[index], list[target]) = (list[target], list[index]); },
+                "reorder channel");
         }
 
         // ---------------------------------------------------------------
@@ -318,21 +345,25 @@ namespace EditSharp.Components
         internal void RegisterEmbeddedTimelines(Clip clip)
         {
             foreach (Timeline embedded in EmbeddedTimelinesOf(clip))
-                embedded._usedBy.Add(this);
+                Transaction.Apply(() => embedded._usedBy.Add(this), () => embedded._usedBy.Remove(this), "register embed");
         }
 
         private void UnregisterEmbeddedTimelines(Clip clip)
         {
             foreach (Timeline embedded in EmbeddedTimelinesOf(clip))
-                embedded._usedBy.Remove(this);
+            {
+                if (!embedded._usedBy.Contains(this)) continue;
+
+                Transaction.Apply(() => embedded._usedBy.Remove(this), () => embedded._usedBy.Add(this), "unregister embed");
+            }
         }
 
         private static IEnumerable<Timeline> EmbeddedTimelinesOf(Clip clip)
         {
-            foreach (TimelineVideoInputNode node in clip.Graph.Nodes.OfType<TimelineVideoInputNode>())
+            foreach (TimelineVideoInputNode node in clip.Graph.AllNodes.OfType<TimelineVideoInputNode>())
                 yield return node.Reference.Timeline;
 
-            foreach (TimelineAudioInputNode node in clip.Graph.Nodes.OfType<TimelineAudioInputNode>())
+            foreach (TimelineAudioInputNode node in clip.Graph.AllNodes.OfType<TimelineAudioInputNode>())
                 yield return node.Reference.Timeline;
         }
 

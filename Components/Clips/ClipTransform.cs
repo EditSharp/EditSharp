@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using EditSharp.Components;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Clips
 {
@@ -22,11 +24,24 @@ namespace EditSharp.Components.Clips
     /// </summary>
     public sealed class ClipTransform
     {
-        public Animatable<Vector2> Position { get; set; } = new(default);
-        public Animatable<Vector2> Scale { get; set; } = new(new Vector2(1, 1));
-        public Animatable<float> Rotation { get; set; } = new(0f);
-        public Animatable<float> Pitch { get; set; } = new(0f);
-        public Animatable<float> Yaw { get; set; } = new(0f);
+        Animatable<Vector2> _position = new(default);
+        [Editable("Position")]
+        public Animatable<Vector2> Position { get => _position; set => Transaction.Set(this, ref _position, value, static (o, v) => o._position = v); }
+        Animatable<Vector2> _scale = new(new Vector2(1, 1));
+        [Editable("Scale")]
+        public Animatable<Vector2> Scale { get => _scale; set => Transaction.Set(this, ref _scale, value, static (o, v) => o._scale = v); }
+        Animatable<float> _rotation = new(0f);
+        [Editable("Rotation", Editor = PropertyEditor.Angle)]
+        public Animatable<float> Rotation { get => _rotation; set => Transaction.Set(this, ref _rotation, value, static (o, v) => o._rotation = v); }
+        Animatable<float> _pitch = new(0f);
+        [Editable("Pitch", Editor = PropertyEditor.Angle)]
+        public Animatable<float> Pitch { get => _pitch; set => Transaction.Set(this, ref _pitch, value, static (o, v) => o._pitch = v); }
+        Animatable<float> _yaw = new(0f);
+        [Editable("Yaw", Editor = PropertyEditor.Angle)]
+        public Animatable<float> Yaw { get => _yaw; set => Transaction.Set(this, ref _yaw, value, static (o, v) => o._yaw = v); }
+
+        /// <summary>Every track on this transform — see Node.Animatables.</summary>
+        public IEnumerable<IAnimatable> Animatables => [Position, Scale, Rotation, Pitch, Yaw];
  
         /// <summary>
         /// Position specifically gets the spatial-handle PositionTrack
@@ -44,14 +59,14 @@ namespace EditSharp.Components.Clips
             return track;
         }
  
-        public ClipTransform Duplicate() => new()
+        public ClipTransform Duplicate() => Transaction.Suppressed(() => new ClipTransform
         {
             Position = Position.Duplicate(),
             Scale = Scale.Duplicate(),
             Rotation = Rotation.Duplicate(),
             Pitch = Pitch.Duplicate(),
             Yaw = Yaw.Duplicate(),
-        };
+        });
  
         public ResolvedTransform Evaluate(TimeSpan clipRelativeTime) => new(
             Position.Evaluate(clipRelativeTime),

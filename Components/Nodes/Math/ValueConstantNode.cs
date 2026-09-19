@@ -1,6 +1,8 @@
 using System.Collections.Generic;
 using EditSharp.Components;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Nodes.Math
 {
@@ -17,11 +19,15 @@ namespace EditSharp.Components.Nodes.Math
     /// </summary>
     public sealed class ValueConstantNode : Node
     {
-        public Animatable<float> Value { get; set; } = new(0f);
+        Animatable<float> _value = new(0f);
+        [Editable("Value")]
+        public Animatable<float> Value { get => _value; set => Transaction.Set(this, ref _value, value, static (o, v) => o._value = v); }
  
         private static readonly NodePort[] StaticPorts = [new("Value", PortType.Value, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
-        public override Node Duplicate() => new ValueConstantNode { Enabled = Enabled, Value = Value.Duplicate() };
+        public override IEnumerable<IAnimatable> Animatables => [Value];
+
+        public override Node Duplicate() => Transaction.Suppressed(() => new ValueConstantNode { Enabled = Enabled, Value = Value.Duplicate() });
     }
 }
  

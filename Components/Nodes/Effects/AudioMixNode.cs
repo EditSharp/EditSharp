@@ -1,6 +1,8 @@
 using System.Collections.Generic;
 using EditSharp.Components;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Nodes.Effects
 {
@@ -13,8 +15,12 @@ namespace EditSharp.Components.Nodes.Effects
     /// </summary>
     public sealed class AudioMixNode : Node
     {
-        public Animatable<float> MixA { get; set; } = new(1f);
-        public Animatable<float> MixB { get; set; } = new(1f);
+        Animatable<float> _mixA = new(1f);
+        [Editable("Mix A", Min = 0, Max = 1, Step = 0.01)]
+        public Animatable<float> MixA { get => _mixA; set => Transaction.Set(this, ref _mixA, value, static (o, v) => o._mixA = v); }
+        Animatable<float> _mixB = new(1f);
+        [Editable("Mix B", Min = 0, Max = 1, Step = 0.01)]
+        public Animatable<float> MixB { get => _mixB; set => Transaction.Set(this, ref _mixB, value, static (o, v) => o._mixB = v); }
  
         private static readonly NodePort[] StaticPorts =
         [
@@ -33,12 +39,14 @@ namespace EditSharp.Components.Nodes.Effects
  
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
  
-        public override Node Duplicate() => new AudioMixNode
+        public override IEnumerable<IAnimatable> Animatables => [MixA, MixB];
+
+        public override Node Duplicate() => Transaction.Suppressed(() => new AudioMixNode
         {
             Enabled = Enabled,
             MixA = MixA.Duplicate(),
             MixB = MixB.Duplicate(),
-        };
+        });
     }
 }
  

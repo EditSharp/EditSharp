@@ -1,6 +1,8 @@
 using System.Collections.Generic;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Nodes.Effects
 {
@@ -22,7 +24,9 @@ namespace EditSharp.Components.Nodes.Effects
     /// </summary>
     public sealed class TransformNode : Node
     {
-        public ClipTransform Transform { get; set; } = new();
+        ClipTransform _transform = new();
+        [Editable("Transform")]
+        public ClipTransform Transform { get => _transform; set => Transaction.Set(this, ref _transform, value, static (o, v) => o._transform = v); }
  
         private static readonly NodePort[] StaticPorts =
         [
@@ -31,7 +35,9 @@ namespace EditSharp.Components.Nodes.Effects
         ];
  
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
-        public override Node Duplicate() => new TransformNode { Enabled = Enabled, Transform = Transform.Duplicate() };
+        public override IEnumerable<IAnimatable> Animatables => Transform.Animatables;
+
+        public override Node Duplicate() => Transaction.Suppressed(() => new TransformNode { Enabled = Enabled, Transform = Transform.Duplicate() });
     }
 }
  

@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Transitions;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Channels
 {
@@ -27,7 +29,9 @@ namespace EditSharp.Components.Channels
     /// </summary>
     public abstract class Channel
     {
-        public string Name { get; set; } = "Channel";
+        string _name = "Channel";
+        [Editable("Name")]
+        public string Name { get => _name; set => Transaction.Set(this, ref _name, value, static (o, v) => o._name = v); }
  
         private readonly SortedDictionary<TimeSpan, Clip> _clips = new();
         private readonly List<Transition> _transitions = [];
@@ -35,7 +39,8 @@ namespace EditSharp.Components.Channels
         public IReadOnlyCollection<Clip> Clips => _clips.Values;
         public IReadOnlyList<Transition> Transitions => _transitions;
  
-        public Timeline? Timeline { get; internal set; }
+        Timeline? _timeline;
+        public Timeline? Timeline { get => _timeline; internal set => Transaction.Set(this, ref _timeline, value, static (o, v) => o._timeline = v); }
  
         /// <summary>
         /// This channel's position among channels of its own kind — 0 is
@@ -96,10 +101,56 @@ namespace EditSharp.Components.Channels
             return clip;
         }
  
+        /// <summary>
+        /// A placed clip's Start is its key here, so anything that moves a
+        /// clip's Start in place — a head trim — has to move the entry with
+        /// it. Left stale, the clip can no longer be removed by its Start,
+        /// so a later Move/Overwrite scan finds the ghost entry and trims
+        /// the clip against itself.
+        /// </summary>
+        internal void Rekey(Clip clip, TimeSpan previousStart)
+        {
+            TimeSpan key = clip.Start;
+            bool hadOld = _clips.TryGetValue(previousStart, out Clip? placed) && ReferenceEquals(placed, clip);
+
+            Transaction.Apply(
+                () => { if (hadOld) _clips.Remove(previousStart); _clips[key] = clip; },
+                () => { _clips.Remove(key); if (hadOld) _clips[previousStart] = clip; },
+                "rekey clip");
+        }
+
         private void PlaceInternal(Clip clip)
         {
-            _clips[clip.Start] = clip;
+            Place(clip);
             clip.Channel = this;
+        }
+
+        //the two halves of the dictionary's bookkeeping, each recorded so an
+        //undo puts the entry back under the key it had - see Transaction
+        private void Place(Clip clip)
+        {
+            TimeSpan key = clip.Start;
+            Transaction.Apply(() => _clips[key] = clip, () => _clips.Remove(key), "place clip");
+        }
+
+        private void Unplace(Clip clip)
+        {
+            TimeSpan key = clip.Start;
+            Transaction.Apply(() => _clips.Remove(key), () => _clips[key] = clip, "unplace clip");
+        }
+
+        private void RemoveTransitionsWhere(Predicate<Transition> match)
+        {
+            List<(int index, Transition transition)> removed = [];
+            for (int i = 0; i < _transitions.Count; i++)
+                if (match(_transitions[i])) removed.Add((i, _transitions[i]));
+
+            if (removed.Count == 0) return;
+
+            Transaction.Apply(
+                () => { foreach ((_, Transition t) in removed) _transitions.Remove(t); },
+                () => { foreach ((int index, Transition t) in removed) _transitions.Insert(Math.Min(index, _transitions.Count), t); },
+                "remove transitions");
         }
  
         // ---------------------------------------------------------------
@@ -142,7 +193,7 @@ namespace EditSharp.Components.Channels
         /// </summary>
         internal void ExtendHead(Clip clip, TimeSpan amount, bool ripple, Clip? exclude = null)
         {
-            _clips.Remove(clip.Start);
+            Unplace(clip);
  
             TimeSpan newStart = clip.Start - amount;
             if (ripple) RippleFrom(newStart, amount);
@@ -155,12 +206,42 @@ namespace EditSharp.Components.Channels
  
         internal void ExtendTail(Clip clip, TimeSpan amount, bool ripple, Clip? exclude = null)
         {
-            _clips.Remove(clip.Start);
+            Unplace(clip);
  
             if (ripple) RippleFrom(clip.End, amount);
             else Overwrite(clip.End, clip.End + amount, exclude);
  
             clip.ApplyTailExtend(amount);
+            PlaceInternal(clip);
+            ReconcileTransitionsFor(clip);
+        }
+
+        // ---------------------------------------------------------------
+        // Stretch — see Clip.StretchStart/StretchEnd. Only a growing
+        // stretch can overlap a neighbor; a shrinking one never touches
+        // anything but the clip itself. Overwrite semantics only, like a
+        // plain (non-ripple) Extend.
+        // ---------------------------------------------------------------
+
+        internal void StretchHead(Clip clip, TimeSpan amount)
+        {
+            Unplace(clip);
+
+            TimeSpan newStart = clip.Start - amount;
+            if (amount > TimeSpan.Zero) Overwrite(newStart, clip.Start);
+
+            clip.ApplyStretch(newStart, clip.Duration + amount);
+            PlaceInternal(clip);
+            ReconcileTransitionsFor(clip);
+        }
+
+        internal void StretchTail(Clip clip, TimeSpan amount)
+        {
+            Unplace(clip);
+
+            if (amount > TimeSpan.Zero) Overwrite(clip.End, clip.End + amount);
+
+            clip.ApplyStretch(clip.Start, clip.Duration + amount);
             PlaceInternal(clip);
             ReconcileTransitionsFor(clip);
         }
@@ -184,15 +265,43 @@ namespace EditSharp.Components.Channels
         internal void RemoveClip(Clip clip)
         {
             if (clip.Channel != this) return;
- 
+
             DetachClip(clip);
             Timeline?.NotifyClipDetached(clip);
+        }
+
+        /// <summary>
+        /// Takes everything inside [start, end) off this channel: a clip
+        /// wholly inside goes, one spanning an edge is trimmed to the edge,
+        /// one spanning both is split around the range. Overwrite
+        /// semantics with nothing placed in the hole.
+        /// </summary>
+        public void RemoveRange(TimeSpan start, TimeSpan end)
+        {
+            if (end <= start) return;
+
+            //the clips that will be taken off outright, for the link/embed
+            //bookkeeping a removal owes them - Overwrite alone does not
+            List<Clip> removed = _clips.Values.Where(c => c.Start >= start && c.End <= end).ToList();
+
+            Overwrite(start, end);
+
+            foreach (Clip clip in removed) Timeline?.NotifyClipDetached(clip);
+        }
+
+        /// <summary>RemoveRange, then closes the gap: everything that started at or after `end` moves earlier by the range's length.</summary>
+        public void RippleRemoveRange(TimeSpan start, TimeSpan end)
+        {
+            if (end <= start) return;
+
+            RemoveRange(start, end);
+            RippleClose(end, end - start);
         }
  
         private void DetachClip(Clip clip)
         {
-            _clips.Remove(clip.Start);
-            _transitions.RemoveAll(t => t.From == clip || t.To == clip);
+            Unplace(clip);
+            RemoveTransitionsWhere(t => t.From == clip || t.To == clip);
             clip.Channel = null;
         }
  
@@ -246,16 +355,16 @@ namespace EditSharp.Components.Channels
             }
  
             transition.Duration = achievableHalf + achievableHalf;
-            _transitions.Add(transition);
+            Transaction.Apply(() => _transitions.Add(transition), () => _transitions.Remove(transition), "add transition");
  
             return transition;
         }
  
-        public void RemoveTransition(Transition transition) => _transitions.Remove(transition);
+        public void RemoveTransition(Transition transition) => RemoveTransitionsWhere(t => ReferenceEquals(t, transition));
  
         internal void ReconcileTransitionsFor(Clip clip)
         {
-            _transitions.RemoveAll(t => (t.From == clip || t.To == clip) && !IsTransitionValid(t));
+            RemoveTransitionsWhere(t => (t.From == clip || t.To == clip) && !IsTransitionValid(t));
         }
  
         private static bool IsTransitionValid(Transition t) =>
@@ -303,15 +412,28 @@ namespace EditSharp.Components.Channels
             }
         }
  
+        /// <summary>The reverse of RippleFrom: every clip starting at or after `at` moves EARLIER by `amount`. Earliest first, so each clip moves into room the one before it has just left.</summary>
+        private void RippleClose(TimeSpan at, TimeSpan amount)
+        {
+            if (amount <= TimeSpan.Zero) return;
+
+            foreach (Clip clip in _clips.Values.Where(c => c.Start >= at).OrderBy(c => c.Start).ToList())
+            {
+                Unplace(clip);
+                clip.Start -= amount;
+                Place(clip);
+            }
+        }
+
         private void RippleFrom(TimeSpan at, TimeSpan amount)
         {
             if (amount <= TimeSpan.Zero) return;
  
             foreach (Clip clip in _clips.Values.Where(c => c.Start >= at).OrderByDescending(c => c.Start).ToList())
             {
-                _clips.Remove(clip.Start);
+                Unplace(clip);
                 clip.Start += amount;
-                _clips[clip.Start] = clip;
+                Place(clip);
             }
         }
  
@@ -328,10 +450,14 @@ namespace EditSharp.Components.Channels
         /// </summary>
         private static (Clip Head, Clip Tail) SplitFragments(Clip target, TimeSpan cutStart, TimeSpan cutEnd)
         {
+            //the fragments are new objects being shaped, not edits to the
+            //project - placing them is what gets recorded
+            using var _ = Transaction.Suppress();
+
             Clip head = target.Duplicate();
             head.LinkGroupId = target.LinkGroupId;
             head.TrimEnd(head.End - cutStart);
- 
+
             Clip tail = target.Duplicate();
             tail.LinkGroupId = target.LinkGroupId;
             tail.TrimStart(cutEnd - tail.Start);

@@ -2,6 +2,8 @@ using System.Collections.Generic;
 using SkiaSharp;
 using EditSharp.Components;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Nodes.Effects
 {
@@ -16,7 +18,9 @@ namespace EditSharp.Components.Nodes.Effects
     /// </summary>
     public sealed class TintNode : Node
     {
-        public Animatable<SKColor> Color { get; set; } = new(SKColors.White);
+        Animatable<SKColor> _color = new(SKColors.White);
+        [Editable("Color")]
+        public Animatable<SKColor> Color { get => _color; set => Transaction.Set(this, ref _color, value, static (o, v) => o._color = v); }
  
         private static readonly NodePort[] StaticPorts =
         [
@@ -25,7 +29,9 @@ namespace EditSharp.Components.Nodes.Effects
         ];
  
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
-        public override Node Duplicate() => new TintNode { Enabled = Enabled, Color = Color.Duplicate() };
+        public override IEnumerable<IAnimatable> Animatables => [Color];
+
+        public override Node Duplicate() => Transaction.Suppressed(() => new TintNode { Enabled = Enabled, Color = Color.Duplicate() });
     }
 }
  

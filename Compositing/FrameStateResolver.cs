@@ -132,7 +132,10 @@ namespace EditSharp.Compositing
 
         private static FrameClip BuildFrameClip(Clip clip, TimeSpan time)
         {
-            double clipSeconds = (time - clip.Start).TotalSeconds;
+            //content time: Speed is how fast the clip's graph plays against
+            //the timeline, and everything downstream — keyframes, generators,
+            //source frame selection, nested timelines — lives in content time
+            double clipSeconds = (time - clip.Start).TotalSeconds * clip.Speed;
 
             return new FrameClip
             {

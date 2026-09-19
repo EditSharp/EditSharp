@@ -96,25 +96,34 @@ namespace EditSharp.Audio
         {
             var resolvedInputs = new Dictionary<Guid, AudioBuffer>();
 
-            foreach (InputNode node in clip.Graph.Nodes.OfType<InputNode>())
+            //Clip.Speed: every input is produced for the CONTENT duration —
+            //what the clip covers at 1x — and then resampled to the clip's
+            //timeline duration: varispeed, pitch follows tempo. the graph's
+            //own automation is retimed by the evaluator
+            TimeSpan content = clip.ContentDuration;
+            int timelineFrames = AudioBuffer.FramesForDuration(clip.Duration, sampleRate);
+
+            foreach (InputNode node in clip.Graph.AllNodes.OfType<InputNode>())
             {
-                resolvedInputs[node.Id] = node switch
+                AudioBuffer atContentRate = node switch
                 {
                     AudioSourceNode media =>
-                        await PcmAudioDecoder.DecodeAsync(media.Source, clip.Duration, sampleRate, channels, token),
+                        await PcmAudioDecoder.DecodeAsync(media.Source, content, sampleRate, channels, token),
 
                     ToneGeneratorInputNode tone =>
-                        SynthesizeTone(tone, clip.Duration, sampleRate, channels),
+                        SynthesizeTone(tone, content, sampleRate, channels),
 
                     TimelineAudioInputNode embed =>
-                        await ResolveNestedTimelineAudioAsync(embed.Reference, clip.Duration, sampleRate, channels, token),
+                        await ResolveNestedTimelineAudioAsync(embed.Reference, content, sampleRate, channels, token),
 
                     _ => throw new NotSupportedException(
                         $"AudioMixer has no dispatch for {node.GetType().Name}."),
                 };
+
+                resolvedInputs[node.Id] = atContentRate.Resample(timelineFrames);
             }
 
-            return AudioGraphEvaluator.Evaluate(clip.Graph, resolvedInputs);
+            return AudioGraphEvaluator.Evaluate(clip.Graph.Flattened, resolvedInputs, clip.Speed);
         }
 
         /// <summary>

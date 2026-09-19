@@ -2,6 +2,8 @@ using System;
 using System.Linq;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Clips
 {
@@ -26,19 +28,55 @@ namespace EditSharp.Components.Clips
     /// </summary>
     public abstract class Clip : ITimelineEditable
     {
-        public string Name { get; set; } = "Clip";
+        string _name = "Clip";
+        [Editable("Name", Order = 0)]
+        public string Name { get => _name; set => Transaction.Set(this, ref _name, value, static (o, v) => o._name = v); }
 
-        public TimeSpan Start { get; set; }
-        public TimeSpan Duration { get; set; }
+        TimeSpan _start;
+        [Editable("Start", Order = 1)]
+        public TimeSpan Start { get => _start; set => Transaction.Set(this, ref _start, value, static (o, v) => o._start = v); }
+        TimeSpan _duration;
+        [Editable("Duration", Order = 2)]
+        public TimeSpan Duration { get => _duration; set => Transaction.Set(this, ref _duration, value, static (o, v) => o._duration = v); }
         public TimeSpan End => Start + Duration;
+
+        /// <summary>
+        /// How fast this clip's content plays against the timeline, in
+        /// content seconds per timeline second: 1 is real time, 2 covers
+        /// the same content in half the Duration, 0.5 in twice. The graph
+        /// and its keyframes are stored at 1x; this is a multiplier on the
+        /// clip's local time everywhere it is evaluated (FrameStateResolver
+        /// for video, AudioMixer/AudioGraphEvaluator for audio), so setting
+        /// it back to 1 undoes a retime completely. Written by StretchStart/
+        /// StretchEnd, which change Duration while holding the content range
+        /// fixed; every in-point shift here is scaled through it so a trim
+        /// on a retimed clip still lands on the right content.
+        /// </summary>
+        double _speed = 1d;
+        [Editable("Speed", Order = 3, Min = 0.01, Max = 100, Step = 0.01, Editor = PropertyEditor.Percent)]
+        public double Speed { get => _speed; set => Transaction.Set(this, ref _speed, value, static (o, v) => o._speed = v); }
+
+        /// <summary>The span of content this clip covers — Duration scaled by Speed.</summary>
+        public TimeSpan ContentDuration => ToContentTime(Duration);
+
+        internal TimeSpan ToContentTime(TimeSpan timeline) =>
+            TimeSpan.FromTicks((long)Math.Round(timeline.Ticks * Speed));
+
+        internal TimeSpan ToTimelineTime(TimeSpan content)
+        {
+            double ticks = content.Ticks / Speed;
+            return ticks >= long.MaxValue ? TimeSpan.MaxValue : TimeSpan.FromTicks((long)Math.Round(ticks));
+        }
  
         //null = unlinked
-        public Guid? LinkGroupId { get; internal set; }
+        Guid? _linkGroupId;
+        public Guid? LinkGroupId { get => _linkGroupId; internal set => Transaction.Set(this, ref _linkGroupId, value, static (o, v) => o._linkGroupId = v); }
  
         //back-ref, set by the owning Channel
-        public Channel? Channel { get; internal set; }
+        Channel? _channel;
+        public Channel? Channel { get => _channel; internal set => Transaction.Set(this, ref _channel, value, static (o, v) => o._channel = v); }
  
-        internal static readonly TimeSpan MinimumDuration = TimeSpan.FromMilliseconds(1);
+        public static readonly TimeSpan MinimumDuration = TimeSpan.FromMilliseconds(1);
  
         /// <summary>
         /// A clip's single Graph, fixed to this clip's own
@@ -64,8 +102,16 @@ namespace EditSharp.Components.Clips
         /// <summary>Positive `amount` = trim (in-point advances), negative = extend (in-point recedes).</summary>
         protected internal virtual void OnHeadInPointShift(TimeSpan amount)
         {
-            foreach (ITrimmableInput trimmable in Graph.Nodes.OfType<ITrimmableInput>())
+            foreach (ITrimmableInput trimmable in Graph.AllNodes.OfType<ITrimmableInput>())
                 trimmable.InPoint += amount;
+
+            //keyframes are anchored to the content, not to Start: the head
+            //moving later by `amount` puts every keyframe `amount` earlier
+            //relative to the new start, and an extend does the reverse.
+            //this applies to every clip, generator content included — a
+            //noise clip has no in-point, but its tint keyframes still have
+            //to stay where they were
+            foreach (IAnimatable animatable in Graph.Animatables) animatable.ShiftKeyframes(-amount);
         }
  
         /// <summary>
@@ -81,7 +127,7 @@ namespace EditSharp.Components.Clips
         {
             TimeSpan min = TimeSpan.MaxValue;
  
-            foreach (ITrimmableInput trimmable in Graph.Nodes.OfType<ITrimmableInput>())
+            foreach (ITrimmableInput trimmable in Graph.AllNodes.OfType<ITrimmableInput>())
             {
                 if (trimmable.MaxHeadroom < min) min = trimmable.MaxHeadroom;
             }
@@ -94,14 +140,32 @@ namespace EditSharp.Components.Clips
         // never create an overlap, only shrink this clip's own span).
         // ---------------------------------------------------------------
  
+        /// <summary>
+        /// How much earlier Start can be pulled before the content runs
+        /// out, in TIMELINE time (MaxHeadExtend is content time, and the
+        /// two differ once Speed is not 1). TimeSpan.MaxValue when nothing
+        /// in the graph constrains it. Exposed so an editor can clamp a
+        /// preview to what ExtendStart will actually accept.
+        /// </summary>
+        public TimeSpan HeadExtendLimit
+        {
+            get
+            {
+                TimeSpan ceiling = MaxHeadExtend();
+                return ceiling == TimeSpan.MaxValue ? ceiling : ToTimelineTime(ceiling);
+            }
+        }
+
         public void TrimStart(TimeSpan amount)
         {
             TimeSpan clamped = ClampTrim(amount);
             if (clamped <= TimeSpan.Zero) return;
  
+            TimeSpan previousStart = Start;
             Start += clamped;
             Duration -= clamped;
-            OnHeadInPointShift(clamped);
+            OnHeadInPointShift(ToContentTime(clamped));
+            Channel?.Rekey(this, previousStart);
             Channel?.ReconcileTransitionsFor(this);
         }
  
@@ -144,7 +208,7 @@ namespace EditSharp.Components.Clips
  
         private TimeSpan ClampToContentCeiling(TimeSpan amount)
         {
-            TimeSpan ceiling = MaxHeadExtend();
+            TimeSpan ceiling = HeadExtendLimit;
             return ceiling == TimeSpan.MaxValue || amount <= ceiling ? amount : ceiling;
         }
  
@@ -166,12 +230,59 @@ namespace EditSharp.Components.Clips
         {
             Start -= amount;
             Duration += amount;
-            OnHeadInPointShift(-amount);
+            OnHeadInPointShift(-ToContentTime(amount));
         }
  
         internal void ApplyTailExtend(TimeSpan amount)
         {
             Duration += amount;
+        }
+
+        // ---------------------------------------------------------------
+        // Stretch — retime. One end of the clip moves while the other end
+        // and the content range stay put, so Speed absorbs the difference.
+        // Growing can collide with a sibling exactly like Extend, so the
+        // Channel resolves that (Overwrite) before the mutation lands.
+        // ---------------------------------------------------------------
+
+        /// <summary>Positive `amount` = Start moves earlier (clip grows, plays slower); negative = later (shrinks, plays faster). End never moves.</summary>
+        public void StretchStart(TimeSpan amount)
+        {
+            amount = ClampStretch(amount);
+            // the head cannot go before the start of the timeline
+            if (amount > Start) amount = Start;
+            if (amount == TimeSpan.Zero) return;
+
+            RequireChannel().StretchHead(this, amount);
+        }
+
+        /// <summary>Positive `amount` = End moves later (clip grows, plays slower); negative = earlier (shrinks, plays faster). Start never moves.</summary>
+        public void StretchEnd(TimeSpan amount)
+        {
+            amount = ClampStretch(amount);
+            if (amount == TimeSpan.Zero) return;
+
+            RequireChannel().StretchTail(this, amount);
+        }
+
+        // a stretch may shrink the clip, but never below the minimum duration
+        private TimeSpan ClampStretch(TimeSpan amount)
+        {
+            TimeSpan maxShrink = Duration - MinimumDuration;
+            if (maxShrink < TimeSpan.Zero) maxShrink = TimeSpan.Zero;
+
+            return amount < -maxShrink ? -maxShrink : amount;
+        }
+
+        /// <summary>Actual mutation once Channel has resolved any conflicts. The content range is held; Speed takes up the new Duration.</summary>
+        internal void ApplyStretch(TimeSpan newStart, TimeSpan newDuration)
+        {
+            TimeSpan content = ContentDuration;
+
+            Start = newStart;
+            Duration = newDuration;
+
+            if (newDuration > TimeSpan.Zero) Speed = (double)content.Ticks / newDuration.Ticks;
         }
  
         // ---------------------------------------------------------------
@@ -188,6 +299,9 @@ namespace EditSharp.Components.Clips
         public void Split(TimeSpan at) => RequireChannel().SplitClip(this, at);
  
         public void Delete() => RequireChannel().RemoveClip(this);
+
+        /// <summary>Delete, and close the gap this clip leaves on its own channel.</summary>
+        public void RippleDelete() => RequireChannel().RippleRemoveRange(Start, End);
  
         private Channel RequireChannel() =>
             Channel ?? throw new InvalidOperationException("This clip is not currently placed on any Channel.");

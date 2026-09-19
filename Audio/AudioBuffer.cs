@@ -102,6 +102,42 @@ namespace EditSharp.Audio
             return new AudioBuffer(SampleRate, Channels, result);
         }
  
+        /// <summary>
+        /// Returns a NEW buffer with exactly `targetFrames` frames holding
+        /// this buffer's whole content, stretched or squeezed to fit by
+        /// linear interpolation — plain varispeed, so pitch follows tempo.
+        /// This is how Clip.Speed reaches audio: content decoded for the
+        /// clip's content duration is resampled to its timeline duration.
+        /// An empty buffer resamples to silence.
+        /// </summary>
+        public AudioBuffer Resample(int targetFrames)
+        {
+            targetFrames = Math.Max(0, targetFrames);
+
+            if (FrameCount == targetFrames) return this;
+            if (FrameCount == 0 || targetFrames == 0) return Silence(SampleRate, Channels, targetFrames);
+
+            var result = new float[targetFrames * Channels];
+            double step = (double)FrameCount / targetFrames;
+
+            for (int frame = 0; frame < targetFrames; frame++)
+            {
+                double position = frame * step;
+                int index = Math.Min((int)position, FrameCount - 1);
+                int next = Math.Min(index + 1, FrameCount - 1);
+                float fraction = (float)(position - index);
+
+                int from = index * Channels;
+                int to = next * Channels;
+                int into = frame * Channels;
+
+                for (int ch = 0; ch < Channels; ch++)
+                    result[into + ch] = Samples[from + ch] + (Samples[to + ch] - Samples[from + ch]) * fraction;
+            }
+
+            return new AudioBuffer(SampleRate, Channels, result);
+        }
+
         /// <summary>Multiplies every sample by a fixed gain, in place.</summary>
         public void ApplyGain(float gain)
         {

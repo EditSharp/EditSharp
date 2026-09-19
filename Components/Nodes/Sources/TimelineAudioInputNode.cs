@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Nodes.Sources
 {
@@ -12,11 +14,13 @@ namespace EditSharp.Components.Nodes.Sources
     /// </summary>
     public sealed class TimelineAudioInputNode : InputNode, ITrimmableInput
     {
-        public required TimelineReference Reference { get; set; }
+        TimelineReference _reference = null!;
+        [Editable("Timeline")]
+        public required TimelineReference Reference { get => _reference; set => Transaction.Set(this, ref _reference, value, static (o, v) => o._reference = v); }
  
         private static readonly NodePort[] StaticPorts = [new("Audio", PortType.Audio, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
-        public override Node Duplicate() => new TimelineAudioInputNode { Enabled = Enabled, Reference = Reference.Duplicate() };
+        public override Node Duplicate() => Transaction.Suppressed(() => new TimelineAudioInputNode { Enabled = Enabled, Reference = Reference.Duplicate() });
  
         public TimeSpan InPoint
         {

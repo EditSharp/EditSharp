@@ -1,4 +1,6 @@
 using System;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Clips
 {
@@ -12,15 +14,21 @@ namespace EditSharp.Components.Clips
     /// </summary>
     public sealed class TimelineReference
     {
-        public required Timeline Timeline { get; set; }
+        Timeline _timeline = null!;
+        [Editable("Timeline")]
+        public required Timeline Timeline { get => _timeline; set => Transaction.Set(this, ref _timeline, value, static (o, v) => o._timeline = v); }
  
         //in-point within the nested timeline; null = from the beginning
-        public TimeSpan? Start { get; set; }
+        TimeSpan? _start;
+        [Editable("In point")]
+        public TimeSpan? Start { get => _start; set => Transaction.Set(this, ref _start, value, static (o, v) => o._start = v); }
  
         //how much of the nested timeline to use from Start; null = to its natural end
-        public TimeSpan? Duration { get; set; }
+        TimeSpan? _duration;
+        [Editable("Duration")]
+        public TimeSpan? Duration { get => _duration; set => Transaction.Set(this, ref _duration, value, static (o, v) => o._duration = v); }
  
-        public TimelineReference Duplicate() => new() { Timeline = Timeline, Start = Start, Duration = Duration };
+        public TimelineReference Duplicate() => Transaction.Suppressed(() => new TimelineReference { Timeline = Timeline, Start = Start, Duration = Duration });
     }
 }
  

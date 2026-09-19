@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using EditSharp.History;
  
 namespace EditSharp.Components.Nodes
 {
@@ -86,7 +87,108 @@ namespace EditSharp.Components.Nodes
         private readonly List<Connection> _connections = [];
  
         public IReadOnlyList<Node> Nodes => _nodes;
+
+        /// <summary>Every keyframe track on every node — see Node.Animatables.</summary>
+        public IEnumerable<IAnimatable> Animatables => _nodes.SelectMany(n => n.Animatables);
         public IReadOnlyList<Connection> Connections => _connections;
+
+        /// <summary>
+        /// Every node, reaching inside composites — for anything that has
+        /// to find all the sources, trimmable inputs or embeds a clip
+        /// really contains. Inner OutputNodes are left out; they are
+        /// plumbing, not content. Just Nodes when nothing is composite.
+        /// </summary>
+        public IEnumerable<Node> AllNodes
+            => _nodes.Any(n => n is CompositeNode)
+                ? _nodes.SelectMany(n => n is CompositeNode c ? c.Inner.AllNodes.Where(x => x is not global::EditSharp.Components.Nodes.OutputNode) : Enumerable.Repeat(n, 1))
+                : _nodes;
+
+        /// <summary>
+        /// The graph as an evaluator should see it: every CompositeNode
+        /// replaced by the nodes inside it, its connections rewired to the
+        /// inner ports they were really aimed at. The inner nodes are the
+        /// same objects, so content keyed by their ids still matches. This
+        /// graph itself when there is nothing to flatten, so the ordinary
+        /// case costs nothing.
+        /// </summary>
+        public Graph Flattened => _nodes.Any(n => n is CompositeNode) ? Flatten() : this;
+
+        private Graph Flatten()
+        {
+            List<Node> nodes = [];
+            List<Connection> connections = [];
+
+            //where a composite's exposed input really goes, what feeds its
+            //output, and which input a disabled one passes straight through
+            var inputTargets = new Dictionary<(Guid, string), (Guid, string)>();
+            var outputSources = new Dictionary<Guid, (Guid, string)?>();
+            var passThrough = new Dictionary<Guid, string>();
+
+            foreach (Node node in _nodes)
+            {
+                if (node is not CompositeNode composite)
+                {
+                    nodes.Add(node);
+                    continue;
+                }
+
+                Graph inner = composite.Inner.Flattened;
+
+                foreach (Node n in inner.Nodes)
+                    if (!ReferenceEquals(n, inner.OutputNode)) nodes.Add(n);
+
+                foreach (Connection c in inner.Connections)
+                    if (c.ToNodeId != inner.OutputNode.Id) connections.Add(c);
+
+                foreach (ExposedPort p in composite.Inputs)
+                    inputTargets[(composite.Id, p.Name)] = (p.Node, p.Port);
+
+                if (!composite.Enabled)
+                {
+                    //bypass: the output is whatever came in on the first
+                    //exposed input of the output's own type, if any
+                    PortType outputType = composite.Output.Type;
+                    NodePort? through = composite.Ports.FirstOrDefault(p => p.Direction == PortDirection.Input && p.Type == outputType);
+
+                    outputSources[composite.Id] = null;
+                    if (through is not null) passThrough[composite.Id] = through.Name;
+                    continue;
+                }
+
+                Connection? feed = inner.Connections.FirstOrDefault(c => c.ToNodeId == inner.OutputNode.Id);
+                outputSources[composite.Id] = feed is null ? null : (feed.FromNodeId, feed.FromPort);
+            }
+
+            foreach (Connection c in _connections)
+            {
+                Guid fromNode = c.FromNodeId;
+                string fromPort = c.FromPort;
+
+                if (outputSources.TryGetValue(c.FromNodeId, out (Guid, string)? source))
+                {
+                    if (source is null)
+                    {
+                        //a disabled composite hands on whatever fed its pass-through input
+                        if (!passThrough.TryGetValue(c.FromNodeId, out string? via)) continue;
+
+                        Connection? fed = _connections.FirstOrDefault(x => x.ToNodeId == c.FromNodeId && x.ToPort == via);
+                        if (fed is null) continue;
+
+                        (fromNode, fromPort) = (fed.FromNodeId, fed.FromPort);
+                    }
+                    else (fromNode, fromPort) = source.Value;
+                }
+
+                Guid toNode = c.ToNodeId;
+                string toPort = c.ToPort;
+
+                if (inputTargets.TryGetValue((c.ToNodeId, c.ToPort), out (Guid, string) target)) (toNode, toPort) = target;
+
+                connections.Add(new Connection(fromNode, fromPort, toNode, toPort));
+            }
+
+            return new Graph(Domain, OutputNode, nodes, connections);
+        }
  
         //the ONLY fixed anchor left — mandatory, not removable. Every INPUT
         //is now an ordinary node (see InputNode) instead of a second fixed
@@ -106,6 +208,15 @@ namespace EditSharp.Components.Nodes
             OutputNode = outputNode;
             _nodes.Add(outputNode);
         }
+
+        //a flattened view - see Flattened. shares node objects with its source, owns nothing
+        private Graph(NodeDomain domain, OutputNode outputNode, List<Node> nodes, List<Connection> connections)
+        {
+            Domain = domain;
+            OutputNode = outputNode;
+            _nodes = nodes;
+            _connections = connections;
+        }
  
         /// <summary>
         /// A "normal/default" video clip: a single InputNode you supply
@@ -121,6 +232,9 @@ namespace EditSharp.Components.Nodes
         /// </summary>
         public static Graph CreateVideoGraph(InputNode input)
         {
+            //building, not editing - see Transaction's remarks, SUPPRESSED
+            using var _ = Transaction.Suppress();
+
             var graph = new Graph(NodeDomain.Image, new ImageOutputNode());
  
             graph.AddNode(input);
@@ -143,6 +257,8 @@ namespace EditSharp.Components.Nodes
         /// </summary>
         public static Graph CreateAudioGraph(InputNode input)
         {
+            using var _ = Transaction.Suppress();
+
             var graph = new Graph(NodeDomain.Audio, new AudioOutputNode());
  
             graph.AddNode(input);
@@ -165,14 +281,21 @@ namespace EditSharp.Components.Nodes
         public static Graph CreateEmptyAudioGraph() => new(NodeDomain.Audio, new AudioOutputNode());
  
         /// <summary>Deep copy — a fresh graph with fresh node Ids, connections remapped to match.</summary>
-        public Graph Duplicate()
+        public Graph Duplicate() => Duplicate(out _);
+
+        /// <summary>Deep copy that also reports which new node id each old one became — a composite needs that to carry its exposures across.</summary>
+        internal Graph Duplicate(out Dictionary<Guid, Guid> idMap)
         {
+            using var _ = Transaction.Suppress();
+
             var map = new Dictionary<Guid, Node>();
- 
+            var ids = new Dictionary<Guid, Guid>();
+
             Node NewOf(Node original)
             {
                 Node copy = original.Duplicate();
                 map[original.Id] = copy;
+                ids[original.Id] = copy.Id;
                 return copy;
             }
  
@@ -193,9 +316,10 @@ namespace EditSharp.Components.Nodes
                     map[c.FromNodeId].Id, c.FromPort, map[c.ToNodeId].Id, c.ToPort));
             }
  
+            idMap = ids;
             return graph;
         }
- 
+
         private Node? Find(Guid id) => _nodes.FirstOrDefault(n => n.Id == id);
  
         /// <summary>
@@ -232,7 +356,7 @@ namespace EditSharp.Components.Nodes
                 throw new InvalidOperationException(
                     $"Cannot add a {nodeDomain} node to a {Domain} Graph.");
  
-            _nodes.Add(node);
+            Transaction.Apply(() => _nodes.Add(node), () => _nodes.Remove(node), "add node");
             return node;
         }
  
@@ -250,8 +374,13 @@ namespace EditSharp.Components.Nodes
             if (ReferenceEquals(node, OutputNode))
                 throw new InvalidOperationException("OutputNode cannot be removed from a Graph.");
  
-            _nodes.Remove(node);
-            _connections.RemoveAll(c => c.FromNodeId == node.Id || c.ToNodeId == node.Id);
+            int index = _nodes.IndexOf(node);
+            List<Connection> severed = _connections.Where(c => c.FromNodeId == node.Id || c.ToNodeId == node.Id).ToList();
+
+            Transaction.Apply(
+                () => { _nodes.Remove(node); _connections.RemoveAll(severed.Contains); },
+                () => { _nodes.Insert(System.Math.Min(index, _nodes.Count), node); _connections.AddRange(severed); },
+                "remove node");
         }
  
         /// <summary>
@@ -288,11 +417,20 @@ namespace EditSharp.Components.Nodes
                 throw new InvalidOperationException("This connection would create a cycle.");
  
             var connection = new Connection(fromNode, fromPort, toNode, toPort);
-            _connections.Add(connection);
+            Transaction.Apply(() => _connections.Add(connection), () => _connections.Remove(connection), "connect");
             return connection;
         }
  
-        public void Disconnect(Connection connection) => _connections.Remove(connection);
+        public void Disconnect(Connection connection)
+        {
+            int index = _connections.IndexOf(connection);
+            if (index < 0) return;
+
+            Transaction.Apply(
+                () => _connections.Remove(connection),
+                () => _connections.Insert(System.Math.Min(index, _connections.Count), connection),
+                "disconnect");
+        }
  
         /// <summary>True if `from` can reach `to` by following existing Connections forward.</summary>
         private bool CanReach(Guid from, Guid to)

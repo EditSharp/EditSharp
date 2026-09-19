@@ -62,7 +62,13 @@ namespace EditSharp.Audio
         /// per-InputNode-type resolution. Returns the AudioOutputNode's
         /// resolved buffer.
         /// </summary>
-        public static AudioBuffer Evaluate(Graph graph, IReadOnlyDictionary<Guid, AudioBuffer> resolvedInputs)
+        /// <summary>
+        /// `speed` is the owning clip's Speed: the buffers are in timeline
+        /// time (one frame per timeline sample), but every keyframed
+        /// parameter is stored at 1x, so automation is sampled at
+        /// timeline-time × speed — see RenderAutomation.
+        /// </summary>
+        public static AudioBuffer Evaluate(Graph graph, IReadOnlyDictionary<Guid, AudioBuffer> resolvedInputs, double speed = 1d)
         {
             if (graph.Domain != NodeDomain.Audio)
                 throw new InvalidOperationException("AudioGraphEvaluator requires an Audio-domain Graph.");
@@ -115,10 +121,9 @@ namespace EditSharp.Audio
  
                         if (!gain.Enabled) { buffers[(node.Id, "Audio")] = upstream; break; }
  
-                        float?[] modulation = RenderValueModulation(
-                            graph, node, "Modulation", upstream.FrameCount, upstream.SampleRate);
+                        float?[] modulation = RenderValueModulation(graph, node, "Modulation", upstream.FrameCount, upstream.SampleRate, speed);
  
-                        buffers[(node.Id, "Audio")] = ApplyGain(upstream, gain.Gain, modulation);
+                        buffers[(node.Id, "Audio")] = ApplyGain(upstream, gain.Gain, modulation, speed);
                         break;
                     }
  
@@ -126,7 +131,7 @@ namespace EditSharp.Audio
                     {
                         AudioBuffer upstream = Require(graph, node, "Audio", buffers);
                         buffers[(node.Id, "Audio")] = eq.Enabled
-                            ? ApplyEq(upstream, eq.Bands)
+                            ? ApplyEq(upstream, eq.Bands, speed)
                             : upstream;
                         break;
                     }
@@ -135,7 +140,7 @@ namespace EditSharp.Audio
                     {
                         AudioBuffer upstream = Require(graph, node, "Audio", buffers);
                         buffers[(node.Id, "Audio")] = compressor.Enabled
-                            ? ApplyCompressor(upstream, compressor)
+                            ? ApplyCompressor(upstream, compressor, speed)
                             : upstream;
                         break;
                     }
@@ -144,7 +149,7 @@ namespace EditSharp.Audio
                     {
                         AudioBuffer a = Require(graph, node, "A", buffers);
                         AudioBuffer b = Require(graph, node, "B", buffers);
-                        buffers[(node.Id, "Result")] = ApplyMix(graph, mix, a, b);
+                        buffers[(node.Id, "Result")] = ApplyMix(graph, mix, a, b, speed);
                         break;
                     }
  
@@ -194,16 +199,17 @@ namespace EditSharp.Audio
         /// `frameCount` frames (clip-relative time, second 0 == first frame),
         /// linearly interpolated between block boundaries.
         /// </summary>
-        private static float[] RenderAutomation(Animatable<float> param, int frameCount, int sampleRate)
+        private static float[] RenderAutomation(Animatable<float> param, int frameCount, int sampleRate, double speed)
         {
             var values = new float[frameCount];
             if (frameCount == 0) return values;
- 
+
             int blockCount = (frameCount + AutomationBlockFrames - 1) / AutomationBlockFrames + 1;
             var blockValues = new float[blockCount];
             for (int b = 0; b < blockCount; b++)
             {
-                TimeSpan t = TimeSpan.FromSeconds((double)(b * AutomationBlockFrames) / sampleRate);
+                //content time — see Evaluate's remarks on `speed`
+                TimeSpan t = TimeSpan.FromSeconds((double)(b * AutomationBlockFrames) / sampleRate * speed);
                 blockValues[b] = param.Evaluate(t);
             }
  
@@ -224,18 +230,18 @@ namespace EditSharp.Audio
         /// meaning "no modulation, use the node's own keyframed value as-is").
         /// </summary>
         private static float?[] RenderValueModulation(
-            Graph graph, Node node, string portName, int frameCount, int sampleRate)
+            Graph graph, Node node, string portName, int frameCount, int sampleRate, double speed)
         {
             var values = new float?[frameCount];
             if (frameCount == 0) return values;
- 
+
             int blockCount = (frameCount + AutomationBlockFrames - 1) / AutomationBlockFrames + 1;
             var blockValues = new float?[blockCount];
             bool anyConnected = false;
- 
+
             for (int b = 0; b < blockCount; b++)
             {
-                TimeSpan t = TimeSpan.FromSeconds((double)(b * AutomationBlockFrames) / sampleRate);
+                TimeSpan t = TimeSpan.FromSeconds((double)(b * AutomationBlockFrames) / sampleRate * speed);
                 float? v = ValueGraphEvaluator.TryEvaluateConnectedInput(graph, node, portName, t);
                 blockValues[b] = v;
                 if (v.HasValue) anyConnected = true;
@@ -267,9 +273,9 @@ namespace EditSharp.Audio
         /// it, so an author keeps Gain's own curve and layers a
         /// procedurally-computed modulation on top.
         /// </summary>
-        private static AudioBuffer ApplyGain(AudioBuffer input, Animatable<float> gain, float?[] modulation)
+        private static AudioBuffer ApplyGain(AudioBuffer input, Animatable<float> gain, float?[] modulation, double speed)
         {
-            float[] curve = RenderAutomation(gain, input.FrameCount, input.SampleRate);
+            float[] curve = RenderAutomation(gain, input.FrameCount, input.SampleRate, speed);
             var output = new float[input.Samples.Length];
  
             for (int frame = 0; frame < input.FrameCount; frame++)
@@ -292,28 +298,28 @@ namespace EditSharp.Audio
         /// doesn't introduce a discontinuity in the filter's memory, only in
         /// its response.
         /// </summary>
-        private static AudioBuffer ApplyEq(AudioBuffer input, List<EQBand> bands)
+        private static AudioBuffer ApplyEq(AudioBuffer input, List<EQBand> bands, double speed)
         {
             float[] output = (float[])input.Samples.Clone();
  
             foreach (EQBand band in bands)
             {
                 output = ApplyPeakingBand(
-                    new AudioBuffer(input.SampleRate, input.Channels, output), band).Samples;
+                    new AudioBuffer(input.SampleRate, input.Channels, output), band, speed).Samples;
             }
  
             return new AudioBuffer(input.SampleRate, input.Channels, output);
         }
  
-        private static AudioBuffer ApplyPeakingBand(AudioBuffer input, EQBand band)
+        private static AudioBuffer ApplyPeakingBand(AudioBuffer input, EQBand band, double speed)
         {
             int frameCount = input.FrameCount;
             int channels = input.Channels;
             int sampleRate = input.SampleRate;
  
-            float[] freqCurve = RenderAutomation(band.FrequencyHz, frameCount, sampleRate);
-            float[] gainCurve = RenderAutomation(band.GainDb, frameCount, sampleRate);
-            float[] qCurve = RenderAutomation(band.Q, frameCount, sampleRate);
+            float[] freqCurve = RenderAutomation(band.FrequencyHz, frameCount, sampleRate, speed);
+            float[] gainCurve = RenderAutomation(band.GainDb, frameCount, sampleRate, speed);
+            float[] qCurve = RenderAutomation(band.Q, frameCount, sampleRate, speed);
  
             var output = new float[input.Samples.Length];
  
@@ -377,17 +383,17 @@ namespace EditSharp.Audio
         /// (attack/release smoothed) feeding a static threshold/ratio
         /// knee-less gain-reduction curve, plus makeup gain.
         /// </summary>
-        private static AudioBuffer ApplyCompressor(AudioBuffer input, CompressorNode node)
+        private static AudioBuffer ApplyCompressor(AudioBuffer input, CompressorNode node, double speed)
         {
             int frameCount = input.FrameCount;
             int channels = input.Channels;
             int sampleRate = input.SampleRate;
  
-            float[] thresholdCurve = RenderAutomation(node.Threshold, frameCount, sampleRate);
-            float[] ratioCurve = RenderAutomation(node.Ratio, frameCount, sampleRate);
-            float[] attackCurve = RenderAutomation(node.AttackMs, frameCount, sampleRate);
-            float[] releaseCurve = RenderAutomation(node.ReleaseMs, frameCount, sampleRate);
-            float[] makeupCurve = RenderAutomation(node.MakeupGainDb, frameCount, sampleRate);
+            float[] thresholdCurve = RenderAutomation(node.Threshold, frameCount, sampleRate, speed);
+            float[] ratioCurve = RenderAutomation(node.Ratio, frameCount, sampleRate, speed);
+            float[] attackCurve = RenderAutomation(node.AttackMs, frameCount, sampleRate, speed);
+            float[] releaseCurve = RenderAutomation(node.ReleaseMs, frameCount, sampleRate, speed);
+            float[] makeupCurve = RenderAutomation(node.MakeupGainDb, frameCount, sampleRate, speed);
  
             var output = new float[input.Samples.Length];
  
@@ -438,7 +444,7 @@ namespace EditSharp.Audio
         /// video side. The shorter of the two branches is treated as silence
         /// past its own end, so mismatched branch lengths don't throw.
         /// </summary>
-        private static AudioBuffer ApplyMix(Graph graph, AudioMixNode node, AudioBuffer a, AudioBuffer b)
+        private static AudioBuffer ApplyMix(Graph graph, AudioMixNode node, AudioBuffer a, AudioBuffer b, double speed)
         {
             int channels = a.Channels;
             if (b.Channels != channels)
@@ -450,11 +456,11 @@ namespace EditSharp.Audio
             AudioBuffer aFit = a.FrameCount == frameCount ? a : a.Slice(0, frameCount);
             AudioBuffer bFit = b.FrameCount == frameCount ? b : b.Slice(0, frameCount);
  
-            float[] mixACurve = RenderAutomation(node.MixA, frameCount, sampleRate);
-            float[] mixBCurve = RenderAutomation(node.MixB, frameCount, sampleRate);
+            float[] mixACurve = RenderAutomation(node.MixA, frameCount, sampleRate, speed);
+            float[] mixBCurve = RenderAutomation(node.MixB, frameCount, sampleRate, speed);
  
-            float?[] modA = RenderValueModulation(graph, node, "MixAModulation", frameCount, sampleRate);
-            float?[] modB = RenderValueModulation(graph, node, "MixBModulation", frameCount, sampleRate);
+            float?[] modA = RenderValueModulation(graph, node, "MixAModulation", frameCount, sampleRate, speed);
+            float?[] modB = RenderValueModulation(graph, node, "MixBModulation", frameCount, sampleRate, speed);
  
             var output = new float[frameCount * channels];
  

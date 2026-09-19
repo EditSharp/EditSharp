@@ -2,7 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components.Channels;
-using EditSharp.Components.Clips;
+using EditSharp.Components.Clips;
+using EditSharp.History;
 
 namespace EditSharp.Components
 {
@@ -168,7 +169,9 @@ namespace EditSharp.Components
             TimeSpan clamped = amount;
             if (atStart)
             {
-                TimeSpan ceiling = members.Select(m => m.MaxHeadExtend()).Min();
+                //timeline time, like `amount` — MaxHeadExtend is content time
+                //and the two differ once a member has a Speed
+                TimeSpan ceiling = members.Select(m => m.HeadExtendLimit).Min();
                 clamped = ceiling == TimeSpan.MaxValue || amount <= ceiling ? amount : ceiling;
             }
 
@@ -266,6 +269,8 @@ namespace EditSharp.Components
         public static (VideoClip Video, AudioClip Audio) CreateAudioVideoPair(
             Source source, TimeSpan start, TimeSpan duration)
         {
+            using var _ = Transaction.Suppress();
+            
             Guid groupId = Guid.NewGuid();
 
             VideoClip video = VideoClip.CreateFromSource(source.Duplicate(), start, duration);
@@ -281,6 +286,8 @@ namespace EditSharp.Components
         public static (VideoClip Video, AudioClip Audio) CreateTimelineAudioVideoPair(
             TimelineReference reference, TimeSpan start, TimeSpan duration)
         {
+            using var _ = Transaction.Suppress();
+            
             Guid groupId = Guid.NewGuid();
 
             VideoClip video = VideoClip.CreateTimelineEmbed(reference.Duplicate(), start, duration);

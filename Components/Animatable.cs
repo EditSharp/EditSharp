@@ -1,4 +1,5 @@
 using System;
+using EditSharp.History;
  
 namespace EditSharp.Components
 {
@@ -9,17 +10,42 @@ namespace EditSharp.Components
     /// itself needs to change for a new property type (as long as an
     /// IInterpolator&lt;T&gt; is registered — see Interpolators.Resolve).
     /// </summary>
-    public sealed class Animatable<T>
+    /// <summary>
+    /// The non-generic face of Animatable&lt;T&gt;: what a Node hands out so
+    /// a clip can reach every keyframe track it owns without knowing the
+    /// value types — see Node.Animatables and Clip.OnHeadInPointShift.
+    /// </summary>
+    public interface IAnimatable
+    {
+        /// <summary>Moves every keyframe by `amount`. Keyframes are anchored to the content, so a head trim/extend shifts them all.</summary>
+        void ShiftKeyframes(TimeSpan amount);
+
+        /// <summary>The T in Animatable&lt;T&gt;.</summary>
+        Type ValueType { get; }
+
+        /// <summary>True once the track has enough keyframes to override the static value.</summary>
+        bool IsAnimated { get; }
+
+        /// <summary>The static value, untyped — for editors that only know the descriptor.</summary>
+        object? GetStaticValue();
+
+        /// <summary>Writes the static value from an untyped editor, coercing numbers and enums.</summary>
+        void SetStaticValue(object? value);
+    }
+
+    public sealed class Animatable<T> : IAnimatable
     {
         //used when there's no track, or fewer than 2 keyframes
-        public T StaticValue { get; set; }
+        T _staticValue;
+        public T StaticValue { get => _staticValue; set => Transaction.Set(this, ref _staticValue, value, static (o, v) => o._staticValue = v); }
  
         //null = not animated
-        public KeyframeTrack<T>? Track { get; private set; }
+        KeyframeTrack<T>? _track;
+        public KeyframeTrack<T>? Track { get => _track; private set => Transaction.Set(this, ref _track, value, static (o, v) => o._track = v); }
  
         public Animatable(T staticValue)
         {
-            StaticValue = staticValue;
+            _staticValue = staticValue;
         }
  
         public static implicit operator Animatable<T>(T value) => new(value);
@@ -57,32 +83,28 @@ namespace EditSharp.Components
             return Track.Evaluate(clipRelativeTime);
         }
  
+        public void ShiftKeyframes(TimeSpan amount) => Track?.Shift(amount);
+
+        public Type ValueType => typeof(T);
+
+        public bool IsAnimated => Track is not null && Track.Keyframes.Count >= 2;
+
+        public object? GetStaticValue() => StaticValue;
+
+        public void SetStaticValue(object? value) => StaticValue = (T)Editing.PropertyDescriptor.Coerce(value, typeof(T))!;
+
+        /// <summary>
+        /// Deep copy. The track copies itself so a subclass (PositionTrack)
+        /// survives as that subclass, spatial handles and all — rebuilding a
+        /// plain KeyframeTrack here is what used to flatten a split
+        /// fragment's motion path into straight lines.
+        /// </summary>
         public Animatable<T> Duplicate()
         {
+            using var _ = Transaction.Suppress();
+
             var copy = new Animatable<T>(StaticValue);
-            if (Track == null) return copy;
- 
-            KeyframeTrack<T> newTrack = copy.GetOrCreateTrack();
-            foreach (Keyframe<T> kf in Track.Keyframes)
-            {
-                Keyframe<T> added = newTrack.AddKeyframe(kf.Start, kf.Value);
-                added.InInterpolation = kf.InInterpolation;
-                added.OutInterpolation = kf.OutInterpolation;
-                added.InTangentMode = kf.InTangentMode;
-                added.OutTangentMode = kf.OutTangentMode;
- 
-                if (kf.InHandle != null)
-                    newTrack.SetHandle(added, isInHandle: true, kf.InHandle.TimeOffset, kf.InHandle.ValueOffset);
-                if (kf.OutHandle != null)
-                    newTrack.SetHandle(added, isInHandle: false, kf.OutHandle.TimeOffset, kf.OutHandle.ValueOffset);
- 
-                //SetHandle above promotes Auto -> Free as a side effect (see
-                //its own remarks) — restore the source's real tangent modes
-                //now that both handles are copied
-                added.InTangentMode = kf.InTangentMode;
-                added.OutTangentMode = kf.OutTangentMode;
-            }
- 
+            if (Track != null) copy.AttachTrack(Track.Duplicate());
             return copy;
         }
     }

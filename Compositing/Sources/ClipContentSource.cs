@@ -104,7 +104,7 @@ namespace EditSharp.Compositing.Sources
         {
             var result = new Dictionary<Guid, (SKImage, bool)>();
 
-            foreach (InputNode node in clip.Graph.Nodes.OfType<InputNode>())
+            foreach (InputNode node in clip.Graph.AllNodes.OfType<InputNode>())
             {
                 result[node.Id] = node switch
                 {
@@ -169,7 +169,7 @@ namespace EditSharp.Compositing.Sources
             //resolution per axis independently — see DecodeSizeHeuristics'
             //own remarks on the downstream-TransformNode approximation.
             ClipTransform transform =
-                DecodeSizeHeuristics.FindDownstreamTransform(clip.Graph, media)?.Transform ?? new ClipTransform();
+                DecodeSizeHeuristics.FindDownstreamTransform(clip.Graph.Flattened, media)?.Transform ?? new ClipTransform();
 
             (int desiredWidth, int desiredHeight) = TransformProjection.ComputeContentSize(
                 transform, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
@@ -191,8 +191,10 @@ namespace EditSharp.Compositing.Sources
             //OptimizedMediaCache entry — never the node's own original source
             bool fastOpen = decodeSourcePath != media.Source.Path;
 
+            //Speed retimes the decode itself (see SourceDecoder.Start), so
+            //NextFrame keeps handing back exactly one frame per timeline frame
             SourceDecoder decoder = SourceDecoder.Start(
-                decodeSourcePath, startSeconds, _fps, decodeWidth, decodeHeight, plan, fastOpen);
+                decodeSourcePath, startSeconds, _fps, decodeWidth, decodeHeight, plan, fastOpen, clip.Speed);
 
             _videoDecoders[media.Id] = decoder;
 

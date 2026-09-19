@@ -1368,7 +1368,7 @@ namespace EditSharp.Playback
                 {
                     if (clip is not VideoClip video) continue;
 
-                    foreach (VideoSourceNode media in video.Graph.Nodes.OfType<VideoSourceNode>())
+                    foreach (VideoSourceNode media in video.Graph.AllNodes.OfType<VideoSourceNode>())
                     {
                         if (media.Source.Type != SourceType.Video) continue;
 
@@ -1430,7 +1430,7 @@ namespace EditSharp.Playback
             timeline.VideoChannels
                 .SelectMany(channel => channel.Clips)
                 .OfType<VideoClip>()
-                .SelectMany(video => video.Graph.Nodes.OfType<VideoSourceNode>())
+                .SelectMany(video => video.Graph.AllNodes.OfType<VideoSourceNode>())
                 .Where(media => media.Source.Type == SourceType.Video)
                 .Select(media => media.Source.Path)
                 .Distinct();
@@ -1879,10 +1879,12 @@ namespace EditSharp.Playback
                 foreach (Clip clip in channel.Clips)
                 {
                     if (clip is not VideoClip video) continue;
-                    if (!video.Graph.Nodes.OfType<VideoSourceNode>().Any(m => m.Source.Type == SourceType.Video)) continue;
+                    if (!video.Graph.AllNodes.OfType<VideoSourceNode>().Any(m => m.Source.Type == SourceType.Video)) continue;
                     if (position < clip.Start || position >= clip.End) continue;
 
-                    offsets[clip] = position - clip.Start;
+                    //content time — the decoder is opened that far into the
+                    //source, and a retimed clip covers Speed times as much
+                    offsets[clip] = clip.ToContentTime(position - clip.Start);
                 }
             }
 

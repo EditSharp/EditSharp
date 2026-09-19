@@ -1,6 +1,7 @@
 using System;
 using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Nodes.Sources;
+using EditSharp.History;
 using EditSharp.Components; // Source
  
 namespace EditSharp.Components.Clips
@@ -23,22 +24,19 @@ namespace EditSharp.Components.Clips
  
         private AudioClip(Graph graph) => _graph = graph;
  
-        public static AudioClip CreateFromSource(Source source, TimeSpan start, TimeSpan duration) =>
-            new(Graph.CreateAudioGraph(new AudioSourceNode { Source = source })) { Start = start, Duration = duration };
+        public static AudioClip CreateFromSource(Source source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(new AudioSourceNode { Source = source })) { Start = start, Duration = duration });
  
         public static AudioClip CreateTone(
             TimeSpan start, TimeSpan duration, Waveform waveform = Waveform.Sine,
-            float frequencyHz = 440f, float amplitude = 1f) =>
-            new(Graph.CreateAudioGraph(new ToneGeneratorInputNode
+            float frequencyHz = 440f, float amplitude = 1f) => Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(new ToneGeneratorInputNode
             {
                 Waveform = waveform,
                 Frequency = new(frequencyHz),
                 Amplitude = new(amplitude),
             }))
-            { Start = start, Duration = duration };
+            { Start = start, Duration = duration });
  
-        public static AudioClip CreateTimelineEmbed(TimelineReference reference, TimeSpan start, TimeSpan duration) =>
-            new(Graph.CreateAudioGraph(new TimelineAudioInputNode { Reference = reference })) { Start = start, Duration = duration };
+        public static AudioClip CreateTimelineEmbed(TimelineReference reference, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(new TimelineAudioInputNode { Reference = reference })) { Start = start, Duration = duration });
  
         /// <summary>Escape hatch for a fully custom graph — see VideoClip.CreateCustom's own remarks.</summary>
         public static AudioClip CreateCustom(Graph graph, TimeSpan start, TimeSpan duration)
@@ -46,10 +44,10 @@ namespace EditSharp.Components.Clips
             if (graph.Domain != NodeDomain.Audio)
                 throw new ArgumentException("AudioClip requires an Audio-domain Graph.", nameof(graph));
  
-            return new AudioClip(graph) { Start = start, Duration = duration };
+            return Transaction.Suppressed(() => new AudioClip(graph) { Start = start, Duration = duration });
         }
  
-        public override AudioClip Duplicate() => new(Graph.Duplicate()) { Start = Start, Duration = Duration };
+        public override AudioClip Duplicate() => Transaction.Suppressed(() => new AudioClip(Graph.Duplicate()) { Start = Start, Duration = Duration, Speed = Speed });
     }
 }
  

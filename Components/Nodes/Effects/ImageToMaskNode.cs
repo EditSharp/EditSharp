@@ -1,5 +1,7 @@
 using System.Collections.Generic;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Nodes.Effects
 {
@@ -7,7 +9,9 @@ namespace EditSharp.Components.Nodes.Effects
  
     public sealed class ImageToMaskNode : Node
     {
-        public MaskChannelSource Channel { get; set; } = MaskChannelSource.Alpha;
+        MaskChannelSource _channel = MaskChannelSource.Alpha;
+        [Editable("Channel")]
+        public MaskChannelSource Channel { get => _channel; set => Transaction.Set(this, ref _channel, value, static (o, v) => o._channel = v); }
  
         private static readonly NodePort[] StaticPorts =
         [
@@ -16,7 +20,7 @@ namespace EditSharp.Components.Nodes.Effects
         ];
  
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
-        public override Node Duplicate() => new ImageToMaskNode { Enabled = Enabled, Channel = Channel };
+        public override Node Duplicate() => Transaction.Suppressed(() => new ImageToMaskNode { Enabled = Enabled, Channel = Channel });
     }
 }
  

@@ -1,5 +1,7 @@
 using System.Collections.Generic;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Nodes.Math
 {
@@ -25,7 +27,9 @@ namespace EditSharp.Components.Nodes.Math
     /// </summary>
     public sealed class MathNode : Node
     {
-        public MathOperation Operation { get; set; } = MathOperation.Add;
+        MathOperation _operation = MathOperation.Add;
+        [Editable("Operation")]
+        public MathOperation Operation { get => _operation; set => Transaction.Set(this, ref _operation, value, static (o, v) => o._operation = v); }
  
         private static readonly NodePort[] StaticPorts =
         [
@@ -35,7 +39,7 @@ namespace EditSharp.Components.Nodes.Math
         ];
  
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
-        public override Node Duplicate() => new MathNode { Enabled = Enabled, Operation = Operation };
+        public override Node Duplicate() => Transaction.Suppressed(() => new MathNode { Enabled = Enabled, Operation = Operation });
     }
 }
  

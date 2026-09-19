@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using EditSharp.History;
  
 namespace EditSharp.Components
 {
@@ -13,11 +14,15 @@ namespace EditSharp.Components
     public sealed class SpatialKeyframe : Keyframe<Vector2>
     {
         //offsets in CANVAS space, not time — shape of the path arriving/leaving
-        public Vector2? SpatialInHandle { get; internal set; }
-        public Vector2? SpatialOutHandle { get; internal set; }
+        Vector2? _spatialInHandle;
+        public Vector2? SpatialInHandle { get => _spatialInHandle; internal set => Transaction.Set(this, ref _spatialInHandle, value, static (o, v) => o._spatialInHandle = v); }
+        Vector2? _spatialOutHandle;
+        public Vector2? SpatialOutHandle { get => _spatialOutHandle; internal set => Transaction.Set(this, ref _spatialOutHandle, value, static (o, v) => o._spatialOutHandle = v); }
  
-        public TangentMode SpatialInTangentMode { get; internal set; } = TangentMode.Auto;
-        public TangentMode SpatialOutTangentMode { get; internal set; } = TangentMode.Auto;
+        TangentMode _spatialInTangentMode = TangentMode.Auto;
+        public TangentMode SpatialInTangentMode { get => _spatialInTangentMode; internal set => Transaction.Set(this, ref _spatialInTangentMode, value, static (o, v) => o._spatialInTangentMode = v); }
+        TangentMode _spatialOutTangentMode = TangentMode.Auto;
+        public TangentMode SpatialOutTangentMode { get => _spatialOutTangentMode; internal set => Transaction.Set(this, ref _spatialOutTangentMode, value, static (o, v) => o._spatialOutTangentMode = v); }
  
         internal SpatialKeyframe(TimeSpan start, Vector2 value) : base(start, value) { }
     }
@@ -48,6 +53,18 @@ namespace EditSharp.Components
  
         public SpatialKeyframe AddSpatialKeyframe(TimeSpan start, Vector2 value) =>
             (SpatialKeyframe)AddKeyframe(start, value);
+
+        protected override KeyframeTrack<Vector2> CreateEmptyCopy() => new PositionTrack();
+
+        protected override void CopyKeyframeExtras(Keyframe<Vector2> source, Keyframe<Vector2> target)
+        {
+            if (source is not SpatialKeyframe from || target is not SpatialKeyframe to) return;
+
+            to.SpatialInHandle = from.SpatialInHandle;
+            to.SpatialOutHandle = from.SpatialOutHandle;
+            to.SpatialInTangentMode = from.SpatialInTangentMode;
+            to.SpatialOutTangentMode = from.SpatialOutTangentMode;
+        }
  
         public void SetSpatialHandle(SpatialKeyframe keyframe, bool isInHandle, Vector2 offset)
         {

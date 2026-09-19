@@ -69,7 +69,7 @@ namespace EditSharp.Compositing.Sources
                 {
                     if (clip is not VideoClip video) continue;
 
-                    foreach (VideoSourceNode media in video.Graph.Nodes.OfType<VideoSourceNode>())
+                    foreach (VideoSourceNode media in video.Graph.AllNodes.OfType<VideoSourceNode>())
                     {
                         if (media.Source.Type != SourceType.Video) continue;
 
@@ -134,7 +134,7 @@ namespace EditSharp.Compositing.Sources
                 if (cached is { } entry)
                 {
                     ClipTransform transform =
-                        DecodeSizeHeuristics.FindDownstreamTransform(clip.Graph, media)?.Transform ?? new ClipTransform();
+                        DecodeSizeHeuristics.FindDownstreamTransform(clip.Graph.Flattened, media)?.Transform ?? new ClipTransform();
 
                     (int requiredWidth, int requiredHeight) = TransformProjection.ComputeContentSize(
                         transform, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
@@ -183,7 +183,7 @@ namespace EditSharp.Compositing.Sources
                 {
                     if (clip is not VideoClip video) continue;
 
-                    foreach (VideoSourceNode media in video.Graph.Nodes.OfType<VideoSourceNode>())
+                    foreach (VideoSourceNode media in video.Graph.AllNodes.OfType<VideoSourceNode>())
                     {
                         if (media.Source.Type != SourceType.Video) continue;
                         checks.Add(CheckOneAsync(video, media, canvasWidth, canvasHeight));
@@ -231,7 +231,7 @@ namespace EditSharp.Compositing.Sources
                 foreach (Clip clip in channel.Clips)
                 {
                     if (clip is not VideoClip video) continue;
-                    if (!video.Graph.Nodes.OfType<VideoSourceNode>().Any(m => m.Source.Type == SourceType.Video)) continue;
+                    if (!video.Graph.AllNodes.OfType<VideoSourceNode>().Any(m => m.Source.Type == SourceType.Video)) continue;
 
                     int lastVisibleFrame = Math.Max(0, (int)Math.Ceiling(clip.End.TotalSeconds * fps) - 1);
 

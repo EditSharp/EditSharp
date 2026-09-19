@@ -166,7 +166,7 @@ namespace EditSharp.Compositing.Sources
         {
             var result = new Dictionary<Guid, (SKImage, bool)>();
 
-            foreach (InputNode node in clip.Graph.Nodes.OfType<InputNode>())
+            foreach (InputNode node in clip.Graph.AllNodes.OfType<InputNode>())
             {
                 result[node.Id] = node switch
                 {

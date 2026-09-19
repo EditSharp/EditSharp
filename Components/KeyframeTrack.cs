@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using EditSharp.History;
 
 namespace EditSharp.Components
 {
@@ -37,28 +38,36 @@ namespace EditSharp.Components
         //relative to the clip/track's own beginning — see the "Keyframe
         //anchoring under Trim" section of the schema doc for why Trim never
         //has to touch this
-        public TimeSpan Start { get; internal set; }
+        TimeSpan _start;
+        public TimeSpan Start { get => _start; internal set => Transaction.Set(this, ref _start, value, static (o, v) => o._start = v); }
 
-        public T Value { get; set; }
+        T _value;
+        public T Value { get => _value; set => Transaction.Set(this, ref _value, value, static (o, v) => o._value = v); }
 
         //shape of curve ARRIVING at this keyframe / LEAVING this keyframe.
         //Independent per side — see KeyframeTrack.Evaluate for how a
         //segment's shape is jointly decided by the left keyframe's
         //OutInterpolation and the right keyframe's InInterpolation.
-        public InterpolationType InInterpolation { get; set; } = InterpolationType.Linear;
-        public InterpolationType OutInterpolation { get; set; } = InterpolationType.Linear;
+        InterpolationType _inInterpolation = InterpolationType.Linear;
+        public InterpolationType InInterpolation { get => _inInterpolation; set => Transaction.Set(this, ref _inInterpolation, value, static (o, v) => o._inInterpolation = v); }
+        InterpolationType _outInterpolation = InterpolationType.Linear;
+        public InterpolationType OutInterpolation { get => _outInterpolation; set => Transaction.Set(this, ref _outInterpolation, value, static (o, v) => o._outInterpolation = v); }
 
         //meaningful only when the matching Interpolation is Bezier
-        public KeyframeHandle<T>? InHandle { get; internal set; }
-        public KeyframeHandle<T>? OutHandle { get; internal set; }
+        KeyframeHandle<T>? _inHandle;
+        public KeyframeHandle<T>? InHandle { get => _inHandle; internal set => Transaction.Set(this, ref _inHandle, value, static (o, v) => o._inHandle = v); }
+        KeyframeHandle<T>? _outHandle;
+        public KeyframeHandle<T>? OutHandle { get => _outHandle; internal set => Transaction.Set(this, ref _outHandle, value, static (o, v) => o._outHandle = v); }
 
-        public TangentMode InTangentMode { get; internal set; } = TangentMode.Auto;
-        public TangentMode OutTangentMode { get; internal set; } = TangentMode.Auto;
+        TangentMode _inTangentMode = TangentMode.Auto;
+        public TangentMode InTangentMode { get => _inTangentMode; internal set => Transaction.Set(this, ref _inTangentMode, value, static (o, v) => o._inTangentMode = v); }
+        TangentMode _outTangentMode = TangentMode.Auto;
+        public TangentMode OutTangentMode { get => _outTangentMode; internal set => Transaction.Set(this, ref _outTangentMode, value, static (o, v) => o._outTangentMode = v); }
 
         internal Keyframe(TimeSpan start, T value)
         {
-            Start = start;
-            Value = value;
+            _start = start;
+            _value = value;
         }
     }
 
@@ -108,8 +117,12 @@ namespace EditSharp.Components
             Keyframe<T> created = CreateKeyframe(start, value);
 
             int insertAt = _keyframes.FindIndex(k => k.Start > start);
-            if (insertAt < 0) _keyframes.Add(created);
-            else _keyframes.Insert(insertAt, created);
+            if (insertAt < 0) insertAt = _keyframes.Count;
+
+            Transaction.Apply(
+                () => _keyframes.Insert(Math.Min(insertAt, _keyframes.Count), created),
+                () => _keyframes.Remove(created),
+                "add keyframe");
 
             //FOUND IN THE FIELD, FIXED: this used to only recompute the
             //newly-inserted keyframe's own Auto handles. But a keyframe's
@@ -141,6 +154,55 @@ namespace EditSharp.Components
         protected virtual Keyframe<T> CreateKeyframe(TimeSpan start, T value) => new(start, value);
 
         /// <summary>
+        /// Moves every keyframe by `amount`, in place. Handles are offsets
+        /// from their own keyframe, so they come along untouched. Keyframes
+        /// may end up before zero: a head trim leaves the ones it cut past
+        /// at negative times, so an extend back restores them exactly.
+        /// </summary>
+        public void Shift(TimeSpan amount)
+        {
+            if (amount == TimeSpan.Zero) return;
+
+            foreach (Keyframe<T> keyframe in _keyframes) keyframe.Start += amount;
+        }
+
+        /// <summary>Deep copy, of the same concrete track type — see CreateEmptyCopy/CopyKeyframeExtras.</summary>
+        public KeyframeTrack<T> Duplicate()
+        {
+            using var _ = Transaction.Suppress();
+
+            KeyframeTrack<T> copy = CreateEmptyCopy();
+
+            foreach (Keyframe<T> kf in _keyframes)
+            {
+                Keyframe<T> added = copy.AddKeyframe(kf.Start, kf.Value);
+                added.InInterpolation = kf.InInterpolation;
+                added.OutInterpolation = kf.OutInterpolation;
+
+                if (kf.InHandle != null)
+                    copy.SetHandle(added, isInHandle: true, kf.InHandle.TimeOffset, kf.InHandle.ValueOffset);
+                if (kf.OutHandle != null)
+                    copy.SetHandle(added, isInHandle: false, kf.OutHandle.TimeOffset, kf.OutHandle.ValueOffset);
+
+                //SetHandle promotes Auto -> Free as a side effect (see its
+                //own remarks) — restore the source's real tangent modes now
+                //that both handles are copied
+                added.InTangentMode = kf.InTangentMode;
+                added.OutTangentMode = kf.OutTangentMode;
+
+                CopyKeyframeExtras(kf, added);
+            }
+
+            return copy;
+        }
+
+        /// <summary>An empty track of this exact type, for Duplicate — a subclass returns its own type.</summary>
+        protected virtual KeyframeTrack<T> CreateEmptyCopy() => new(_interpolator);
+
+        /// <summary>Copies whatever a keyframe subtype carries beyond the base fields — see PositionTrack.</summary>
+        protected virtual void CopyKeyframeExtras(Keyframe<T> source, Keyframe<T> target) { }
+
+        /// <summary>
         /// A track reduced to zero keyframes is a valid state, not an error —
         /// Animatable&lt;T&gt;.Evaluate falls back to StaticValue whenever there
         /// are fewer than 2 (0 or 1 both qualify).
@@ -150,7 +212,10 @@ namespace EditSharp.Components
             int index = _keyframes.IndexOf(keyframe);
             if (index < 0) return;
 
-            _keyframes.RemoveAt(index);
+            Transaction.Apply(
+                () => _keyframes.Remove(keyframe),
+                () => _keyframes.Insert(Math.Min(index, _keyframes.Count), keyframe),
+                "remove keyframe");
 
             if (index > 0 && index < _keyframes.Count)
             {
@@ -199,7 +264,11 @@ namespace EditSharp.Components
             //re-sort in place — a clamp keeps it between neighbors, but a
             //caller could still hand this the keyframe list out of the order
             //it was enumerated in
-            _keyframes.Sort((a, b) => a.Start.CompareTo(b.Start));
+            List<Keyframe<T>> before = [.. _keyframes];
+            Transaction.Apply(
+                () => _keyframes.Sort((a, b) => a.Start.CompareTo(b.Start)),
+                () => { _keyframes.Clear(); _keyframes.AddRange(before); },
+                "reorder keyframes");
 
             //FOUND IN THE FIELD: this used to only ever recompute the LEFT
             //neighbor's Auto handle (`index - 1`, using the PRE-move index)
@@ -232,7 +301,7 @@ namespace EditSharp.Components
             if (index < 0) return;
 
             TimeSpan maxReach = isInHandle
-                ? (index > 0 ? keyframe.Start - _keyframes[index - 1].Start : keyframe.Start)
+                ? (index > 0 ? keyframe.Start - _keyframes[index - 1].Start : TimeSpan.MaxValue)
                 : (index < _keyframes.Count - 1 ? _keyframes[index + 1].Start - keyframe.Start : TimeSpan.MaxValue);
 
             TimeSpan clampedOffset = timeOffset < TimeSpan.Zero ? TimeSpan.Zero

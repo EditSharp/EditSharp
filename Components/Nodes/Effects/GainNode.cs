@@ -1,6 +1,8 @@
 using System.Collections.Generic;
 using EditSharp.Components;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Nodes.Effects
 {
@@ -13,7 +15,9 @@ namespace EditSharp.Components.Nodes.Effects
     /// </summary>
     public sealed class GainNode : Node
     {
-        public Animatable<float> Gain { get; set; } = new(1f);
+        Animatable<float> _gain = new(1f);
+        [Editable("Gain", Min = 0, Max = 4, Step = 0.01)]
+        public Animatable<float> Gain { get => _gain; set => Transaction.Set(this, ref _gain, value, static (o, v) => o._gain = v); }
  
         private static readonly NodePort[] StaticPorts =
         [
@@ -29,7 +33,9 @@ namespace EditSharp.Components.Nodes.Effects
         ];
  
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
-        public override Node Duplicate() => new GainNode { Enabled = Enabled, Gain = Gain.Duplicate() };
+        public override IEnumerable<IAnimatable> Animatables => [Gain];
+
+        public override Node Duplicate() => Transaction.Suppressed(() => new GainNode { Enabled = Enabled, Gain = Gain.Duplicate() });
     }
 }
  

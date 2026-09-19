@@ -50,7 +50,7 @@ namespace EditSharp.Compositing
             var clipRelativeTime = TimeSpan.FromSeconds(clipSeconds);
 
             using SKImage final = ImageGraphEvaluator.Evaluate(
-                clip.Graph, resolvedInputs, clipRelativeTime, context, pool);
+                clip.Graph.Flattened, resolvedInputs, clipRelativeTime, context, pool);
 
             canvas.DrawImage(final, 0, 0);
         }

@@ -2,6 +2,8 @@ using System.Collections.Generic;
 using SkiaSharp;
 using EditSharp.Components;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Nodes.Sources
 {
@@ -16,11 +18,15 @@ namespace EditSharp.Components.Nodes.Sources
     /// </summary>
     public sealed class ColorGeneratorInputNode : InputNode
     {
-        public Animatable<SKColor> Color { get; set; } = new(SKColors.Black);
+        Animatable<SKColor> _color = new(SKColors.Black);
+        [Editable("Color")]
+        public Animatable<SKColor> Color { get => _color; set => Transaction.Set(this, ref _color, value, static (o, v) => o._color = v); }
  
         private static readonly NodePort[] StaticPorts = [new("Image", PortType.Image, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
-        public override Node Duplicate() => new ColorGeneratorInputNode { Enabled = Enabled, Color = Color.Duplicate() };
+        public override IEnumerable<IAnimatable> Animatables => [Color];
+
+        public override Node Duplicate() => Transaction.Suppressed(() => new ColorGeneratorInputNode { Enabled = Enabled, Color = Color.Duplicate() });
     }
 }
  

@@ -2,6 +2,8 @@ using System.Collections.Generic;
 using EditSharp.Components;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Nodes;
+using EditSharp.History;
+using EditSharp.Editing;
  
 namespace EditSharp.Components.Nodes.Effects
 {
@@ -19,8 +21,12 @@ namespace EditSharp.Components.Nodes.Effects
         //the live rendering path and MergeNode composites two image streams
         //the exact same way a Channel composites onto the ones beneath it,
         //so the two should speak the same blend-mode vocabulary.
-        public ChannelBlendMode BlendMode { get; set; } = ChannelBlendMode.SrcOver;
-        public Animatable<float> Mix { get; set; } = new(1f); // 0 = pure A, 1 = pure B
+        ChannelBlendMode _blendMode = ChannelBlendMode.SrcOver;
+        [Editable("Blend mode")]
+        public ChannelBlendMode BlendMode { get => _blendMode; set => Transaction.Set(this, ref _blendMode, value, static (o, v) => o._blendMode = v); }
+        Animatable<float> _mix = new(1f);
+        [Editable("Mix", Min = 0, Max = 1, Step = 0.01)]
+        public Animatable<float> Mix { get => _mix; set => Transaction.Set(this, ref _mix, value, static (o, v) => o._mix = v); } // 0 = pure A, 1 = pure B
  
         private static readonly NodePort[] StaticPorts =
         [
@@ -40,12 +46,14 @@ namespace EditSharp.Components.Nodes.Effects
  
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
  
-        public override Node Duplicate() => new MergeNode
+        public override IEnumerable<IAnimatable> Animatables => [Mix];
+
+        public override Node Duplicate() => Transaction.Suppressed(() => new MergeNode
         {
             Enabled = Enabled,
             BlendMode = BlendMode,
             Mix = Mix.Duplicate(),
-        };
+        });
     }
 }
  
