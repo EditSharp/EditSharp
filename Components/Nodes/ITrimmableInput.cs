@@ -25,6 +25,9 @@ namespace EditSharp.Components.Nodes
  
         /// <summary>How far InPoint could move EARLIER (an extend) — TimeSpan.MaxValue if unconstrained.</summary>
         TimeSpan MaxHeadroom { get; }
+
+        /// <summary>How much content follows the in-point when there's a known hard end; null when unbounded, looping, or not known yet.</summary>
+        TimeSpan? ContentLength { get; }
     }
 }
  

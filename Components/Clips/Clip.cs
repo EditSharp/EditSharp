@@ -157,6 +157,30 @@ namespace EditSharp.Components.Clips
             }
         }
 
+        /// <summary>
+        /// How much later End can be pushed before a source runs out, in
+        /// TIMELINE time: the tightest of the trimmable inputs with a known
+        /// hard end, zero if one already ends inside the clip. TimeSpan.MaxValue
+        /// when none has one (unbounded, looping, or not probed yet).
+        /// </summary>
+        public TimeSpan TailExtendLimit
+        {
+            get
+            {
+                TimeSpan? room = null;
+
+                foreach (ITrimmableInput trimmable in Graph.AllNodes.OfType<ITrimmableInput>())
+                {
+                    if (trimmable.ContentLength is not { } length) continue;
+                    TimeSpan left = length - ContentDuration;
+                    if (room is null || left < room) room = left;
+                }
+
+                if (room is not { } r) return TimeSpan.MaxValue;
+                return r <= TimeSpan.Zero ? TimeSpan.Zero : ToTimelineTime(r);
+            }
+        }
+
         public void TrimStart(TimeSpan amount)
         {
             TimeSpan clamped = ClampTrim(amount);
@@ -218,11 +242,10 @@ namespace EditSharp.Components.Clips
  
         private void ExtendEndCore(TimeSpan amount, bool ripple)
         {
-            //no content-ceiling clamp on the tail side — freeze-frame/hold-
-            //last-sample covers every input-node type past its own end, so
-            //the tail is always extendable
+            TimeSpan limit = TailExtendLimit;
+            if (amount > limit) amount = limit;
             if (amount <= TimeSpan.Zero) return;
- 
+
             RequireChannel().ExtendTail(this, amount, ripple);
         }
  

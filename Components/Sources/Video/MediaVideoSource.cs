@@ -29,6 +29,22 @@ public class MediaVideoSource : VideoSource, IFileBackedSource
 
     public override MediaVideoSource Duplicate() => (MediaVideoSource)base.Duplicate();
 
+    //from the probe cache; a file not probed yet starts its probe and reads as unknown
+    public override bool TryGetNaturalLength(out TimeSpan? length)
+    {
+        length = null;
+
+        if (!MediaProbe.TryGetCached(Path, out MediaInfo info))
+        {
+            if (File.Exists(Path)) _ = MediaProbe.ProbeCachedAsync(Path).ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
+            return false;
+        }
+
+        if (info.IsStillImage) return true;
+        length = info.Duration;
+        return length is not null;
+    }
+
     public override async Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default)
     {
         MediaInfo info = await ProbeAsync(Path, ct);

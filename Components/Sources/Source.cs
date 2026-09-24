@@ -62,6 +62,28 @@ namespace EditSharp.Components.Sources
         }
 
         /// <summary>
+        /// GetNaturalLengthAsync's answer when it's known right away; false
+        /// while it still has to be found (a file not probed yet).
+        /// </summary>
+        public virtual bool TryGetNaturalLength(out TimeSpan? length)
+        {
+            Task<TimeSpan?> task = GetNaturalLengthAsync();
+            length = task.IsCompletedSuccessfully ? task.Result : null;
+            return task.IsCompletedSuccessfully;
+        }
+
+        /// <summary>GetUsableLengthAsync's answer when it's known right away; see TryGetNaturalLength.</summary>
+        public bool TryGetUsableLength(out TimeSpan? length)
+        {
+            length = null;
+            if (!TryGetNaturalLength(out TimeSpan? natural)) return false;
+
+            length = ResolveWindow(natural).Length;
+            if (length < TimeSpan.Zero) length = TimeSpan.Zero;
+            return true;
+        }
+
+        /// <summary>
         /// Deep copy, through SourceSerializer; see class remarks. History is
         /// suppressed: a fresh copy has no past to undo.
         /// </summary>

@@ -161,19 +161,10 @@ namespace EditSharp.Components
             List<Clip> members = [.. Members];
             if (members.Count == 0) return;
 
-            //only the HEAD side has a real content ceiling to clamp against
-            //(a member's own MaxHeadExtend) — the tail side is unconstrained
-            //for every clip type (freeze-frame/hold-last-sample covers it),
-            //so only Start-side extends need the "most-constrained member"
-            //clamp at all
-            TimeSpan clamped = amount;
-            if (atStart)
-            {
-                //timeline time, like `amount` — MaxHeadExtend is content time
-                //and the two differ once a member has a Speed
-                TimeSpan ceiling = members.Select(m => m.HeadExtendLimit).Min();
-                clamped = ceiling == TimeSpan.MaxValue || amount <= ceiling ? amount : ceiling;
-            }
+            //linked clips move together, so the most constrained member sets the
+            //limit for all of them (timeline time, like `amount`)
+            TimeSpan ceiling = members.Select(m => atStart ? m.HeadExtendLimit : m.TailExtendLimit).Min();
+            TimeSpan clamped = ceiling == TimeSpan.MaxValue || amount <= ceiling ? amount : ceiling;
 
             if (clamped <= TimeSpan.Zero) return;
 

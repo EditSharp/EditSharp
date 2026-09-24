@@ -70,6 +70,20 @@ namespace EditSharp.Video
 
         private static readonly ConcurrentDictionary<(string Path, long Length, long LastWriteTicks), Lazy<Task<MediaInfo>>> Cache = new();
 
+        /// <summary>A finished ProbeCachedAsync result for this file, if there is one; never starts a probe.</summary>
+        public static bool TryGetCached(string path, out MediaInfo info)
+        {
+            info = default!;
+            var file = new FileInfo(path);
+            if (!file.Exists) return false;
+
+            if (!Cache.TryGetValue((file.FullName, file.Length, file.LastWriteTimeUtc.Ticks), out Lazy<Task<MediaInfo>>? probe)
+                || !probe.IsValueCreated || !probe.Value.IsCompletedSuccessfully) return false;
+
+            info = probe.Value.Result;
+            return true;
+        }
+
         /// <summary>
         /// ProbeAsync, remembered per file for as long as the file is unchanged
         /// (keyed by full path, size and last-write time, so an edited file is

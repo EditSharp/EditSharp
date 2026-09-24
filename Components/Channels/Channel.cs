@@ -347,9 +347,10 @@ namespace EditSharp.Components.Channels
  
             TimeSpan requestedHalf = TimeSpan.FromTicks(transition.Duration.Ticks / 2);
  
-            TimeSpan toCeiling = to.MaxHeadExtend();
-            TimeSpan achievableHalf = toCeiling == TimeSpan.MaxValue || requestedHalf <= toCeiling
-                ? requestedHalf : toCeiling;
+            //each clip grows into the other by half, as far as its content allows
+            TimeSpan achievableHalf = requestedHalf;
+            if (to.HeadExtendLimit < achievableHalf) achievableHalf = to.HeadExtendLimit;
+            if (from.TailExtendLimit < achievableHalf) achievableHalf = from.TailExtendLimit;
  
             if (achievableHalf > TimeSpan.Zero)
             {

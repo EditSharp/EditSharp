@@ -30,6 +30,8 @@ namespace EditSharp.Components.Nodes.Sources
         }
  
         public TimeSpan MaxHeadroom => Source.Start ?? TimeSpan.Zero;
+
+        public TimeSpan? ContentLength => !Source.Loop && Source.TryGetUsableLength(out TimeSpan? length) ? length : null;
     }
 }
  
