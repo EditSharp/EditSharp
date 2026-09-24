@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using SkiaSharp;
+using EditSharp.Components;
 using EditSharp.Compositing.Generators;
 using EditSharp.Editing;
 using EditSharp.History;
@@ -66,30 +68,53 @@ public class NoiseVideoSource : VideoSource
 }
 
 /// <summary>
-/// A block of white text, wrapped every WordsPerLine words, sized to fit the
-/// canvas. Its image is the block's own size, so transforms place it.
+/// A block of white text at a fixed size, centred in a frame-sized image, so
+/// a transform places it and editing the words never resizes them.
 /// </summary>
 [SourceKind("text", DisplayName = "Text")]
-public class TextVideoSource : VideoSource
+public class TextVideoSource : VideoSource, IChoiceProvider
 {
     string _content = "Text";
     [Editable("Text", Editor = PropertyEditor.Multiline)]
     public string Content { get => _content; set => Transaction.Set(this, ref _content, value, static (o, v) => o._content = v); }
 
-    FontFace _fontFace = FontFace.Arial;
+    //an installed family's name; one that isn't installed draws with the default font
+    string _font = "Arial";
     [Editable("Font")]
-    public FontFace FontFace { get => _fontFace; set => Transaction.Set(this, ref _fontFace, value, static (o, v) => o._fontFace = v); }
+    public string Font { get => _font; set => Transaction.Set(this, ref _font, value, static (o, v) => o._font = v); }
 
     SKFontStyle _fontStyle = SKFontStyle.Normal;
     public SKFontStyle FontStyle { get => _fontStyle; set => Transaction.Set(this, ref _fontStyle, value, static (o, v) => o._fontStyle = v); }
+
+    //the font's em size, a fraction of the frame width
+    float _size = 0.05f;
+    [Editable("Size", Min = 0.001, Max = 1, Step = 0.001)]
+    public float Size { get => _size; set => Transaction.Set(this, ref _size, value, static (o, v) => o._size = v); }
 
     SKTextAlign _align = SKTextAlign.Center;
     [Editable("Alignment")]
     public SKTextAlign Align { get => _align; set => Transaction.Set(this, ref _align, value, static (o, v) => o._align = v); }
 
-    int _wordsPerLine = int.MaxValue;
-    [Editable("Words per line", Min = 1, Max = 100, Step = 1)]
-    public int WordsPerLine { get => _wordsPerLine; set => Transaction.Set(this, ref _wordsPerLine, value, static (o, v) => o._wordsPerLine = v); }
+    bool _wrap = true;
+    [Editable("Wrap")]
+    public bool Wrap { get => _wrap; set => Transaction.Set(this, ref _wrap, value, static (o, v) => o._wrap = v); }
+
+    //the widest a line gets before it wraps, a fraction of the frame width
+    float _wrapWidth = 0.9f;
+    [Editable("Wrap width", Min = 0.01, Max = 1, Step = 0.01)]
+    [VisibleWhen(nameof(Wrap), true)]
+    public float WrapWidth { get => _wrapWidth; set => Transaction.Set(this, ref _wrapWidth, value, static (o, v) => o._wrapWidth = v); }
+
+    public IReadOnlyList<Choice>? ChoicesFor(string property)
+    {
+        if (property != nameof(Font)) return null;
+
+        List<Choice> choices = [.. FontFamilies.Installed.Select(f => new Choice(f, f))];
+        if (!choices.Any(c => string.Equals((string)c.Value, Font, StringComparison.OrdinalIgnoreCase)))
+            choices.Insert(0, new Choice(Font, $"{Font} (missing)"));
+
+        return choices;
+    }
 
     public override TextVideoSource Duplicate() => (TextVideoSource)base.Duplicate();
 
@@ -102,12 +127,14 @@ public class TextVideoSource : VideoSource
     {
         base.AddFingerprint(ref hash);
         hash.Add(Content);
-        hash.Add(FontFace);
+        hash.Add(Font);
         hash.Add(FontStyle.Weight);
         hash.Add(FontStyle.Width);
         hash.Add(FontStyle.Slant);
         hash.Add(Align);
-        hash.Add(WordsPerLine);
+        hash.Add(Size);
+        hash.Add(Wrap);
+        hash.Add(WrapWidth);
     }
 
     /// <summary>Text changes rarely, so each reader keeps its last recording and redoes it only when the text or canvas changes.</summary>
@@ -129,8 +156,8 @@ public class TextVideoSource : VideoSource
                 source.MapTime(contentTime, null);
                 SKSizeI canvas = GeneratedFrames.Canvas(options);
 
-                object key = (source.Content, source.FontFace, source.FontStyle.Weight, source.FontStyle.Width, source.FontStyle.Slant,
-                    source.Align, source.WordsPerLine, canvas);
+                object key = (source.Content, source.Font, source.FontStyle.Weight, source.FontStyle.Width, source.FontStyle.Slant,
+                    source.Align, source.Size, source.Wrap, source.WrapWidth, canvas);
 
                 if (_image is null || !key.Equals(_key))
                 {
@@ -138,7 +165,7 @@ public class TextVideoSource : VideoSource
                     _key = key;
 
                     var recorded = TextRasterizer.Record(
-                        source.Content, source.FontFace, source.FontStyle, source.Align, source.WordsPerLine, canvas.Width, canvas.Height);
+                        source.Content, source.Font, source.FontStyle, source.Align, source.Size, source.Wrap, source.WrapWidth, canvas.Width, canvas.Height);
 
                     //nothing to write draws nothing
                     _image = recorded is { } r

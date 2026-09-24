@@ -3,7 +3,6 @@ using SkiaSharp;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Sources;
 using EditSharp.History;
-using EditSharp.Components; // FontFace
 using EditSharp.Components.Sources.Video;
  
 namespace EditSharp.Components.Clips
@@ -40,14 +39,14 @@ namespace EditSharp.Components.Clips
  
         public static VideoClip CreateText(
             string content, TimeSpan start, TimeSpan duration,
-            FontFace fontFace = FontFace.ComicSansMs, SKFontStyle? fontStyle = null,
-            SKTextAlign align = SKTextAlign.Center, int wordsPerLine = int.MaxValue) => CreateFromSource(new TextVideoSource
+            string font = "Comic Sans MS", SKFontStyle? fontStyle = null,
+            SKTextAlign align = SKTextAlign.Center, float size = 0.05f) => CreateFromSource(new TextVideoSource
             {
                 Content = content,
-                FontFace = fontFace,
+                Font = font,
                 FontStyle = fontStyle ?? SKFontStyle.Normal,
                 Align = align,
-                WordsPerLine = wordsPerLine,
+                Size = size,
             }, start, duration);
  
         public static VideoClip CreateColorGenerator(SKColor color, TimeSpan start, TimeSpan duration) =>

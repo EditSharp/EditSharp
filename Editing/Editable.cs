@@ -102,4 +102,14 @@ namespace EditSharp.Editing
     {
         IReadOnlyList<PropertyDescriptor> Properties { get; }
     }
+
+    /// <summary>One value a property may take, and what a picker shows for it.</summary>
+    public readonly record struct Choice(object Value, string Label);
+
+    /// <summary>An object that offers the values one of its properties may take, shown as a dropdown.</summary>
+    public interface IChoiceProvider
+    {
+        /// <summary>Null when the property is free to take any value.</summary>
+        IReadOnlyList<Choice>? ChoicesFor(string property);
+    }
 }
