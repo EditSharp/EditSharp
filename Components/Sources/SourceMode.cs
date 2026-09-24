@@ -9,7 +9,7 @@ namespace EditSharp.Components.Sources
     /// </summary>
     public enum SourceMode
     {
-        /// <summary>Only proxies; a frame the proxy doesn't cover yet is ProxyPending.</summary>
+        /// <summary>Only proxies; a frame without one is ProxyPending while a build is under way, ProxyMissing otherwise.</summary>
         ProxiesOnly,
 
         /// <summary>The proxy wherever it covers the frame, the original everywhere else; decided frame by frame.</summary>

@@ -73,7 +73,7 @@ namespace EditSharp.Compositing.Sources
     ///
     /// FAILURES: a source's SourceUnavailableException becomes a
     /// MediaPlaceholder for its reason (EndOfSource: transparent). Opening and
-    /// ProxyPending also mark the frame incomplete (LastFrameIncomplete).
+    /// ProxyPending/ProxyMissing also mark the frame incomplete (LastFrameIncomplete).
     /// MediaOffline and DecodeError are remembered per input; a Preview
     /// session tries again after EditSharpConfig.SourceRetryInterval, an
     /// Export session records every affected frame in its RenderReport.
@@ -110,7 +110,7 @@ namespace EditSharp.Compositing.Sources
 
         public ClipContentSource(ContentSourceOptions options) => _options = options;
 
-        /// <summary>Whether the last GetContent substituted anything still on its way (Opening, ProxyPending).</summary>
+        /// <summary>Whether the last GetContent substituted anything that can still arrive (Opening, ProxyPending, ProxyMissing).</summary>
         public bool LastFrameIncomplete { get; private set; }
 
         // ---------------------------------------------------------------
@@ -277,7 +277,7 @@ namespace EditSharp.Compositing.Sources
         /// VideoSource.GetFrameAtAsync; nothing is kept open, so a caller
         /// touching many clips (thumbnails) holds no readers. Failures become
         /// placeholders; Complete is false if any was something still on its
-        /// way (ProxyPending, Opening). Hand the result to GetContent.
+        /// way (Opening, ProxyPending, ProxyMissing). Hand the result to GetContent.
         /// </summary>
         public async Task<(IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> Media, bool Complete)> GetMediaFramesOnceAsync(
             Graph graph, double clipSeconds, int width, int height, CancellationToken ct = default)
@@ -294,7 +294,7 @@ namespace EditSharp.Compositing.Sources
                 }
                 catch (SourceUnavailableException ex)
                 {
-                    bool pending = ex.Reason is SourceUnavailableReason.ProxyPending or SourceUnavailableReason.Opening;
+                    bool pending = ex.Reason is SourceUnavailableReason.ProxyPending or SourceUnavailableReason.ProxyMissing or SourceUnavailableReason.Opening;
                     return (Id: node.Id, Image: MediaPlaceholder.Get(width, height, ex.Reason), Transient: false, Pending: pending);
                 }
             }));
@@ -346,6 +346,7 @@ namespace EditSharp.Compositing.Sources
 
                 case SourceUnavailableReason.Opening:
                 case SourceUnavailableReason.ProxyPending:
+                case SourceUnavailableReason.ProxyMissing:
                     LastFrameIncomplete = true;
                     RecordProblem(input, ex, frameIndex);
                     break;

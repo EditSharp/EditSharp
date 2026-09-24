@@ -172,6 +172,18 @@ namespace EditSharp.Caching.Proxy
             return Hashes.TryGetValue(IdentityOf(file), out string? hash) && Entries.TryGetValue(hash, out entry!);
         }
 
+        /// <summary>
+        /// Synchronous, memory-only: whether a build for `sourcePath` is queued
+        /// or running in this process right now.
+        /// </summary>
+        public static bool IsBuilding(string sourcePath)
+        {
+            var file = new FileInfo(sourcePath);
+            if (!file.Exists || !Hashes.TryGetValue(IdentityOf(file), out string? hash)) return false;
+
+            lock (Gate) return Jobs.ContainsKey(hash);
+        }
+
         // ---------------------------------------------------------------
         // Queue
         // ---------------------------------------------------------------

@@ -8,8 +8,11 @@ namespace EditSharp.Components.Sources
         /// <summary>The reader is still opening and has nothing to hand back yet.</summary>
         Opening,
 
-        /// <summary>The read needs a proxy frame that has not been built yet.</summary>
+        /// <summary>The read needs a proxy frame that a queued or running build hasn't reached yet.</summary>
         ProxyPending,
+
+        /// <summary>The read needs a proxy frame, and no build is queued or running to make it.</summary>
+        ProxyMissing,
 
         /// <summary>The underlying material is missing or unreadable (file gone, device unplugged).</summary>
         MediaOffline,

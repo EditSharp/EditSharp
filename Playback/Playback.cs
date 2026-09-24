@@ -1244,7 +1244,7 @@ namespace EditSharp.Playback
         /// The GPU context/pool are created once per Playback and kept (see
         /// class remarks, GPU WORK MUST STAY ON ONE THREAD); the content source
         /// is rebuilt every scrub session. Nothing here builds proxies — a
-        /// source without one yet shows its ProxyPending placeholder.
+        /// source without one shows its ProxyMissing (or, while building, ProxyPending) placeholder.
         /// </summary>
         private async Task BuildScrubSessionAsync(int width, int height)
         {

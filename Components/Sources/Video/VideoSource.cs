@@ -23,7 +23,7 @@ namespace EditSharp.Components.Sources.Video
         /// One frame at `contentTime`, for callers that just need a single
         /// picture (thumbnails); nothing stays open afterwards. The caller owns
         /// the result. `mode` picks proxy or original like a session would
-        /// (ProxiesOnly throws ProxyPending where the proxy doesn't reach yet);
+        /// (ProxiesOnly throws ProxyPending or ProxyMissing where there's no proxy frame);
         /// `maxWidth`/`maxHeight` cap the size (0 = native). Kinds with a
         /// cheaper route (a still image) override it.
         /// </summary>

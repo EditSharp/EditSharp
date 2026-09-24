@@ -214,7 +214,8 @@ internal sealed class SequentialMediaVideoReader : IVideoFrameReader
 /// Reads a file's proxy, whatever its format (see ProxyFrames). If none was
 /// known when the session prepared, it keeps checking ProxyCache (a cheap
 /// in-memory lookup, throttled) so a proxy built mid-session is picked up.
-/// A frame the proxy doesn't cover yet is ProxyPending; past a complete
+/// A frame the proxy doesn't cover yet is ProxyPending while a build is
+/// queued or running and ProxyMissing otherwise; past a complete
 /// proxy's end is EndOfSource.
 /// </summary>
 internal sealed class ProxyVideoReader(
@@ -284,7 +285,9 @@ internal sealed class ProxyVideoReader(
     }
 
     private SourceUnavailableException Pending() => File.Exists(path)
-        ? new SourceUnavailableException(SourceUnavailableReason.ProxyPending, $"The proxy for '{path}' doesn't cover this frame yet.")
+        ? ProxyCache.IsBuilding(path)
+            ? new SourceUnavailableException(SourceUnavailableReason.ProxyPending, $"The proxy for '{path}' is still being built.")
+            : new SourceUnavailableException(SourceUnavailableReason.ProxyMissing, $"'{path}' has no proxy for this frame, and none is being built.")
         : new SourceUnavailableException(SourceUnavailableReason.MediaOffline, $"'{path}' is missing.");
 
     public void Dispose()

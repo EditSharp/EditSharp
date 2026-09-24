@@ -23,6 +23,7 @@ namespace EditSharp.Compositing.Sources
         {
             SourceUnavailableReason.Opening => "LOADING…",
             SourceUnavailableReason.ProxyPending => "GENERATING PROXY…",
+            SourceUnavailableReason.ProxyMissing => "PROXY NOT GENERATED",
             SourceUnavailableReason.MediaOffline => "MEDIA OFFLINE",
             SourceUnavailableReason.DecodeError => "CAN'T DECODE",
             SourceUnavailableReason.EndOfSource => "",
