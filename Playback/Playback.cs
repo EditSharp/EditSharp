@@ -386,6 +386,41 @@ namespace EditSharp.Playback
     /// reverse playback consult a COMPLETELY SEPARATE cache
     /// (ScrubProxyCache) instead — see the section above.
     ///
+    /// GATE-HELD AWAITS NEVER RESUME ON THE CALLER'S CONTEXT (fixed here):
+    /// every await made while `_scrubGate` is held (ScrubToAsync,
+    /// RenderClipFrameAsync, and BuildScrubSessionAsync, which runs under the
+    /// gate via `_scrubSetupTask`) uses ConfigureAwait(false). EndScrubbing()
+    /// — and therefore Play() — blocks SYNCHRONOUSLY on `_scrubGate`, and the
+    /// Godot host DOES install a SynchronizationContext on its main thread.
+    /// Found in the field: resuming playback right after a quick scrub
+    /// (clicking the timeline ruler repeatedly while playing) called Play()
+    /// on the main thread while a fire-and-forget ScrubToAsync still held the
+    /// gate with its next continuation posted back to that same main thread
+    /// — neither could proceed, and the app hard-froze. With the gate-held
+    /// continuations free of the caller's context, the gate always releases
+    /// on its own. Consequence: a scrub's VideoFrame is raised from a
+    /// background thread, exactly like forward playback's already are.
+    ///
+    /// SUPERSEDED SESSIONS ARE ABANDONED, NOT AWAITED (fixed here): Stop()
+    /// used to block its caller on the session's video task, and a session's
+    /// setup (content probing, decoder spawn, GPU context, warm-up render)
+    /// never checked its token until the start gate — so every Play() waited
+    /// out the ENTIRE setup of the session before it. Found in the field:
+    /// clicking the timeline repeatedly during playback resumes playback on
+    /// every click, and each resume queued seconds of setup behind the last on
+    /// Godot's main thread. Now Stop() only cancels; each new session awaits
+    /// the previous one's task on the thread pool (WaitForRetiredSessionAsync),
+    /// so sessions still never hold GPU contexts/decoders at the same time, and
+    /// a session superseded while it waits never starts setup at all. Setup
+    /// checks its token between steps, so a cancelled session exits at the
+    /// next step instead of finishing. A retired session's exit paths (the
+    /// loops' final state reset, TearDownAfterNaturalEnd) only touch state
+    /// while its token is still the installed `_cts` (IsCurrentSession), so it
+    /// can never clobber the session that replaced it. Dispose() is the one
+    /// place that still waits synchronously. The audio engine's start (the
+    /// whole-timeline master mix) also runs via Task.Run now, off the caller's
+    /// thread and SynchronizationContext.
+    ///
     /// SWITCHING BETWEEN SCRUB AND PLAYBACK (fixed, KEPT): Play() calls
     /// EndScrubbing() as its very first action, unconditionally, on BOTH
     /// the "resume an existing paused session" path and the "start a
@@ -939,23 +974,36 @@ namespace EditSharp.Playback
                     audioParticipates ? 2 : 1,
                     onReleased: () => OnPlaybackStarted(EventArgs.Empty));
 
-                _videoTask = Task.Run(
-                    () => reverse
+                // See class remarks, SUPERSEDED SESSIONS ARE ABANDONED, NOT
+                // AWAITED — queue behind whatever session came before, off
+                // the calling thread, and bail without any setup at all if
+                // this one is itself superseded while it waits.
+                Task? previousVideoTask = _videoTask;
+
+                _videoTask = Task.Run(async () =>
+                {
+                    await WaitForRetiredSessionAsync(previousVideoTask, token);
+
+                    await (reverse
                         ? ReverseVideoLoopAsync(token, resolvedStart, startGate, pauseGate, referenceClock)
-                        : VideoLoopAsync(token, resolvedStart, startGate, pauseGate, referenceClock, videoFollows),
-                    token);
+                        : VideoLoopAsync(token, resolvedStart, startGate, pauseGate, referenceClock, videoFollows));
+                });
 
                 if (audioParticipates)
                 {
                     var audioEngine = new PlaybackAudioEngine();
                     _audioEngine = audioEngine;
 
-                    _ = audioEngine
+                    // Task.Run, not a direct call: composing the master mix
+                    // is real work, and a direct call would run it on (and
+                    // resume it onto) the CALLER's thread — Godot's main
+                    // thread, for every resume after a scrub.
+                    _ = Task.Run(() => audioEngine
                         .StartAsync(
                             Timeline, RenderSettings.Framerate,
                             (int)RenderSettings.Resolution.X, (int)RenderSettings.Resolution.Y,
                             resolvedStart, startGate, pauseGate,
-                            referenceClock, audioFollows, args => OnAudioSample(args), token)
+                            referenceClock, audioFollows, args => OnAudioSample(args), token))
                         .ContinueWith(t =>
                         {
                             if (t.IsFaulted)
@@ -1004,17 +1052,40 @@ namespace EditSharp.Playback
                 _referenceClock = null;
             }
 
+            // Cancelled, NOT waited on — see class remarks, SUPERSEDED
+            // SESSIONS ARE ABANDONED, NOT AWAITED. `_videoTask` is left in
+            // place for the next Play() (or Dispose()) to wait on off the
+            // calling thread. The source is never disposed: it has no timer
+            // or linked registrations, and the retiring session may still be
+            // reading its token.
             cts?.Cancel();
-
-            try { _videoTask?.GetAwaiter().GetResult(); }
-            catch (OperationCanceledException) { /* expected */ }
 
             _audioEngine?.Dispose();
             _audioEngine = null;
-
-            cts?.Dispose();
-            _videoTask = null;
         }
+
+        /// <summary>
+        /// Waits for a retired (already-cancelled or naturally-ending)
+        /// session's task to finish releasing its GPU context and decoders
+        /// before a new session creates its own — but gives up the moment
+        /// `token` is cancelled, so a session that is itself superseded
+        /// while queued never starts any setup. See class remarks,
+        /// SUPERSEDED SESSIONS ARE ABANDONED, NOT AWAITED.
+        /// </summary>
+        private static async Task WaitForRetiredSessionAsync(Task? previous, CancellationToken token)
+        {
+            if (previous != null)
+            {
+                try { await previous.WaitAsync(token); }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception) { /* the retired session's own outcome — not this session's concern */ }
+            }
+
+            token.ThrowIfCancellationRequested();
+        }
+
+        /// <summary>True if `token` belongs to the session currently installed — false once Stop() or a newer Play() has replaced it.</summary>
+        private bool IsCurrentSession(CancellationToken token) => _cts != null && _cts.Token == token;
 
         /// <summary>
         /// Always succeeds now — see class remarks, SCRUB/REVERSE VIA RAW
@@ -1124,7 +1195,10 @@ namespace EditSharp.Playback
 
             try
             {
-                await _scrubGate.WaitAsync(linked);
+                // ConfigureAwait(false) on every await from here until the gate is
+                // released — see class remarks, GATE-HELD AWAITS NEVER RESUME ON THE
+                // CALLER'S CONTEXT.
+                await _scrubGate.WaitAsync(linked).ConfigureAwait(false);
 
                 // See class remarks, SCRUB STATE IS NOW A REAL STATE, NOT
                 // AN ORTHOGONAL FLAG — save whatever State was right before
@@ -1144,7 +1218,7 @@ namespace EditSharp.Playback
                     // .WaitAsync(linked) — cancellable WAITING only, never
                     // cancels the shared setup itself. See class remarks,
                     // SCRUB COALESCING, point 2.
-                    await EnsureScrubSessionBaseAsync(width, height).WaitAsync(linked);
+                    await EnsureScrubSessionBaseAsync(width, height).WaitAsync(linked).ConfigureAwait(false);
 
                     // `_scrubGpuThread` is guaranteed non-null here —
                     // EnsureScrubSessionBaseAsync always creates it (once)
@@ -1152,7 +1226,7 @@ namespace EditSharp.Playback
                     // STAY ON ONE THREAD.
                     (byte[] buffer, int length) = await ComposeInstantFrameAsync(
                         _scrubContentSource!, _scrubSurfacePool!, _scrubGpuThread!,
-                        position, width, height, fps, linked);
+                        position, width, height, fps, linked).ConfigureAwait(false);
 
                     try
                     {
@@ -1300,7 +1374,7 @@ namespace EditSharp.Playback
                         RenderSettings.HardwareAccelerator, RenderSettings.GpuAdapterIndex);
                     var surfacePool = new SurfacePool(ctx.GRContext, width, height, Timeline.VideoChannels.Count);
                     return (ctx, surfacePool);
-                });
+                }).ConfigureAwait(false);
 
                 _scrubGpuContext = context;
                 _scrubSurfacePool = pool;
@@ -1350,10 +1424,10 @@ namespace EditSharp.Playback
             int fps = RenderSettings.Framerate;
             double clipSeconds = Math.Max(0d, contentTime.TotalSeconds);
 
-            await _scrubGate.WaitAsync(ct);
+            await _scrubGate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                await EnsureScrubSessionBaseAsync(canvasWidth, canvasHeight).WaitAsync(ct);
+                await EnsureScrubSessionBaseAsync(canvasWidth, canvasHeight).WaitAsync(ct).ConfigureAwait(false);
 
                 ScrubFrameSource source = _scrubContentSource!;
                 SurfacePool pool = _scrubSurfacePool!;
@@ -1425,7 +1499,7 @@ namespace EditSharp.Playback
                     {
                         source.ClearPrefetch();
                     }
-                });
+                }).ConfigureAwait(false);
             }
             finally
             {
@@ -1635,7 +1709,7 @@ namespace EditSharp.Playback
                 {
                     await ContentPreparation.PrepareContentAsync(
                         Timeline, width, height, RenderSettings.HardwareAccelerator,
-                        nativeSizes, decodePlans, decodeSourcePaths);
+                        nativeSizes, decodePlans, decodeSourcePaths).WaitAsync(token);
 
                     Dictionary<Clip, TimeSpan> seekOffsets = ComputeSeekOffsets(Timeline, startPosition);
 
@@ -1654,6 +1728,11 @@ namespace EditSharp.Playback
 
                     try
                     {
+                        // Last cheap exit before the warm-up render opens
+                        // decoders — see class remarks, SUPERSEDED SESSIONS
+                        // ARE ABANDONED, NOT AWAITED.
+                        token.ThrowIfCancellationRequested();
+
                         int startFrame = (int)(startPosition.TotalSeconds * fps);
                         int totalFrames = Math.Max(1, (int)Math.Ceiling(Timeline.Duration.TotalSeconds * fps));
 
@@ -1758,7 +1837,7 @@ namespace EditSharp.Playback
                             }
                         }
 
-                        TearDownAfterNaturalEnd();
+                        TearDownAfterNaturalEnd(token);
 
                         OnEndReached(EventArgs.Empty);
                     }
@@ -1788,7 +1867,7 @@ namespace EditSharp.Playback
             }
             finally
             {
-                lock (_stateLock) { _state = PlaybackState.Inactive; }
+                lock (_stateLock) { if (IsCurrentSession(token)) _state = PlaybackState.Inactive; }
             }
         }
 
@@ -1881,6 +1960,11 @@ namespace EditSharp.Playback
 
                     try
                     {
+                        // Last cheap exit before the warm-up render opens
+                        // decoders — see class remarks, SUPERSEDED SESSIONS
+                        // ARE ABANDONED, NOT AWAITED.
+                        token.ThrowIfCancellationRequested();
+
                         int startFrame = (int)(startPosition.TotalSeconds * fps);
 
                         (byte[] warmupBuffer, int warmupLength) = await ComposeInstantFrameAsync(
@@ -1904,7 +1988,7 @@ namespace EditSharp.Playback
 
                         if (startFrame <= 0)
                         {
-                            TearDownAfterNaturalEnd();
+                            TearDownAfterNaturalEnd(token);
                             OnEndReached(EventArgs.Empty);
                             return;
                         }
@@ -1957,7 +2041,7 @@ namespace EditSharp.Playback
                             if (framePosition == TimeSpan.Zero) break;
                         }
 
-                        TearDownAfterNaturalEnd();
+                        TearDownAfterNaturalEnd(token);
 
                         OnEndReached(EventArgs.Empty);
                     }
@@ -1982,31 +2066,27 @@ namespace EditSharp.Playback
             }
             finally
             {
-                lock (_stateLock) { _state = PlaybackState.Inactive; }
+                lock (_stateLock) { if (IsCurrentSession(token)) _state = PlaybackState.Inactive; }
             }
         }
 
-        private void TearDownAfterNaturalEnd()
+        private void TearDownAfterNaturalEnd(CancellationToken token)
         {
-            CancellationTokenSource? cts;
-
             lock (_stateLock)
             {
-                if (!SessionActive) return;
+                // A superseded session reaching its end must not tear down
+                // the session that replaced it.
+                if (!SessionActive || !IsCurrentSession(token)) return;
 
                 _state = PlaybackState.Inactive;
                 _lastKnownPosition = _referenceClock?.Position ?? _lastKnownPosition;
                 _referenceClock = null;
                 _pauseGate = null;
-                cts = _cts;
                 _cts = null;
             }
 
             _audioEngine?.Dispose();
             _audioEngine = null;
-
-            cts?.Dispose();
-            _videoTask = null;
         }
 
         /// <summary>
@@ -2052,6 +2132,13 @@ namespace EditSharp.Playback
         public void Dispose()
         {
             Stop();
+
+            // The one place a retired session IS waited on synchronously:
+            // its GPU context and decoders must be gone before this returns.
+            try { _videoTask?.GetAwaiter().GetResult(); }
+            catch (Exception) { /* cancelled or failed — either way, finished */ }
+            _videoTask = null;
+
             EndScrubbing();
 
             if (_scrubGpuThread != null)
