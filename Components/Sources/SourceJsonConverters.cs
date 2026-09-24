@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Numerics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SkiaSharp;
@@ -110,6 +111,25 @@ namespace EditSharp.Components.Sources
 
         public override void Write(Utf8JsonWriter writer, SKColor value, JsonSerializerOptions options) =>
             writer.WriteStringValue(value.ToString());
+    }
+
+    /// <summary>Vector2 as {"x", "y"}; its X and Y are fields, which the serializer otherwise skips.</summary>
+    internal sealed class Vector2JsonConverter : JsonConverter<Vector2>
+    {
+        public override Vector2 Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            using JsonDocument document = JsonDocument.ParseValue(ref reader);
+            JsonElement root = document.RootElement;
+            return new Vector2(root.GetProperty("x").GetSingle(), root.GetProperty("y").GetSingle());
+        }
+
+        public override void Write(Utf8JsonWriter writer, Vector2 value, JsonSerializerOptions options)
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("x", value.X);
+            writer.WriteNumber("y", value.Y);
+            writer.WriteEndObject();
+        }
     }
 
     /// <summary>

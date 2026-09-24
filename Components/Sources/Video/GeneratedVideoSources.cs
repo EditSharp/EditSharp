@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using SkiaSharp;
@@ -67,6 +68,13 @@ public class NoiseVideoSource : VideoSource
     }
 }
 
+public enum TextWrap { Off, WrapWords, WrapCharacters }
+
+/// <summary>Justify stretches every wrapped line to the box's width; a paragraph's last line stays left.</summary>
+public enum HorizontalTextAlignment { Left, Center, Right, Justify }
+
+public enum VerticalTextAlignment { Top, Center, Bottom }
+
 /// <summary>
 /// A block of white text at a fixed size, centred in a frame-sized image, so
 /// a transform places it and editing the words never resizes them.
@@ -108,19 +116,23 @@ public class TextVideoSource : VideoSource, IChoiceProvider
     [Editable("Size", Min = 0.001, Max = 1, Step = 0.001, Frame = FrameMeasure.Width)]
     public float Size { get => _size; set => Transaction.Set(this, ref _size, value, static (o, v) => o._size = v); }
 
-    SKTextAlign _align = SKTextAlign.Center;
-    [Editable("Alignment")]
-    public SKTextAlign Align { get => _align; set => Transaction.Set(this, ref _align, value, static (o, v) => o._align = v); }
+    //the area the text is laid out in, centred in the frame: x of the frame width, y of its height
+    Vector2 _box = new(0.9f, 0.9f);
+    [Editable("Box", Min = 0.01, Max = 1, Step = 0.01, Frame = FrameMeasure.Frame)]
+    public Vector2 Box { get => _box; set => Transaction.Set(this, ref _box, value, static (o, v) => o._box = v); }
 
-    bool _wrap = true;
+    //where lines break when they reach the box's width
+    TextWrap _wrap = TextWrap.WrapWords;
     [Editable("Wrap")]
-    public bool Wrap { get => _wrap; set => Transaction.Set(this, ref _wrap, value, static (o, v) => o._wrap = v); }
+    public TextWrap Wrap { get => _wrap; set => Transaction.Set(this, ref _wrap, value, static (o, v) => o._wrap = v); }
 
-    //the widest a line gets before it wraps, a fraction of the frame width
-    float _wrapWidth = 0.9f;
-    [Editable("Wrap width", Min = 0.01, Max = 1, Step = 0.01, Frame = FrameMeasure.Width)]
-    [VisibleWhen(nameof(Wrap), true)]
-    public float WrapWidth { get => _wrapWidth; set => Transaction.Set(this, ref _wrapWidth, value, static (o, v) => o._wrapWidth = v); }
+    HorizontalTextAlignment _horizontalAlignment = HorizontalTextAlignment.Center;
+    [Editable("Horizontal alignment")]
+    public HorizontalTextAlignment HorizontalAlignment { get => _horizontalAlignment; set => Transaction.Set(this, ref _horizontalAlignment, value, static (o, v) => o._horizontalAlignment = v); }
+
+    VerticalTextAlignment _verticalAlignment = VerticalTextAlignment.Center;
+    [Editable("Vertical alignment")]
+    public VerticalTextAlignment VerticalAlignment { get => _verticalAlignment; set => Transaction.Set(this, ref _verticalAlignment, value, static (o, v) => o._verticalAlignment = v); }
 
     public IReadOnlyList<Choice>? ChoicesFor(string property)
     {
@@ -156,10 +168,11 @@ public class TextVideoSource : VideoSource, IChoiceProvider
         hash.Add(Font);
         hash.Add(Weight);
         hash.Add(Italic);
-        hash.Add(Align);
         hash.Add(Size);
+        hash.Add(Box);
         hash.Add(Wrap);
-        hash.Add(WrapWidth);
+        hash.Add(HorizontalAlignment);
+        hash.Add(VerticalAlignment);
     }
 
     /// <summary>Text changes rarely, so each reader keeps its last recording and redoes it only when the text or canvas changes.</summary>
@@ -182,7 +195,7 @@ public class TextVideoSource : VideoSource, IChoiceProvider
                 SKSizeI canvas = GeneratedFrames.Canvas(options);
 
                 object key = (source.Content, source.Font, source.Weight, source.Italic,
-                    source.Align, source.Size, source.Wrap, source.WrapWidth, canvas);
+                    source.Size, source.Box, source.Wrap, source.HorizontalAlignment, source.VerticalAlignment, canvas);
 
                 if (_image is null || !key.Equals(_key))
                 {
@@ -190,7 +203,8 @@ public class TextVideoSource : VideoSource, IChoiceProvider
                     _key = key;
 
                     var recorded = TextRasterizer.Record(
-                        source.Content, source.Font, source.Weight, source.Italic, source.Align, source.Size, source.Wrap, source.WrapWidth, canvas.Width, canvas.Height);
+                        source.Content, source.Font, source.Weight, source.Italic, source.Size, source.Box, source.Wrap,
+                        source.HorizontalAlignment, source.VerticalAlignment, canvas.Width, canvas.Height);
 
                     //nothing to write draws nothing
                     _image = recorded is { } r

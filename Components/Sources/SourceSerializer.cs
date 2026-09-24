@@ -73,6 +73,7 @@ namespace EditSharp.Components.Sources
                     new JsonStringEnumConverter(),
                     new AnimatableJsonConverterFactory(),
                     new SKColorJsonConverter(),
+                    new Vector2JsonConverter(),
                     new TimelineReferenceJsonConverter(),
                 },
             };
