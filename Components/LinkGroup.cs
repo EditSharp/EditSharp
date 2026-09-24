@@ -261,18 +261,18 @@ namespace EditSharp.Components
         // Source instance between them would risk.
         // ---------------------------------------------------------------
 
-        /// <summary>A linked video + audio pair of clips, both embedding `reference`. Returns them unattached; placing them is up to the caller.</summary>
+        /// <summary>A linked video + audio pair of clips, both embedding `timeline`. Returns them unattached; placing them is up to the caller.</summary>
         public static (VideoClip Video, AudioClip Audio) CreateTimelineAudioVideoPair(
-            TimelineReference reference, TimeSpan start, TimeSpan duration)
+            Timeline timeline, TimeSpan start, TimeSpan duration)
         {
             using var _ = Transaction.Suppress();
             
             Guid groupId = Guid.NewGuid();
 
-            VideoClip video = VideoClip.CreateTimelineEmbed(reference.Duplicate(), start, duration);
+            VideoClip video = VideoClip.CreateTimelineEmbed(timeline, start, duration);
             video.LinkGroupId = groupId;
 
-            AudioClip audio = AudioClip.CreateTimelineEmbed(reference.Duplicate(), start, duration);
+            AudioClip audio = AudioClip.CreateTimelineEmbed(timeline, start, duration);
             audio.LinkGroupId = groupId;
 
             return (video, audio);

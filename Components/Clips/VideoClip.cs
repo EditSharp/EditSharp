@@ -61,8 +61,8 @@ namespace EditSharp.Components.Clips
                 SeetheRate = seetheRate,
             }), start, duration);
  
-        public static VideoClip CreateTimelineEmbed(TimelineReference reference, TimeSpan start, TimeSpan duration) =>
-            CreateFromSource(Transaction.Suppressed(() => new TimelineVideoSource { Timeline = reference.Timeline, Start = reference.Start, Duration = reference.Duration }), start, duration);
+        public static VideoClip CreateTimelineEmbed(Timeline timeline, TimeSpan start, TimeSpan duration) =>
+            CreateFromSource(Transaction.Suppressed(() => new TimelineVideoSource { Timeline = timeline }), start, duration);
  
         /// <summary>
         /// Escape hatch for a fully custom graph — multiple InputNodes,

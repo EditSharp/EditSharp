@@ -388,7 +388,7 @@ namespace EditSharp.Editing
             if (valueType == typeof(Vector2)) return PropertyEditor.Vector;
             if (valueType == typeof(TimeSpan)) return PropertyEditor.Time;
             if (typeof(Source).IsAssignableFrom(valueType)) return PropertyEditor.Media;
-            if (valueType == typeof(TimelineReference) || valueType == typeof(Timeline)) return PropertyEditor.Timeline;
+            if (valueType == typeof(Timeline)) return PropertyEditor.Timeline;
 
             // an object with editable properties of its own opens up in place
             if (Of(valueType).Count > 0) return PropertyEditor.Object;

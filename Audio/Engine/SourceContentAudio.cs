@@ -68,15 +68,18 @@ namespace EditSharp.Audio.Engine
             try
             {
                 _reader ??= _prepared.OpenReader(new AudioReaderOptions(
-                    session.Format.SampleRate, session.Format.Channels, session.TimeOf(_position)));
+                    session.Format.SampleRate, session.Format.Channels, session.TimeOf(_position), session));
 
                 int channels = session.Format.Channels;
                 int total = 0;
                 while (total * channels < destination.Length)
                 {
+                    int want = destination.Length / channels - total;
                     int read = _reader.Read(destination[(total * channels)..]);
-                    if (read == 0) break;
                     total += read;
+
+                    //a short read is the end; reading again would throw and lose what came before it
+                    if (read < want) break;
                 }
 
                 _position += total;

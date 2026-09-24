@@ -1,4 +1,5 @@
 using System;
+using EditSharp.Audio.Engine;
 
 namespace EditSharp.Components.Sources.Audio
 {
@@ -8,8 +9,10 @@ namespace EditSharp.Components.Sources.Audio
     /// StartAt is the content time (since the in-point, at 1x) of the first
     /// sample. Readers always deliver 1x content; retiming for Clip.Speed
     /// happens downstream.
+    /// Session is the reading session, for kinds that render other sources
+    /// themselves (a nested timeline).
     /// </summary>
-    internal sealed record AudioReaderOptions(int SampleRate, int Channels, TimeSpan StartAt);
+    internal sealed record AudioReaderOptions(int SampleRate, int Channels, TimeSpan StartAt, AudioSession? Session = null);
 
     /// <summary>A source readied for one session; opens readers on demand and owns whatever they share.</summary>
     internal interface IPreparedAudioSource : IDisposable

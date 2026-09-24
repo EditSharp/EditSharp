@@ -35,15 +35,11 @@ namespace EditSharp.Components.Clips
  
         public static AudioClip CreateTone(
             TimeSpan start, TimeSpan duration, Waveform waveform = Waveform.Sine,
-            float frequencyHz = 440f, float amplitude = 1f) => Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(new ToneGeneratorInputNode
-            {
-                Waveform = waveform,
-                Frequency = new(frequencyHz),
-                Amplitude = new(amplitude),
-            }))
-            { Start = start, Duration = duration });
+            float frequencyHz = 440f, float amplitude = 1f) =>
+            CreateFromSource(Transaction.Suppressed(() => new ToneAudioSource { Waveform = waveform, Frequency = new(frequencyHz), Amplitude = new(amplitude) }), start, duration);
  
-        public static AudioClip CreateTimelineEmbed(TimelineReference reference, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(new TimelineAudioInputNode { Reference = reference })) { Start = start, Duration = duration });
+        public static AudioClip CreateTimelineEmbed(Timeline timeline, TimeSpan start, TimeSpan duration) =>
+            CreateFromSource(Transaction.Suppressed(() => new TimelineAudioSource { Timeline = timeline }), start, duration);
  
         /// <summary>Escape hatch for a fully custom graph — see VideoClip.CreateCustom's own remarks.</summary>
         public static AudioClip CreateCustom(Graph graph, TimeSpan start, TimeSpan duration)
