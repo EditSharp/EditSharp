@@ -176,7 +176,7 @@ namespace EditSharp.Compositing.Sources
 
             foreach (MediaInput passed in _media.Values.Where(m => !live.Contains(m.Node.Id)).ToList())
             {
-                Release(passed);
+                Release(passed, background: true);
                 _media.Remove(passed.Node.Id);
             }
         }
@@ -512,14 +512,21 @@ namespace EditSharp.Compositing.Sources
                 _options.ReadMode, startAt, _options.Fps, input.Clip.Speed, width, height, callerOwnsFrames, canvasWidth, canvasHeight);
         }
 
-        private void Release(MediaInput input)
+        //`background` closes the buffer and its decoder off this thread: shutting one down can take
+        //a tenth of a second, which is a dropped frame when a clip passes mid-playback
+        private void Release(MediaInput input, bool background = false)
         {
-            input.Buffer?.Dispose();
-            input.Buffer = null;
             input.Reader?.Dispose();
             input.Reader = null;
-            input.Prepared?.Dispose();
+
+            BufferedVideoReader? buffer = input.Buffer;
+            IPreparedVideoSource? prepared = input.Prepared;
+            input.Buffer = null;
             input.Prepared = null;
+
+            //the prepared source outlives the reader it opened
+            if (background) _ = Task.Run(() => { buffer?.Dispose(); prepared?.Dispose(); });
+            else { buffer?.Dispose(); prepared?.Dispose(); }
 
             //still preparing: dispose whatever it produces once it's done
             if (input.Preparing is { } preparing)
