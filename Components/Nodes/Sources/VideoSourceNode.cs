@@ -16,7 +16,16 @@ namespace EditSharp.Components.Nodes.Sources
     {
         VideoSource _source = null!;
         [Editable("Source")]
-        public required VideoSource Source { get => _source; set => Transaction.Set(this, ref _source, value, static (o, v) => o._source = v); }
+        public required VideoSource Source
+        {
+            get => _source;
+            set
+            {
+                Transaction.Set(this, ref _source, value, static (o, v) => { o._source = v; v.Holder = o; });
+                value.Holder = this;
+                OwnerClip?.TrimToSources();
+            }
+        }
  
         private static readonly NodePort[] StaticPorts = [new("Image", PortType.Image, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;

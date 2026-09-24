@@ -26,7 +26,11 @@ namespace EditSharp.Components.Clips
         private readonly Graph _graph;
         public override Graph Graph => _graph;
  
-        private VideoClip(Graph graph) => _graph = graph;
+        private VideoClip(Graph graph)
+        {
+            _graph = graph;
+            graph.Clip = this;
+        }
  
         // ---------------------------------------------------------------
         // Convenience factories — one per InputNode kind, each producing

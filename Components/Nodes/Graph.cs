@@ -82,6 +82,10 @@ namespace EditSharp.Components.Nodes
     public sealed class Graph
     {
         public NodeDomain Domain { get; }
+
+        //what holds this graph: a clip, or a composite node around it
+        internal Clips.Clip? Clip { get; set; }
+        internal CompositeNode? Composite { get; set; }
  
         private readonly List<Node> _nodes = [];
         private readonly List<Connection> _connections = [];
@@ -217,6 +221,7 @@ namespace EditSharp.Components.Nodes
         {
             Domain = domain;
             OutputNode = outputNode;
+            outputNode.Graph = this;
             _nodes.Add(outputNode);
         }
 
@@ -318,6 +323,7 @@ namespace EditSharp.Components.Nodes
                 if (ReferenceEquals(node, OutputNode)) continue;
  
                 Node copy = NewOf(node);
+                copy.Graph = graph;
                 graph._nodes.Add(copy);
             }
  
@@ -367,6 +373,7 @@ namespace EditSharp.Components.Nodes
                 throw new InvalidOperationException(
                     $"Cannot add a {nodeDomain} node to a {Domain} Graph.");
  
+            node.Graph = this;
             Transaction.Apply(() => _nodes.Add(node), () => _nodes.Remove(node), "add node");
             return node;
         }

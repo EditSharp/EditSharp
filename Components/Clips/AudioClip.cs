@@ -29,7 +29,11 @@ namespace EditSharp.Components.Clips
         [Editable("Preserve pitch")]
         public PitchPreservation PreservePitch { get => _preservePitch; set => Transaction.Set(this, ref _preservePitch, value, static (o, v) => o._preservePitch = v); }
  
-        private AudioClip(Graph graph) => _graph = graph;
+        private AudioClip(Graph graph)
+        {
+            _graph = graph;
+            graph.Clip = this;
+        }
  
         public static AudioClip CreateFromSource(AudioSource source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(new AudioSourceNode { Source = source })) { Start = start, Duration = duration });
  

@@ -31,17 +31,23 @@ namespace EditSharp.Components.Sources
         //how far into the source's own material to start using it
         TimeSpan? _start;
         [Editable("In point")]
-        public TimeSpan? Start { get => _start; set => Transaction.Set(this, ref _start, value, static (o, v) => o._start = v); }
+        public TimeSpan? Start { get => _start; set { Transaction.Set(this, ref _start, value, static (o, v) => o._start = v); EndMayHaveMoved(); } }
 
         //how much of the source to use from Start; null uses everything there is
         TimeSpan? _duration;
         [Editable("Duration")]
-        public TimeSpan? Duration { get => _duration; set => Transaction.Set(this, ref _duration, value, static (o, v) => o._duration = v); }
+        public TimeSpan? Duration { get => _duration; set { Transaction.Set(this, ref _duration, value, static (o, v) => o._duration = v); EndMayHaveMoved(); } }
 
         //repeat the trimmed window instead of ending
         bool _loop;
         [Editable("Loop")]
-        public bool Loop { get => _loop; set => Transaction.Set(this, ref _loop, value, static (o, v) => o._loop = v); }
+        public bool Loop { get => _loop; set { Transaction.Set(this, ref _loop, value, static (o, v) => o._loop = v); EndMayHaveMoved(); } }
+
+        //the node this source is in, if any; set by the node
+        internal Nodes.Node? Holder { get; set; }
+
+        /// <summary>An edit may have pulled the source's end inside its clip: trim the clip to it.</summary>
+        private protected void EndMayHaveMoved() => Holder?.OwnerClip?.TrimToSources();
 
         /// <summary>
         /// How long the source's own material is, ignoring Start/Duration.

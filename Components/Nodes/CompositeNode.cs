@@ -70,6 +70,7 @@ namespace EditSharp.Components.Nodes
         public CompositeNode(Graph inner, string name = "Custom node")
         {
             Inner = inner ?? throw new ArgumentNullException(nameof(inner));
+            Inner.Composite = this;
             _name = name;
         }
 

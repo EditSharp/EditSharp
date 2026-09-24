@@ -24,7 +24,7 @@ public class TimelineVideoSource : VideoSource
 {
     Timeline? _timeline;
     [Editable("Timeline")]
-    public Timeline? Timeline { get => _timeline; set => Transaction.Set(this, ref _timeline, value, static (o, v) => o._timeline = v); }
+    public Timeline? Timeline { get => _timeline; set { Transaction.Set(this, ref _timeline, value, static (o, v) => o._timeline = v); EndMayHaveMoved(); } }
 
     public override TimelineVideoSource Duplicate() => (TimelineVideoSource)base.Duplicate();
 

@@ -9,6 +9,20 @@ namespace EditSharp.Components.Nodes
     public abstract class Node
     {
         public Guid Id { get; } = Guid.NewGuid();
+
+        //the graph this node was added to; set by Graph, never by a snapshot
+        internal Graph? Graph { get; set; }
+
+        /// <summary>The clip this node is in, through any composites around it.</summary>
+        internal Clips.Clip? OwnerClip
+        {
+            get
+            {
+                for (Graph? graph = Graph; graph is not null; graph = graph.Composite?.Graph)
+                    if (graph.Clip is { } clip) return clip;
+                return null;
+            }
+        }
  
         //fixed set, declared by the concrete node type
         public abstract IReadOnlyList<NodePort> Ports { get; }

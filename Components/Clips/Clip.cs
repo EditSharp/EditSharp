@@ -55,7 +55,7 @@ namespace EditSharp.Components.Clips
         /// </summary>
         double _speed = 1d;
         [Editable("Speed", Order = 3, Min = 0.01, Max = 100, Step = 0.01, Editor = PropertyEditor.Percent, Default = 1.0)]
-        public double Speed { get => _speed; set => Transaction.Set(this, ref _speed, value, static (o, v) => o._speed = v); }
+        public double Speed { get => _speed; set { Transaction.Set(this, ref _speed, value, static (o, v) => o._speed = v); TrimToSources(); } }
 
         /// <summary>The span of content this clip covers — Duration scaled by Speed.</summary>
         public TimeSpan ContentDuration => ToContentTime(Duration);
@@ -163,22 +163,36 @@ namespace EditSharp.Components.Clips
         /// hard end, zero if one already ends inside the clip. TimeSpan.MaxValue
         /// when none has one (unbounded, looping, or not probed yet).
         /// </summary>
-        public TimeSpan TailExtendLimit
+        public TimeSpan TailExtendLimit => SourceRoom() is not { } r ? TimeSpan.MaxValue
+            : r <= TimeSpan.Zero ? TimeSpan.Zero : ToTimelineTime(r);
+
+        //content left past the clip's end in its tightest source with a known hard end; negative when the clip runs past one
+        private TimeSpan? SourceRoom()
         {
-            get
+            TimeSpan? room = null;
+
+            foreach (ITrimmableInput trimmable in Graph.AllNodes.OfType<ITrimmableInput>())
             {
-                TimeSpan? room = null;
-
-                foreach (ITrimmableInput trimmable in Graph.AllNodes.OfType<ITrimmableInput>())
-                {
-                    if (trimmable.ContentLength is not { } length) continue;
-                    TimeSpan left = length - ContentDuration;
-                    if (room is null || left < room) room = left;
-                }
-
-                if (room is not { } r) return TimeSpan.MaxValue;
-                return r <= TimeSpan.Zero ? TimeSpan.Zero : ToTimelineTime(r);
+                if (trimmable.ContentLength is not { } length) continue;
+                TimeSpan left = length - ContentDuration;
+                if (room is null || left < room) room = left;
             }
+
+            return room;
+        }
+
+        /// <summary>
+        /// After an edit (a source's Duration, in-point, Loop, file; the clip's
+        /// Speed): trims the end back to a source's hard end the clip now runs
+        /// past, in the same undo step. Placed clips only; never while loading,
+        /// copying or replaying history. Under a millisecond is rounding.
+        /// </summary>
+        internal void TrimToSources()
+        {
+            if (Channel is null || Transaction.IsSuppressed || Transaction.IsReplaying) return;
+
+            if (SourceRoom() is { } room && room < -TimeSpan.FromMilliseconds(1))
+                TrimEnd(ToTimelineTime(-room));
         }
 
         public void TrimStart(TimeSpan amount)
