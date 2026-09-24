@@ -85,11 +85,7 @@ namespace EditSharp.Compositing.Graphs
             {
                 if (node is InputNode)
                 {
-                    if (!resolvedInputs.TryGetValue(node.Id, out SKImage? content))
-                        throw new InvalidOperationException(
-                            $"No resolved content supplied for {node.GetType().Name} ({node.Id}).");
- 
-                    images[(node.Id, "Image")] = content;
+                    images[(node.Id, "Image")] = resolvedInputs.TryGetValue(node.Id, out SKImage? content) ? content : Nothing;
                     continue;
                 }
  
@@ -282,8 +278,10 @@ namespace EditSharp.Compositing.Graphs
                 }
             }
  
-            SKImage final = result ?? throw new InvalidOperationException(
-                "Graph's ImageOutputNode has no incoming connection.");
+            SKImage final = result ?? Nothing;
+
+            if (ReferenceEquals(final, Nothing)) final = CreateNothing();
+            else if (IsResolvedInput(final, resolvedInputs)) final = Copy(final, pool);
  
             foreach (SKImage image in owned)
             {
@@ -317,11 +315,35 @@ namespace EditSharp.Compositing.Graphs
             return cache.TryGetValue((c.FromNodeId, c.FromPort), out SKImage? img) ? img : null;
         }
  
+        //an input that isn't wired (yet) reads as transparent rather than failing the frame
+        private static readonly SKImage Nothing = CreateNothing();
+
+        private static SKImage CreateNothing()
+        {
+            using var bitmap = new SKBitmap(1, 1, SKColorType.Rgba8888, SKAlphaType.Premul);
+            bitmap.Erase(SKColors.Transparent);
+            return SKImage.FromBitmap(bitmap);
+        }
+
+        //the caller disposes what Evaluate returns, so an image passed straight through is handed back as a copy
+        private static SKImage Copy(SKImage image, SurfacePool pool)
+        {
+            SKSurface surface = pool.Rent(image.Width, image.Height);
+            try
+            {
+                surface.Canvas.Clear(SKColors.Transparent);
+                surface.Canvas.DrawImage(image, 0, 0);
+                return surface.Snapshot();
+            }
+            finally
+            {
+                pool.Return(surface, image.Width, image.Height);
+            }
+        }
+
         private static SKImage RequireImage(
             Graph graph, Node node, string portName, Dictionary<(Guid, string), SKImage> cache) =>
-            ResolveImage(graph, node, portName, cache)
-            ?? throw new InvalidOperationException(
-                $"{node.GetType().Name}'s '{portName}' input has no incoming connection.");
+            ResolveImage(graph, node, portName, cache) ?? Nothing;
  
         private static SKImage? ResolveMaskRaw(
             Graph graph, Node node, string portName, Dictionary<(Guid, string), SKImage> cache)
@@ -333,9 +355,7 @@ namespace EditSharp.Compositing.Graphs
  
         private static SKImage RequireMask(
             Graph graph, Node node, string portName, Dictionary<(Guid, string), SKImage> cache) =>
-            ResolveMaskRaw(graph, node, portName, cache)
-            ?? throw new InvalidOperationException(
-                $"{node.GetType().Name}'s '{portName}' mask input has no incoming connection.");
+            ResolveMaskRaw(graph, node, portName, cache) ?? Nothing;
  
         private static SKImage? ResolveMask(
             Graph graph, Node node, string portName, Dictionary<(Guid, string), SKImage> cache,

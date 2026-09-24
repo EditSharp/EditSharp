@@ -171,8 +171,7 @@ namespace EditSharp.Rendering
                 VideoReadMode.Sequential, ContentFailurePolicy.Export, Buffered: true, Direction: 1, Report: report));
 
             var prepSw = Stopwatch.StartNew();
-            await contentSource.PrepareAsync(
-                FrameStateResolver.Resolve(timeline, 0, fps).Channels.SelectMany(c => c.Clips).Select(c => c.Clip).OfType<VideoClip>());
+            await contentSource.PrepareAsync(FrameStateResolver.Resolve(timeline, 0, fps));
             EditSharpConfig.Logger.LogVerbose($"Opening sources prepared in {prepSw.ElapsedMilliseconds}ms.");
 
             using GpuContext gpuContext = GpuContext.Create(

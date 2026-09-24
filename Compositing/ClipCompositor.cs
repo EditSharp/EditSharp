@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using EditSharp.Components.Nodes;
 using SkiaSharp;
 using EditSharp.Compositing.Gpu;
 using EditSharp.Compositing.Graphs;
@@ -41,7 +42,7 @@ namespace EditSharp.Compositing
     {
         public static void Composite(
             SKCanvas canvas,
-            VideoClip clip,
+            Graph graph,
             IReadOnlyDictionary<Guid, SKImage> resolvedInputs,
             double clipSeconds,
             SkClipChainContext context,
@@ -50,7 +51,7 @@ namespace EditSharp.Compositing
             var clipRelativeTime = TimeSpan.FromSeconds(clipSeconds);
 
             using SKImage final = ImageGraphEvaluator.Evaluate(
-                clip.Graph.Flattened, resolvedInputs, clipRelativeTime, context, pool);
+                graph, resolvedInputs, clipRelativeTime, context, pool);
 
             canvas.DrawImage(final, 0, 0);
         }

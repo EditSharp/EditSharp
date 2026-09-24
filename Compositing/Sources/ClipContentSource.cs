@@ -16,6 +16,7 @@ using EditSharp.Components.Sources.Video;
 using EditSharp.Compositing.Generators;
 using EditSharp.Compositing.Gpu;
 using EditSharp.Compositing.Transforms;
+using EditSharp.History;
 using EditSharp.Rendering;
 using EditSharp.Video;
 
@@ -116,14 +117,18 @@ namespace EditSharp.Compositing.Sources
         // Ahead of time
         // ---------------------------------------------------------------
 
-        /// <summary>Prepares every media input of `clips`, waiting for all of them. Failures are recorded, not thrown.</summary>
-        public async Task PrepareAsync(IEnumerable<VideoClip> clips, CancellationToken ct = default)
+        /// <summary>Prepares every media input visible in `state`, waiting for all of them. Failures are recorded, not thrown.</summary>
+        public Task PrepareAsync(FrameState state, CancellationToken ct = default) => PrepareAsync(
+            state.Channels.SelectMany(c => c.Clips).Where(c => c.Clip is VideoClip).Select(c => ((VideoClip)c.Clip, c.Graph)), ct);
+
+        /// <summary>Prepares every media input of each clip, read from its graph snapshot. Failures are recorded, not thrown.</summary>
+        public async Task PrepareAsync(IEnumerable<(VideoClip Clip, Graph Graph)> clips, CancellationToken ct = default)
         {
             var pending = new List<Task>();
 
-            foreach (VideoClip clip in clips)
+            foreach ((VideoClip clip, Graph graph) in clips)
             {
-                foreach (VideoSourceNode node in clip.Graph.AllNodes.OfType<VideoSourceNode>())
+                foreach (VideoSourceNode node in graph.Nodes.OfType<VideoSourceNode>())
                 {
                     if (StartPreparing(Input(clip, node)) is { } task) pending.Add(task);
                 }
@@ -139,6 +144,8 @@ namespace EditSharp.Compositing.Sources
         /// </summary>
         public void Anticipate(Timeline timeline, int frameIndex)
         {
+            using var _ = ModelLock.Read();
+
             TimeSpan now = FrameStateResolver.TimeOfFrame(frameIndex, _options.Fps);
             TimeSpan lookahead = EditSharpConfig.SourceLookahead;
             var live = new HashSet<Guid>();
@@ -164,7 +171,7 @@ namespace EditSharp.Compositing.Sources
                         StartPreparing(input);
 
                         if (_options.Buffered && input.Buffer is null && input.Failure is null && TryTakePrepared(input) is { } prepared)
-                            OpenBuffer(input, prepared, EntryFrame(clip, reachEnd, frameIndex), reachEnd);
+                            OpenBuffer(input, prepared, video.Graph, EntryFrame(clip, reachEnd, frameIndex), reachEnd);
                     }
                 }
             }
@@ -191,7 +198,7 @@ namespace EditSharp.Compositing.Sources
             {
                 if (frameClip.Clip is not VideoClip clip) continue;
 
-                foreach (VideoSourceNode node in clip.Graph.AllNodes.OfType<VideoSourceNode>())
+                foreach (VideoSourceNode node in frameClip.Graph.Nodes.OfType<VideoSourceNode>())
                 {
                     MediaInput input = Input(clip, node);
                     if (input.Failure is not null) continue;
@@ -204,7 +211,7 @@ namespace EditSharp.Compositing.Sources
                     if (input.Buffer is null)
                     {
                         if (TryTakePrepared(input) is not { } prepared) continue; //failed: placeholder
-                        OpenBuffer(input, prepared, state.FrameIndex, ReachEnd(null, clip));
+                        OpenBuffer(input, prepared, frameClip.Graph, state.FrameIndex, ReachEnd(null, clip));
                     }
 
                     TimeSpan content = TimeSpan.FromSeconds(frameClip.ClipSeconds);
@@ -220,8 +227,8 @@ namespace EditSharp.Compositing.Sources
         // ---------------------------------------------------------------
 
         public IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> GetContent(
-            VideoClip clip, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool) =>
-            GetContent(clip, clipSeconds, frameIndex, canvasWidth, canvasHeight, pool, null);
+            VideoClip clip, Graph graph, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool) =>
+            GetContent(clip, graph, clipSeconds, frameIndex, canvasWidth, canvasHeight, pool, null);
 
         /// <summary>
         /// GetContent with some inputs already resolved (see
@@ -229,13 +236,13 @@ namespace EditSharp.Compositing.Sources
         /// only the rest are resolved here.
         /// </summary>
         public IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> GetContent(
-            VideoClip clip, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool,
+            VideoClip clip, Graph graph, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool,
             IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)>? resolved)
         {
             var result = new Dictionary<Guid, (SKImage, bool)>();
             LastFrameIncomplete = false;
 
-            foreach (InputNode node in clip.Graph.AllNodes.OfType<InputNode>())
+            foreach (InputNode node in graph.Nodes.OfType<InputNode>())
             {
                 if (resolved is not null && resolved.TryGetValue(node.Id, out (SKImage Image, bool Transient) known))
                 {
@@ -245,7 +252,7 @@ namespace EditSharp.Compositing.Sources
 
                 result[node.Id] = node switch
                 {
-                    VideoSourceNode media => ResolveMedia(clip, media, clipSeconds, frameIndex, canvasWidth, canvasHeight),
+                    VideoSourceNode media => ResolveMedia(clip, graph, media, clipSeconds, frameIndex, canvasWidth, canvasHeight),
 
                     TextInputNode text => GetOrRasterizeText(text, frameIndex, canvasWidth, canvasHeight),
 
@@ -273,10 +280,10 @@ namespace EditSharp.Compositing.Sources
         /// way (ProxyPending, Opening). Hand the result to GetContent.
         /// </summary>
         public async Task<(IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> Media, bool Complete)> GetMediaFramesOnceAsync(
-            VideoClip clip, double clipSeconds, int width, int height, CancellationToken ct = default)
+            Graph graph, double clipSeconds, int width, int height, CancellationToken ct = default)
         {
             TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
-            VideoSourceNode[] nodes = clip.Graph.AllNodes.OfType<VideoSourceNode>().ToArray();
+            VideoSourceNode[] nodes = graph.Nodes.OfType<VideoSourceNode>().ToArray();
 
             var frames = await Task.WhenAll(nodes.Select(async node =>
             {
@@ -296,7 +303,7 @@ namespace EditSharp.Compositing.Sources
             return (media, !frames.Any(f => f.Pending));
         }
 
-        private (SKImage, bool) ResolveMedia(VideoClip clip, VideoSourceNode node, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight)
+        private (SKImage, bool) ResolveMedia(VideoClip clip, Graph graph, VideoSourceNode node, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight)
         {
             MediaInput input = Input(clip, node);
             TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
@@ -315,11 +322,11 @@ namespace EditSharp.Compositing.Sources
 
                 if (_options.Buffered)
                 {
-                    input.Buffer ??= OpenBuffer(input, prepared, frameIndex, ReachEnd(null, clip));
+                    input.Buffer ??= OpenBuffer(input, prepared, graph, frameIndex, ReachEnd(null, clip));
                     return Owned(input.Buffer.Take(frameIndex, content));
                 }
 
-                input.Reader ??= prepared.OpenReader(ReaderOptions(input, prepared, content, callerOwnsFrames: false));
+                input.Reader ??= prepared.OpenReader(ReaderOptions(input, prepared, graph, content, callerOwnsFrames: false));
                 return Owned(input.Reader.GetFrame(content));
             }
             catch (SourceUnavailableException ex)
@@ -435,7 +442,7 @@ namespace EditSharp.Compositing.Sources
             return TryTakePrepared(input) ?? throw input.Failure!;
         }
 
-        private BufferedVideoReader OpenBuffer(MediaInput input, IPreparedVideoSource prepared, int firstFrame, TimeSpan reachEnd)
+        private BufferedVideoReader OpenBuffer(MediaInput input, IPreparedVideoSource prepared, Graph graph, int firstFrame, TimeSpan reachEnd)
         {
             VideoClip clip = input.Clip;
             TimeSpan content = ContentTimeOf(clip, firstFrame);
@@ -443,7 +450,7 @@ namespace EditSharp.Compositing.Sources
             int firstClipFrame = (int)Math.Ceiling(clip.Start.TotalSeconds * _options.Fps - 1e-9);
             int endFrame = (int)Math.Ceiling(reachEnd.TotalSeconds * _options.Fps - 1e-9);
 
-            IVideoFrameReader reader = prepared.OpenReader(ReaderOptions(input, prepared, content, callerOwnsFrames: true));
+            IVideoFrameReader reader = prepared.OpenReader(ReaderOptions(input, prepared, graph, content, callerOwnsFrames: true));
 
             return input.Buffer = new BufferedVideoReader(
                 reader, firstFrame, _options.Direction, EditSharpConfig.ReaderBufferFrames,
@@ -451,11 +458,11 @@ namespace EditSharp.Compositing.Sources
                 frame => frame >= firstClipFrame && frame < endFrame);
         }
 
-        private VideoReaderOptions ReaderOptions(MediaInput input, IPreparedVideoSource prepared, TimeSpan startAt, bool callerOwnsFrames)
+        private VideoReaderOptions ReaderOptions(MediaInput input, IPreparedVideoSource prepared, Graph graph, TimeSpan startAt, bool callerOwnsFrames)
         {
             //decode only as large as the clip's own transform will ever show it
             (int nativeWidth, int nativeHeight) = prepared.NativeSize;
-            ClipTransform transform = DecodeSizeHeuristics.FindDownstreamTransform(input.Clip.Graph.Flattened, input.Node)?.Transform ?? new ClipTransform();
+            ClipTransform transform = DecodeSizeHeuristics.FindDownstreamTransform(graph, input.Node)?.Transform ?? new ClipTransform();
 
             (int width, int height) = nativeWidth > 0 && nativeHeight > 0
                 ? TransformProjection.ComputeContentSize(transform, nativeWidth, nativeHeight, _options.CanvasWidth, _options.CanvasHeight)
@@ -496,6 +503,8 @@ namespace EditSharp.Compositing.Sources
         /// </summary>
         private static TimeSpan ReachEnd(Channel? channel, Clip clip)
         {
+            using var _ = ModelLock.Read();
+
             channel ??= clip.Channel;
             TimeSpan transition = channel?.Transitions.FirstOrDefault(t => ReferenceEquals(t.From, clip))?.Duration ?? TimeSpan.Zero;
             return clip.End + Max(TimeSpan.Zero, transition);

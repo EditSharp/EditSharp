@@ -200,7 +200,7 @@ namespace EditSharp.History
             if (EqualityComparer<T>.Default.Equals(field, value)) return;
 
             T old = field;
-            field = value;
+            using (ModelLock.Write()) field = value;
 
             if (!Listening) return;
 
@@ -210,7 +210,7 @@ namespace EditSharp.History
         /// <summary>Performs `redo` now and records `undo` as its reverse — for collection edits and anything else that is not a property.</summary>
         public static void Apply(Action redo, Action undo, string description)
         {
-            redo();
+            using (ModelLock.Write()) redo();
 
             if (!Listening) return;
 
@@ -238,7 +238,10 @@ namespace EditSharp.History
             bool was = _replaying;
             _replaying = true;
 
-            try { action(); }
+            try
+            {
+                using (ModelLock.Write()) action();
+            }
             finally { _replaying = was; }
         }
     }

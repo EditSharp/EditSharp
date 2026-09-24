@@ -11,7 +11,9 @@ using EditSharp;
 using EditSharp.Components;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
+using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Sources;
+using EditSharp.History;
 using EditSharp.Components.Sources;
 using EditSharp.Components.Sources.Video;
 using EditSharp.Compositing;
@@ -1231,14 +1233,11 @@ namespace EditSharp.Playback
             int frameIndex = (int)(position.TotalSeconds * fps);
             FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps);
 
-            await contentSource.PrepareAsync(VisibleClips(state), ct).ConfigureAwait(false);
+            await contentSource.PrepareAsync(state, ct).ConfigureAwait(false);
 
             return await gpuThread.RunAsync(() =>
                 FrameCompositor.RenderFrame(state, contentSource, width, height, fps, pool)).ConfigureAwait(false);
         }
-
-        private static IEnumerable<VideoClip> VisibleClips(FrameState state) =>
-            state.Channels.SelectMany(channel => channel.Clips).Select(frameClip => frameClip.Clip).OfType<VideoClip>();
 
         private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
 
@@ -1302,13 +1301,16 @@ namespace EditSharp.Playback
                 ClipContentSource source = _scrubContentSource!;
                 SurfacePool pool = _scrubSurfacePool!;
 
+                Graph graph;
+                using (ModelLock.Read()) graph = clip.Graph.Snapshot();
+
                 (IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> media, bool mediaComplete) =
-                    await source.GetMediaFramesOnceAsync(clip, clipSeconds, width, height, ct).ConfigureAwait(false);
+                    await source.GetMediaFramesOnceAsync(graph, clipSeconds, width, height, ct).ConfigureAwait(false);
 
                 return await _scrubGpuThread!.RunAsync(() =>
                 {
                     IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> resolved =
-                        source.GetContent(clip, clipSeconds, 0, width, height, pool, media);
+                        source.GetContent(clip, graph, clipSeconds, 0, width, height, pool, media);
                     bool complete = mediaComplete && !source.LastFrameIncomplete;
 
                     var plain = new Dictionary<Guid, SKImage>(resolved.Count);
@@ -1323,7 +1325,7 @@ namespace EditSharp.Playback
                         try
                         {
                             surface.Canvas.Clear(SKColors.Black);
-                            ClipCompositor.Composite(surface.Canvas, clip, plain, clipSeconds, context, pool);
+                            ClipCompositor.Composite(surface.Canvas, graph, plain, clipSeconds, context, pool);
 
                             using SKImage image = surface.Snapshot();
                             return new ClipFrame(ReadPixels(image, width, height), width, height, complete);
@@ -1425,7 +1427,7 @@ namespace EditSharp.Playback
                     int totalFrames = Math.Max(1, (int)Math.Ceiling(Timeline.Duration.TotalSeconds * fps));
 
                     FrameState warmupState = FrameStateResolver.Resolve(Timeline, startFrame, fps);
-                    await contentSource.PrepareAsync(VisibleClips(warmupState), token);
+                    await contentSource.PrepareAsync(warmupState, token);
                     contentSource.Anticipate(Timeline, startFrame);
 
                     using var videoGpuThread = new GpuThreadDispatcher("EditSharp-VideoGPU");
@@ -1627,7 +1629,7 @@ namespace EditSharp.Playback
                     int startFrame = (int)(startPosition.TotalSeconds * fps);
 
                     FrameState warmupState = FrameStateResolver.Resolve(Timeline, startFrame, fps);
-                    await contentSource.PrepareAsync(VisibleClips(warmupState), token);
+                    await contentSource.PrepareAsync(warmupState, token);
                     contentSource.Anticipate(Timeline, startFrame);
 
                     using var reverseGpuThread = new GpuThreadDispatcher("EditSharp-ReverseGPU");

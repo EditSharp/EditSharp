@@ -113,6 +113,17 @@ namespace EditSharp.Components.Nodes
         /// </summary>
         public Graph Flattened => _nodes.Any(n => n is CompositeNode) ? Flatten() : this;
 
+        /// <summary>
+        /// The flattened structure copied out: its own node and connection
+        /// lists (the nodes themselves are shared), so it can be walked while
+        /// the live graph is edited. Take it under ModelLock's read side.
+        /// </summary>
+        internal Graph Snapshot()
+        {
+            Graph flat = Flattened;
+            return new Graph(flat.Domain, flat.OutputNode, [.. flat._nodes], [.. flat._connections]);
+        }
+
         private Graph Flatten()
         {
             List<Node> nodes = [];

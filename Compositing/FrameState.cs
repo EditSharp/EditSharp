@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using EditSharp.Components;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
+using EditSharp.Components.Nodes;
 using EditSharp.Components.Transitions;
  
 namespace EditSharp.Compositing
@@ -28,6 +29,9 @@ namespace EditSharp.Compositing
     internal sealed class FrameClip
     {
         public required Clip Clip { get; init; }
+
+        /// <summary>The clip's graph as it was when the frame was resolved; compose from this, not Clip.Graph.</summary>
+        public required Graph Graph { get; init; }
  
         /// <summary>
         /// Clip-relative seconds at this output frame — what every effect

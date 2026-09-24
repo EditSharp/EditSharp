@@ -5,6 +5,8 @@ using EditSharp.Components;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Transitions;
+using EditSharp.History;
+using EditSharp.Components.Nodes;
 using EditSharp.Video;
 
 namespace EditSharp.Compositing
@@ -41,8 +43,15 @@ namespace EditSharp.Compositing
     /// </summary>
     internal static class FrameStateResolver
     {
+        /// <summary>
+        /// What frame `frameIndex` shows: live clips per channel, transitions,
+        /// and a snapshot of each clip's graph. Takes ModelLock's read side, so
+        /// the result is safe to compose while the model is edited.
+        /// </summary>
         public static FrameState Resolve(Timeline timeline, int frameIndex, int fps)
         {
+            using var _ = ModelLock.Read();
+
             TimeSpan time = TimeOfFrame(frameIndex, fps);
 
             var channels = new List<FrameChannel>();
@@ -138,6 +147,7 @@ namespace EditSharp.Compositing
             return new FrameClip
             {
                 Clip = clip,
+                Graph = clip.Graph.Snapshot(),
                 ClipSeconds = ClipSecondsAt(clip, time),
             };
         }

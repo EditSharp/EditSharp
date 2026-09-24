@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using SkiaSharp;
 using EditSharp.Components.Clips;
+using EditSharp.Components.Nodes;
 using EditSharp.Compositing.Gpu;
 
 namespace EditSharp.Compositing.Sources
@@ -11,11 +12,12 @@ namespace EditSharp.Compositing.Sources
     /// InputNode of a clip, keyed by node Id, each flagged with whether the
     /// caller disposes it (Transient) or it stays owned by the source.
     /// `frameIndex` is the timeline frame being composed (buffered sources
-    /// key their prefetch on it); `clipSeconds` is that frame's content time.
+    /// key their prefetch on it); `clipSeconds` is that frame's content time;
+    /// `graph` is the clip's graph snapshot for this frame.
     /// </summary>
     internal interface IClipContentSource
     {
         IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> GetContent(
-            VideoClip clip, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool);
+            VideoClip clip, Graph graph, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool);
     }
 }

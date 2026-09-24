@@ -170,7 +170,7 @@ namespace EditSharp.Compositing
             if (frameClip.Clip is not VideoClip clip) return; //defensive — see class remarks
 
             IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> resolved =
-                contentSource.GetContent(clip, frameClip.ClipSeconds, frameIndex, canvasWidth, canvasHeight, pool);
+                contentSource.GetContent(clip, frameClip.Graph, frameClip.ClipSeconds, frameIndex, canvasWidth, canvasHeight, pool);
 
             var plain = new Dictionary<Guid, SKImage>(resolved.Count);
             foreach (KeyValuePair<Guid, (SKImage Image, bool Transient)> entry in resolved)
@@ -181,7 +181,7 @@ namespace EditSharp.Compositing
                 var context = new SkClipChainContext(canvasWidth, canvasHeight, fps, 1.0 / fps);
 
                 ClipCompositor.Composite(
-                    canvas, clip, plain, frameClip.ClipSeconds, context, pool);
+                    canvas, frameClip.Graph, plain, frameClip.ClipSeconds, context, pool);
             }
             finally
             {
