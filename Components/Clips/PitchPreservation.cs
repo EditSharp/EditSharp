@@ -4,7 +4,7 @@ namespace EditSharp.Components.Clips
     public enum PitchPreservation
     {
         /// <summary>Varispeed: faster is higher, slower is lower, like tape.</summary>
-        None,
+        Off,
 
         /// <summary>Waveform-similarity overlap-add. Cheap; clean on speech and most music.</summary>
         WSOLA,

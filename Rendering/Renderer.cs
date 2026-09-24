@@ -351,7 +351,7 @@ namespace EditSharp.Rendering
             await Task.Run(async () =>
             {
                 var session = new AudioSession(new AudioFormat(AudioSampleRate, AudioChannelCount), waitForSources: true, report);
-                using var master = new MasterAudioStream(timeline, session, 0, 1, PitchPreservation.None);
+                using var master = new MasterAudioStream(timeline, session, 0, 1, PitchPreservation.Off);
 
                 long total = session.FrameOf(timeline.Duration);
                 var block = new float[session.BlockFrames * AudioChannelCount];

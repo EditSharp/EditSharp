@@ -33,7 +33,7 @@ namespace EditSharp.Audio.Engine
     /// <summary>
     /// Turns a content-rate stream into timeline-rate blocks at the clip's
     /// speed. At exactly 1x on whole frames it copies. Otherwise
-    /// PitchPreservation picks the stage: None resamples (windowed sinc, pitch
+    /// PitchPreservation picks the stage: Off resamples (windowed sinc, pitch
     /// follows speed); WSOLA and PhaseVocoder stretch time and keep pitch.
     /// The stretchers carry state from block to block and start over only on
     /// a real discontinuity: a block that doesn't follow on from the last one
@@ -66,7 +66,7 @@ namespace EditSharp.Audio.Engine
                 _window.CopyTo(first, frames, target);
                 _stretch = null;
             }
-            else if (pitch == PitchPreservation.None)
+            else if (pitch == PitchPreservation.Off)
             {
                 SincResampler.Render(_window, start, step, frames, target);
                 _stretch = null;
