@@ -36,13 +36,13 @@ namespace EditSharp.Audio.Engine
 
         public AudioClip Clip { get; } = clip;
 
-        /// <summary>Starts preparing the clip's sources (lookahead). True once all of them can be read.</summary>
-        public bool Prepare(Graph graph)
+        /// <summary>Starts preparing the clip's sources (with `wait`, until done). True once all of them can be read.</summary>
+        public bool Prepare(Graph graph, bool wait = false)
         {
             Build(graph);
             bool ready = true;
             foreach (Step step in _steps)
-                if (step.Processor is ContentInputProcessor input) ready &= input.Prepare();
+                if (step.Processor is ContentInputProcessor input) ready &= input.Prepare(wait);
             return ready;
         }
 

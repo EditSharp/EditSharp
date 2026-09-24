@@ -117,6 +117,22 @@ namespace EditSharp.Audio.Engine
             }
         }
 
+        /// <summary>Prepares every clip audible at `frame`, waiting until each can be read.</summary>
+        public void PrepareAt(long frame)
+        {
+            var audible = new System.Collections.Generic.List<(AudioClip Clip, Graph Graph)>();
+
+            using (ModelLock.Read())
+            {
+                foreach (AudioChannel channel in timeline.AudioChannels)
+                    foreach (Clip clip in channel.Clips)
+                        if (clip is AudioClip audio && session.FrameOf(clip.Start) <= frame && session.FrameOf(clip.End) > frame)
+                            audible.Add((audio, audio.Graph.Snapshot()));
+            }
+
+            foreach ((AudioClip clip, Graph graph) in audible) Network(clip).Prepare(graph, wait: true);
+        }
+
         private ClipAudioNetwork Network(AudioClip clip)
         {
             if (!_networks.TryGetValue(clip, out ClipAudioNetwork? network))

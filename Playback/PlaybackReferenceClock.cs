@@ -60,10 +60,14 @@ namespace EditSharp.Playback
         private TimeSpan _reportedPosition;
         private TimeSpan _reportedAt;
  
-        public PlaybackReferenceClock()
+        /// <summary>`rate` is timeline time per second of wall time: the playback speed, negative in reverse.</summary>
+        public PlaybackReferenceClock(double rate = 1)
         {
+            Rate = rate;
             _wallClock.Start();
         }
+
+        public double Rate { get; }
  
         public TimeSpan Position
         {
@@ -76,7 +80,7 @@ namespace EditSharp.Playback
                     reportedAt = _reportedAt;
                 }
  
-                return reportedPosition + (_wallClock.Elapsed - reportedAt);
+                return reportedPosition + TimeSpan.FromTicks((long)((_wallClock.Elapsed - reportedAt).Ticks * Rate));
             }
         }
  

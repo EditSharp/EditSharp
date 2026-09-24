@@ -14,6 +14,8 @@ using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Sources;
 using EditSharp.History;
+using EditSharp.Audio;
+using EditSharp.Audio.Engine;
 using EditSharp.Components.Sources;
 using EditSharp.Components.Sources.Video;
 using EditSharp.Compositing;
@@ -772,6 +774,16 @@ namespace EditSharp.Playback
         /// <summary>How audio keeps its pitch when Speed isn't 1 (including reverse).</summary>
         public PitchPreservation PreservePitch = PitchPreservation.WSOLA;
 
+        private readonly AudioTaps _audioTaps = new();
+
+        /// <summary>
+        /// Calls `onBlock` with every block of audio passing `id`: any audio
+        /// node's Id, a channel's Id, or AudioTap.Master. Stays in place across
+        /// sessions until disposed. Called on the audio thread, and the samples
+        /// are only valid during the call.
+        /// </summary>
+        public IDisposable TapAudio(Guid id, Action<AudioTapBlock> onBlock) => _audioTaps.Add(id, onBlock);
+
         private TimeSpan _lastKnownPosition = TimeSpan.Zero;
         private PlaybackReferenceClock? _referenceClock;
         public TimeSpan Position => _referenceClock?.Position ?? _lastKnownPosition;
@@ -942,22 +954,17 @@ namespace EditSharp.Playback
                 var pauseGate = new PlaybackPauseGate();
                 _pauseGate = pauseGate;
 
-                var referenceClock = new PlaybackReferenceClock();
+                //the clock runs at the playback speed: timeline time per second of wall time
+                var referenceClock = new PlaybackReferenceClock(Speed);
                 referenceClock.Report(resolvedStart);
                 _referenceClock = referenceClock;
 
-                // Reverse never participates with audio — see class remarks,
-                // REVERSE PLAYBACK. Math.Abs(Speed - 1f) is never < 0.0001f
-                // for a negative Speed, so this falls out naturally.
-                bool audioParticipates = Math.Abs(Speed - 1f) < 0.0001f;
-
-                bool videoFollows = audioParticipates && PlaybackMode == PlaybackMode.SyncToAudio;
-                bool audioFollows = audioParticipates && PlaybackMode is PlaybackMode.EveryFrame or PlaybackMode.FrameDropping;
+                //audio plays at every speed and in reverse; PlaybackMode decides who leads
+                bool videoFollows = PlaybackMode == PlaybackMode.SyncToAudio;
+                bool audioFollows = PlaybackMode is PlaybackMode.EveryFrame or PlaybackMode.FrameDropping;
                 bool audioDropsLate = PlaybackMode == PlaybackMode.FrameDropping;
 
-                var startGate = new PlaybackStartGate(
-                    audioParticipates ? 2 : 1,
-                    onReleased: () => OnPlaybackStarted(EventArgs.Empty));
+                var startGate = new PlaybackStartGate(2, onReleased: () => OnPlaybackStarted(EventArgs.Empty));
 
                 // See class remarks, SUPERSEDED SESSIONS ARE ABANDONED, NOT
                 // AWAITED — queue behind whatever session came before, off
@@ -970,38 +977,24 @@ namespace EditSharp.Playback
                     await WaitForRetiredSessionAsync(previousVideoTask, token);
 
                     await (reverse
-                        ? ReverseVideoLoopAsync(token, resolvedStart, startGate, pauseGate, referenceClock)
+                        ? ReverseVideoLoopAsync(token, resolvedStart, startGate, pauseGate, referenceClock, videoFollows)
                         : VideoLoopAsync(token, resolvedStart, startGate, pauseGate, referenceClock, videoFollows));
                 });
 
-                if (audioParticipates)
-                {
-                    var audioEngine = new PlaybackAudioEngine();
-                    _audioEngine = audioEngine;
+                var audioEngine = new PlaybackAudioEngine();
+                _audioEngine = audioEngine;
 
-                    // Task.Run, not a direct call: composing the master mix
-                    // is real work, and a direct call would run it on (and
-                    // resume it onto) the CALLER's thread — Godot's main
-                    // thread, for every resume after a scrub.
-                    _ = Task.Run(() => audioEngine
-                        .StartAsync(
-                            Timeline, RenderSettings.Framerate,
-                            (int)RenderSettings.Resolution.X, (int)RenderSettings.Resolution.Y,
-                            resolvedStart, startGate, pauseGate,
-                            referenceClock, audioFollows, audioDropsLate, args => OnAudioSample(args), token))
-                        .ContinueWith(t =>
-                        {
-                            if (t.IsFaulted)
-                                EditSharpConfig.Logger.Log(
-                                    $"Playback audio engine failed to start: {t.Exception}");
-                        }, TaskScheduler.Default);
-                }
-                else
-                {
-                    EditSharpConfig.Logger.LogVerbose(
-                        $"Speed={Speed} != 1 — audio is not played this session (see Playback's " +
-                        "class remarks, gap 2 / REVERSE PLAYBACK).");
-                }
+                //off the caller's thread: preparing the start's sources is real work
+                _ = Task.Run(() => audioEngine
+                    .StartAsync(
+                        Timeline, resolvedStart, Speed, PreservePitch, _audioTaps,
+                        startGate, pauseGate, referenceClock, audioFollows, audioDropsLate,
+                        args => OnAudioSample(args), token))
+                    .ContinueWith(t =>
+                    {
+                        if (t.IsFaulted)
+                            EditSharpConfig.Logger.Log($"Playback audio engine failed to start: {t.Exception}");
+                    }, TaskScheduler.Default);
             }
         }
 
@@ -1605,15 +1598,16 @@ namespace EditSharp.Playback
         }
 
         /// <summary>
-        /// Reverse playback, video only. Reads are random-access (the proxy),
-        /// buffered BEHIND the playhead, and paced by this loop's own clock.
-        /// EveryFrame waits for every frame; the other modes skip a frame that
-        /// isn't ready in time and jump to the frame due now.
+        /// Reverse playback. Reads are random-access (the proxy), buffered
+        /// BEHIND the playhead. PlaybackMode works as it does forwards: in
+        /// SyncToAudio video follows the audio clock, otherwise it leads on its
+        /// own clock; EveryFrame waits for every frame, the other modes skip a
+        /// frame that isn't ready in time and jump to the frame due now.
         /// </summary>
         private async Task ReverseVideoLoopAsync(
             CancellationToken token, TimeSpan startPosition,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
-            PlaybackReferenceClock referenceClock)
+            PlaybackReferenceClock referenceClock, bool followsReferenceClock)
         {
             int width = (int)RenderSettings.Resolution.X;
             int height = (int)RenderSettings.Resolution.Y;
@@ -1653,10 +1647,12 @@ namespace EditSharp.Playback
 
                         await startGate.ReadyAndWaitAsync(token);
 
-                        var clock = Stopwatch.StartNew();
-                        EditSharpConfig.Logger.LogVerbose("Reverse video pacing clock started.");
+                        Stopwatch? clock = followsReferenceClock ? null : Stopwatch.StartNew();
+                        EditSharpConfig.Logger.LogVerbose(followsReferenceClock
+                            ? "Reverse video now following the reference clock."
+                            : "Reverse video pacing clock started.");
 
-                        referenceClock.Report(startPosition);
+                        if (!followsReferenceClock) referenceClock.Report(startPosition);
                         try
                         {
                             OnVideoFrame(new VideoFrameEventArgs(warmupBuffer, warmupLength, width, height, startPosition));
@@ -1676,29 +1672,48 @@ namespace EditSharp.Playback
 
                                 if (pauseGate.IsPaused)
                                 {
-                                    clock.Stop();
+                                    clock?.Stop();
                                     try { await pauseGate.WaitIfPausedAsync(token); }
                                     catch (OperationCanceledException) { return; }
-                                    clock.Start();
+                                    clock?.Start();
                                     continue;
+                                }
+
+                                //following: wait for the (descending) clock to reach this frame
+                                if (followsReferenceClock)
+                                {
+                                    TimeSpan gap = referenceClock.Position - FrameStateResolver.TimeOfFrame(frameIndex, fps);
+
+                                    if (gap > TimeSpan.Zero)
+                                    {
+                                        TimeSpan wait = TimeSpan.FromTicks((long)(gap.Ticks / speedMagnitude));
+                                        try { await Task.Delay(Max(wait, PlaybackReferenceClock.PollInterval), token); }
+                                        catch (OperationCanceledException) { return; }
+                                        continue;
+                                    }
                                 }
 
                                 break;
                             }
 
+                            //where the playhead really is right now
+                            TimeSpan Now() => followsReferenceClock
+                                ? referenceClock.Position
+                                : startPosition - TimeSpan.FromSeconds(clock!.Elapsed.TotalSeconds * speedMagnitude);
+
                             TimeSpan readyWait = Timeout.InfiniteTimeSpan;
 
                             if (mode != PlaybackMode.EveryFrame)
                             {
-                                int due = Math.Max(0, startFrame - (int)(clock.Elapsed.TotalSeconds * speedMagnitude * fps));
+                                int due = Math.Max(0, (int)Math.Ceiling(Now().TotalSeconds * fps));
                                 if (due < frameIndex)
                                 {
                                     skipped += frameIndex - due;
                                     frameIndex = due;
                                 }
 
-                                TimeSpan nextDue = TimeSpan.FromSeconds((startFrame - frameIndex + 1) / (fps * speedMagnitude));
-                                readyWait = Max(TimeSpan.Zero, nextDue - clock.Elapsed);
+                                TimeSpan untilNext = Now() - FrameStateResolver.TimeOfFrame(frameIndex - 1, fps);
+                                readyWait = Max(TimeSpan.Zero, TimeSpan.FromTicks((long)(untilNext.Ticks / speedMagnitude)));
                             }
 
                             TimeSpan framePosition = FrameStateResolver.TimeOfFrame(frameIndex, fps);
@@ -1712,19 +1727,22 @@ namespace EditSharp.Playback
                                 continue;
                             }
 
-                            TimeSpan targetElapsed = TimeSpan.FromSeconds((startFrame - frameIndex) / (fps * speedMagnitude));
-                            TimeSpan actualElapsed = clock.Elapsed;
-
-                            if (targetElapsed > actualElapsed)
+                            if (!followsReferenceClock)
                             {
-                                try { await Task.Delay(targetElapsed - actualElapsed, token); }
-                                catch (OperationCanceledException) { return; }
+                                TimeSpan targetElapsed = TimeSpan.FromSeconds((startFrame - frameIndex) / (fps * speedMagnitude));
+                                TimeSpan actualElapsed = clock!.Elapsed;
+
+                                if (targetElapsed > actualElapsed)
+                                {
+                                    try { await Task.Delay(targetElapsed - actualElapsed, token); }
+                                    catch (OperationCanceledException) { return; }
+                                }
                             }
 
                             (byte[] buffer, int length) = await reverseGpuThread.RunAsync(() =>
                                 FrameCompositor.RenderFrame(state, contentSource, width, height, fps, surfacePool));
 
-                            referenceClock.Report(framePosition);
+                            if (!followsReferenceClock) referenceClock.Report(framePosition);
 
                             try
                             {

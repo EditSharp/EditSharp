@@ -14,8 +14,8 @@ namespace EditSharp.Audio.Processors
         private object? _identity;
         private ContentWarp? _warp;
 
-        /// <summary>Starts preparing ahead of time; true once reads can start.</summary>
-        public bool Prepare() => Warp().Content.Ready(false);
+        /// <summary>Starts preparing ahead of time (with `wait`, until done); true once reads can start.</summary>
+        public bool Prepare(bool wait = false) => Warp().Content.Ready(wait);
 
         public void Process(in AudioTick tick, AudioPortBuffers ports)
         {

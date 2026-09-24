@@ -2,209 +2,154 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
-using EditSharp;
-using EditSharp.Audio;
+using EditSharp.Audio.Engine;
 using EditSharp.Components;
- 
+using EditSharp.Components.Clips;
+
 namespace EditSharp.Playback
 {
     /// <summary>
-    /// Delivers the timeline's mixed audio as raw PCM chunks, sliced
-    /// directly out of an in-memory master buffer.
+    /// Plays a session's audio: an AudioEngine renders the master up to
+    /// EditSharpConfig.AudioLatency ahead, and this delivers it block by block
+    /// (as s16le AudioSample events) on schedule, at any speed and in either
+    /// direction.
     ///
-    /// REAL-AUDIO-PIPELINE REWRITE: this used to spawn a long-lived ffmpeg
-    /// process (reusing InputGraph/ClipContentBuilder/AudioMixer's
-    /// filter-line-building) and pipe its stdout as raw PCM. That entire
-    /// subprocess is gone. StartAsync now just asks AudioMixer.ComposeAsync
-    /// for the timeline's fully mixed, fully graph-evaluated master
-    /// AudioBuffer ONCE (same call FinalizeOutputAsync makes for the final
-    /// render — same real per-node audio graph evaluation, so a live preview
-    /// and a final render of the same timeline are mixed identically), converts
-    /// it once to s16le bytes (AudioSampleEventArgs' own wire format), and the
-    /// pump loop slices directly out of that byte array instead of reading
-    /// from a pipe. No ffmpeg process, no filter script temp file, no pipe
-    /// backpressure to reason about for this engine at all any more.
-    ///
-    /// KNOWN LIMITATION, still flagged (unchanged from before): only
-    /// real-time (1x) playback is supported — Playback.Play() gates this
-    /// engine to Speed == 1 and skips audio entirely otherwise, same as
-    /// always.
-    ///
-    /// SYNCHRONIZED STARTUP / PAUSE: see PlaybackStartGate and
-    /// PlaybackPauseGate's own remarks.
-    ///
-    /// DELIVERY IS "PLAY THIS NOW" — NO LOOKAHEAD, DELIBERATELY. This means
-    /// the target time for a chunk must be the chunk's OWN START position
-    /// (how much was already delivered BEFORE it), not its end — see
-    /// PumpAsync's own remarks on a real bug this used to have.
-    ///
-    /// LEADER / FOLLOWER (PlaybackReferenceClock): in SyncToAudio mode,
-    /// this engine is the LEADER — own Stopwatch, delivers each chunk
-    /// exactly when its own real-time schedule says it's due. In
-    /// EveryFrame mode, it's the FOLLOWER instead.
+    /// Delivery is "play this now": each block goes out when its own start is
+    /// due. As the leader it keeps its own wall clock and reports positions to
+    /// the reference clock; as a follower it waits for the reference clock to
+    /// reach each block, and in FrameDropping it drops blocks that are already
+    /// more than a block late instead of catching up.
     /// </summary>
     internal sealed class PlaybackAudioEngine : IDisposable
     {
         public const int SampleRate = 48000;
         public const int ChannelCount = 2;
-        private const int BytesPerSample = 2; // s16le
-        private const int BytesPerFrame = ChannelCount * BytesPerSample;
-        private const int BytesPerSecond = SampleRate * BytesPerFrame;
- 
-        // ~100ms per chunk — small enough for reasonably responsive pacing,
-        // large enough not to make a syscall per handful of samples.
-        private const int ChunkBytes = BytesPerSecond / 10 - (BytesPerSecond / 10 % BytesPerFrame);
- 
-        private byte[] _pcm = [];
+
+        private AudioEngine? _engine;
         private Task? _pumpTask;
- 
+
         public async Task StartAsync(
-            Timeline timeline, int fps, int canvasWidth, int canvasHeight,
-            TimeSpan startPosition,
+            Timeline timeline, TimeSpan startPosition, double speed, PitchPreservation pitch, AudioTaps taps,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
             PlaybackReferenceClock referenceClock, bool followsReferenceClock, bool dropsLateChunks,
             Action<AudioSampleEventArgs> onSample, CancellationToken token)
         {
             try
             {
-                AudioBuffer master = await AudioMixer.ComposeAsync(timeline, SampleRate, ChannelCount, token);
-                _pcm = master.ToInt16Bytes();
+                var session = new AudioSession(new AudioFormat(SampleRate, ChannelCount), waitForSources: false, taps: taps);
+                var engine = new AudioEngine(timeline, session, startPosition, speed, pitch);
+                _engine = engine;
+
+                //waits for the sources audible at the start, so playback doesn't open on a gap
+                await Task.Run(engine.Start, token);
             }
             catch (Exception ex)
             {
                 startGate.Fault(ex);
                 throw;
             }
- 
+
             _pumpTask = Task.Run(
-                () => PumpAsync(startPosition, startGate, pauseGate, referenceClock, followsReferenceClock, dropsLateChunks, onSample, token),
+                () => PumpAsync(_engine, speed, startGate, pauseGate, referenceClock, followsReferenceClock, dropsLateChunks, onSample, token),
                 token);
         }
- 
-        /// <summary>
-        /// FOUND IN THE FIELD, FIXED: `bytesDelivered` used to be
-        /// incremented BEFORE computing `targetElapsed`/`position` for the
-        /// chunk about to be delivered, so both were computed against the
-        /// byte count AS OF THE END of that chunk rather than its start.
-        /// Since this runs for every chunk starting with the very first
-        /// one, it meant chunk 0 (which should deliver immediately at
-        /// t=0, per this class's own "no lookahead" contract) instead
-        /// waited until the pacing clock reached one whole ChunkBytes'
-        /// worth of elapsed time (~100ms) — and every later chunk was
-        /// delivered exactly one chunk-length later than it should have
-        /// been, a constant ~100ms of audible startup silence plus a
-        /// persistent ~100ms A/V sync offset for the rest of the session.
-        /// Fix: compute the target position from `bytesDelivered` as it
-        /// stood BEFORE this chunk (the chunk's own start), THEN advance
-        /// it by `toDeliver` for the next iteration.
-        /// </summary>
-        private async Task PumpAsync(
-            TimeSpan startPosition,
+
+        private static async Task PumpAsync(
+            AudioEngine engine, double speed,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
             PlaybackReferenceClock referenceClock, bool followsReferenceClock, bool dropsLateChunks,
             Action<AudioSampleEventArgs> onSample, CancellationToken token)
         {
-            //FrameDropping: a chunk already a whole chunk behind the clock is dropped, not played late
-            TimeSpan chunkDuration = TimeSpan.FromSeconds(ChunkBytes / (double)BytesPerSecond);
-
-            long byteOffset = (long)(startPosition.TotalSeconds * BytesPerSecond);
-            byteOffset -= byteOffset % BytesPerFrame;
- 
-            if (byteOffset >= _pcm.Length) return; // timeline shorter than requested start
- 
-            long bytesDelivered = 0;
- 
             try { await startGate.ReadyAndWaitAsync(token); }
             catch (OperationCanceledException) { return; }
- 
+
             Stopwatch? clock = followsReferenceClock ? null : Stopwatch.StartNew();
-            EditSharpConfig.Logger.LogVerbose(followsReferenceClock
-                ? "Audio now following the reference clock."
-                : "Audio pacing clock started.");
- 
-            byte[] chunk = new byte[ChunkBytes];
- 
+            EditSharpConfig.Logger.LogVerbose(followsReferenceClock ? "Audio now following the reference clock." : "Audio pacing clock started.");
+
+            int direction = Math.Sign(speed);
+            double pace = Math.Abs(speed);
+            long framesDelivered = 0;
+            byte[] bytes = [];
+
             while (!token.IsCancellationRequested)
             {
-                if (pauseGate.IsPaused)
-                {
-                    clock?.Stop();
-                    try { await pauseGate.WaitIfPausedAsync(token); }
-                    catch (OperationCanceledException) { break; }
-                    clock?.Start();
-                }
- 
-                long remaining = _pcm.Length - byteOffset;
-                if (remaining <= 0) break; // timeline audio exhausted
- 
-                int toDeliver = (int)Math.Min(chunk.Length, remaining);
-                Array.Copy(_pcm, byteOffset, chunk, 0, toDeliver);
-                byteOffset += toDeliver;
- 
-                // Target/position computed from bytes delivered BEFORE this
-                // chunk (its start), not after (its end) — see the method's
-                // own remarks.
-                TimeSpan targetElapsed = TimeSpan.FromSeconds(bytesDelivered / (double)BytesPerSecond);
-                TimeSpan position = startPosition + targetElapsed;
-                bytesDelivered += toDeliver;
+                if (!await WaitWhilePausedAsync(pauseGate, clock, token)) return;
 
-                if (followsReferenceClock && dropsLateChunks && referenceClock.Position - position > chunkDuration)
+                AudioBlock? block;
+                try { block = await engine.TakeAsync(token); }
+                catch (OperationCanceledException) { return; }
+                if (block is null) break;
+
+                //due when everything before it has played: real time, whatever the speed
+                TimeSpan target = TimeSpan.FromSeconds(framesDelivered / (double)SampleRate);
+                TimeSpan position = block.Position;
+                TimeSpan length = TimeSpan.FromSeconds(block.Frames / (double)SampleRate * pace);
+                framesDelivered += block.Frames;
+
+                //FrameDropping: already a whole block behind the clock
+                if (followsReferenceClock && dropsLateChunks && (referenceClock.Position - position) * direction > length)
                     continue;
- 
+
                 while (true)
                 {
                     if (token.IsCancellationRequested) return;
- 
-                    if (pauseGate.IsPaused)
-                    {
-                        clock?.Stop();
-                        try { await pauseGate.WaitIfPausedAsync(token); }
-                        catch (OperationCanceledException) { return; }
-                        clock?.Start();
-                        continue;
-                    }
- 
+                    if (!await WaitWhilePausedAsync(pauseGate, clock, token)) return;
+
+                    TimeSpan wait;
                     if (followsReferenceClock)
                     {
-                        TimeSpan gap = position - referenceClock.Position;
- 
-                        if (gap > TimeSpan.Zero)
-                        {
-                            TimeSpan wait = gap > PlaybackReferenceClock.PollInterval
-                                ? gap : PlaybackReferenceClock.PollInterval;
- 
-                            try { await Task.Delay(wait, token); }
-                            catch (OperationCanceledException) { return; }
-                            continue;
-                        }
+                        //timeline time until the clock reaches this block, in wall time
+                        TimeSpan gap = (position - referenceClock.Position) * direction;
+                        wait = gap > TimeSpan.Zero ? Max(gap / pace, PlaybackReferenceClock.PollInterval) : TimeSpan.Zero;
                     }
                     else
                     {
-                        TimeSpan actualElapsed = clock!.Elapsed;
- 
-                        if (targetElapsed > actualElapsed)
-                        {
-                            try { await Task.Delay(targetElapsed - actualElapsed, token); }
-                            catch (OperationCanceledException) { return; }
-                            continue;
-                        }
+                        wait = target - clock!.Elapsed;
                     }
- 
-                    break;
+
+                    if (wait <= TimeSpan.Zero) break;
+
+                    try { await Task.Delay(wait, token); }
+                    catch (OperationCanceledException) { return; }
                 }
- 
-                if (!followsReferenceClock) referenceClock.Report(startPosition + clock!.Elapsed);
- 
-                onSample(new AudioSampleEventArgs(chunk, toDeliver, SampleRate, ChannelCount, position));
+
+                if (!followsReferenceClock) referenceClock.Report(position);
+
+                int length16 = block.Samples.Length * 2;
+                if (bytes.Length < length16) bytes = new byte[length16];
+                ToInt16(block.Samples, bytes);
+
+                onSample(new AudioSampleEventArgs(bytes, length16, SampleRate, ChannelCount, position));
             }
         }
- 
+
+        private static async Task<bool> WaitWhilePausedAsync(PlaybackPauseGate pauseGate, Stopwatch? clock, CancellationToken token)
+        {
+            if (!pauseGate.IsPaused) return true;
+
+            clock?.Stop();
+            try { await pauseGate.WaitIfPausedAsync(token); }
+            catch (OperationCanceledException) { return false; }
+            clock?.Start();
+            return true;
+        }
+
+        private static void ToInt16(float[] samples, byte[] bytes)
+        {
+            for (int i = 0; i < samples.Length; i++)
+            {
+                short value = (short)Math.Round(Math.Clamp(samples[i], -1f, 1f) * short.MaxValue);
+                bytes[i * 2] = (byte)value;
+                bytes[i * 2 + 1] = (byte)(value >> 8);
+            }
+        }
+
+        private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+
         public void Dispose()
         {
-            //nothing to tear down any more — no process, no temp files: the
-            //master PCM is a plain managed byte array, reclaimed by the GC
-            //like everything else once this engine drops its reference.
+            _engine?.Dispose();
+            _engine = null;
         }
     }
 }
- 

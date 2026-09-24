@@ -18,6 +18,8 @@ namespace EditSharp.Audio.Engine
         private readonly double _speed;
         private readonly PitchPreservation _pitch;
         private readonly ContentWarp _warp;
+        private readonly TimelineAudioRenderer _renderer;
+        private readonly long _start;
 
         //in the warp's own coordinates: timeline frames forward, negated timeline frames in reverse
         private double _cursor;
@@ -30,15 +32,21 @@ namespace EditSharp.Audio.Engine
             _speed = speed;
             _pitch = pitch;
 
+            _renderer = new TimelineAudioRenderer(timeline, session);
+            _start = start;
+
             IContentAudio mix = speed > 0
-                ? new TimelineContentAudio(new TimelineAudioRenderer(timeline, session), session)
-                : new ReversedTimelineAudio(timeline, session);
+                ? new TimelineContentAudio(_renderer, session)
+                : new ReversedTimelineAudio(_renderer, session);
 
             _warp = new ContentWarp(mix, session.Format);
             _cursor = speed > 0 ? start : -start;
         }
 
         public double Position => _speed > 0 ? _cursor : -_cursor;
+
+        /// <summary>Prepares the sources audible where the stream starts, waiting for them.</summary>
+        public void PrepareStart() => _renderer.PrepareAt(_speed > 0 ? _start : _start - 1);
 
         /// <summary>Fills `output` (whole frames) with the next stretch of master audio.</summary>
         public void Read(Span<float> output)
@@ -110,9 +118,9 @@ namespace EditSharp.Audio.Engine
         private long _windowStart, _windowEnd;
         private Task<(float[] Samples, long Start, long End)>? _next;
 
-        public ReversedTimelineAudio(Timeline timeline, AudioSession session)
+        public ReversedTimelineAudio(TimelineAudioRenderer renderer, AudioSession session)
         {
-            _renderer = new TimelineAudioRenderer(timeline, session);
+            _renderer = renderer;
             _session = session;
             _windowFrames = (int)session.FrameOf(WindowLength);
             _warmUpFrames = (int)session.FrameOf(WarmUp);

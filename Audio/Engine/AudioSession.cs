@@ -29,13 +29,13 @@ namespace EditSharp.Audio.Engine
     /// for previews (it plays as silence until ready). Report collects
     /// source failures in exports.
     /// </summary>
-    internal sealed class AudioSession(AudioFormat format, bool waitForSources, RenderReportBuilder? report = null)
+    internal sealed class AudioSession(AudioFormat format, bool waitForSources, RenderReportBuilder? report = null, AudioTaps? taps = null)
     {
         public AudioFormat Format { get; } = format;
         public int BlockFrames { get; } = EditSharpConfig.AudioBlockFrames;
         public bool WaitForSources { get; } = waitForSources;
         public RenderReportBuilder? Report { get; } = report;
-        public AudioTaps Taps { get; } = new();
+        public AudioTaps Taps { get; } = taps ?? new();
 
         public long FrameOf(TimeSpan time) => (long)Math.Round(time.TotalSeconds * Format.SampleRate);
 
