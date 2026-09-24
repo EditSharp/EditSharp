@@ -39,12 +39,13 @@ namespace EditSharp.Components.Clips
  
         public static VideoClip CreateText(
             string content, TimeSpan start, TimeSpan duration,
-            string font = "Comic Sans MS", SKFontStyle? fontStyle = null,
+            string font = "Comic Sans MS", int weight = 400, bool italic = false,
             SKTextAlign align = SKTextAlign.Center, float size = 0.05f) => CreateFromSource(new TextVideoSource
             {
                 Content = content,
                 Font = font,
-                FontStyle = fontStyle ?? SKFontStyle.Normal,
+                Weight = weight,
+                Italic = italic,
                 Align = align,
                 Size = size,
             }, start, duration);

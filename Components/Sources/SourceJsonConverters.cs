@@ -112,29 +112,6 @@ namespace EditSharp.Components.Sources
             writer.WriteStringValue(value.ToString());
     }
 
-    /// <summary>SKFontStyle as its weight, width and slant.</summary>
-    internal sealed class SKFontStyleJsonConverter : JsonConverter<SKFontStyle>
-    {
-        public override SKFontStyle Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-        {
-            using JsonDocument document = JsonDocument.ParseValue(ref reader);
-            JsonElement root = document.RootElement;
-            return new SKFontStyle(
-                root.GetProperty("weight").GetInt32(),
-                root.GetProperty("width").GetInt32(),
-                Enum.Parse<SKFontStyleSlant>(root.GetProperty("slant").GetString()!));
-        }
-
-        public override void Write(Utf8JsonWriter writer, SKFontStyle value, JsonSerializerOptions options)
-        {
-            writer.WriteStartObject();
-            writer.WriteNumber("weight", value.Weight);
-            writer.WriteNumber("width", value.Width);
-            writer.WriteString("slant", value.Slant.ToString());
-            writer.WriteEndObject();
-        }
-    }
-
     /// <summary>
     /// A Timeline saved as its Id only. Loading hands the id to the resolver
     /// passed to SourceSerializer.Deserialize; a timeline it can't find fails

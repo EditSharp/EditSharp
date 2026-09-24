@@ -24,13 +24,17 @@ namespace EditSharp.Compositing.Generators
         /// Null when there's nothing to draw.
         /// </summary>
         public static (SKPicture Picture, int Width, int Height)? Record(
-            string content, string family, SKFontStyle fontStyle, SKTextAlign align, float size, bool wrap, float wrapWidth,
+            string content, string family, int weight, bool italic, SKTextAlign align, float size, bool wrap, float wrapWidth,
             int canvasWidth, int canvasHeight)
         {
             if (string.IsNullOrWhiteSpace(content) || size <= 0) return null;
 
-            using SKTypeface typeface = FontFamilies.Resolve(family, fontStyle);
+            var style = new SKFontStyle(weight, (int)SKFontStyleWidth.Normal, italic ? SKFontStyleSlant.Italic : SKFontStyleSlant.Upright);
+            using SKTypeface typeface = FontFamilies.Resolve(family, style);
             using var font = new SKFont(typeface, size * canvasWidth);
+
+            //no italic face: slant the upright
+            if (italic && !typeface.IsItalic) font.SkewX = -0.25f;
 
             float boxWidth = wrap ? Math.Max(1f, wrapWidth * canvasWidth) : float.PositiveInfinity;
             List<string> lines = Lines(content, font, boxWidth);

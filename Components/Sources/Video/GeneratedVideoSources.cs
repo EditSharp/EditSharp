@@ -79,12 +79,29 @@ public class TextVideoSource : VideoSource, IChoiceProvider
     public string Content { get => _content; set => Transaction.Set(this, ref _content, value, static (o, v) => o._content = v); }
 
     //an installed family's name; one that isn't installed draws with the default font
+    //changing it moves Weight to the nearest weight the new font has
     string _font = "Arial";
     [Editable("Font")]
-    public string Font { get => _font; set => Transaction.Set(this, ref _font, value, static (o, v) => o._font = v); }
+    public string Font
+    {
+        get => _font;
+        set
+        {
+            Transaction.Set(this, ref _font, value, static (o, v) => o._font = v);
+            int nearest = FontFamilies.Nearest(FontFamilies.WeightsOf(value), Weight);
+            if (nearest != Weight) Weight = nearest;
+        }
+    }
 
-    SKFontStyle _fontStyle = SKFontStyle.Normal;
-    public SKFontStyle FontStyle { get => _fontStyle; set => Transaction.Set(this, ref _fontStyle, value, static (o, v) => o._fontStyle = v); }
+    //100 (thin) to 900 (black); the dropdown offers the weights the font has
+    int _weight = 400;
+    [Editable("Weight")]
+    public int Weight { get => _weight; set => Transaction.Set(this, ref _weight, value, static (o, v) => o._weight = v); }
+
+    //the font's italic, or the upright slanted when it has none
+    bool _italic;
+    [Editable("Italic")]
+    public bool Italic { get => _italic; set => Transaction.Set(this, ref _italic, value, static (o, v) => o._italic = v); }
 
     //the font's em size, a fraction of the frame width
     float _size = 0.05f;
@@ -107,6 +124,15 @@ public class TextVideoSource : VideoSource, IChoiceProvider
 
     public IReadOnlyList<Choice>? ChoicesFor(string property)
     {
+        if (property == nameof(Weight))
+        {
+            //a missing font offers the standard weights
+            IReadOnlyList<int> weights = FontFamilies.WeightsOf(Font) is { Count: > 0 } has ? has : [100, 200, 300, 400, 500, 600, 700, 800, 900];
+            List<Choice> named = [.. weights.Select(w => new Choice(w, FontFamilies.WeightName(w)))];
+            if (!weights.Contains(Weight)) named.Insert(0, new Choice(Weight, $"{FontFamilies.WeightName(Weight)} ({Weight})"));
+            return named;
+        }
+
         if (property != nameof(Font)) return null;
 
         List<Choice> choices = [.. FontFamilies.Installed.Select(f => new Choice(f, f))];
@@ -128,9 +154,8 @@ public class TextVideoSource : VideoSource, IChoiceProvider
         base.AddFingerprint(ref hash);
         hash.Add(Content);
         hash.Add(Font);
-        hash.Add(FontStyle.Weight);
-        hash.Add(FontStyle.Width);
-        hash.Add(FontStyle.Slant);
+        hash.Add(Weight);
+        hash.Add(Italic);
         hash.Add(Align);
         hash.Add(Size);
         hash.Add(Wrap);
@@ -156,7 +181,7 @@ public class TextVideoSource : VideoSource, IChoiceProvider
                 source.MapTime(contentTime, null);
                 SKSizeI canvas = GeneratedFrames.Canvas(options);
 
-                object key = (source.Content, source.Font, source.FontStyle.Weight, source.FontStyle.Width, source.FontStyle.Slant,
+                object key = (source.Content, source.Font, source.Weight, source.Italic,
                     source.Align, source.Size, source.Wrap, source.WrapWidth, canvas);
 
                 if (_image is null || !key.Equals(_key))
@@ -165,7 +190,7 @@ public class TextVideoSource : VideoSource, IChoiceProvider
                     _key = key;
 
                     var recorded = TextRasterizer.Record(
-                        source.Content, source.Font, source.FontStyle, source.Align, source.Size, source.Wrap, source.WrapWidth, canvas.Width, canvas.Height);
+                        source.Content, source.Font, source.Weight, source.Italic, source.Align, source.Size, source.Wrap, source.WrapWidth, canvas.Width, canvas.Height);
 
                     //nothing to write draws nothing
                     _image = recorded is { } r
