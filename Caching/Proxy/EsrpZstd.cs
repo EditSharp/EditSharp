@@ -68,39 +68,25 @@ namespace EditSharp.Caching.Proxy
     /// </summary>
     internal static class EsrpZstd
     {
-        /// <summary>
-        /// The one-time build-time compression level Encode uses. 19 is a
-        /// deliberately aggressive choice (zstd's own "high compression"
-        /// range starts around here; ZstdSharp.Port's own maximum, exposed
-        /// as Compressor's ZSTD_maxCLevel()-derived ceiling, typically goes
-        /// up to 22) — justified specifically by this scheme's own reason
-        /// for existing (see class remarks): decode speed doesn't pay for
-        /// a higher encode level, and encoding only ever happens once, at
-        /// build time, off the per-tick scrub path entirely (see
-        /// ProxyCache.BuildAsync). NOT the library's absolute max
-        /// (22) — the last few levels buy diminishing compression for a
-        /// real, sometimes large, additional one-time build-time cost, and
-        /// 19 was picked as a reasonable starting trade-off rather than a
-        /// value tuned against real proxy content.
-        ///
-        /// FLAGGED AS AN UNTUNED STARTING POINT, same as IndexedDelta7Codec's
-        /// own RStep/GStep/BStep constants — worth real-hardware
-        /// measurement (build time vs. resulting file size, across a range
-        /// of levels) before treating 19 as anything more than a
-        /// reasonable first guess.
-        /// </summary>
-        public const int CompressionLevel = 19;
+        //a compressor holds sizeable state at high levels; reuse one per thread, per level
+        [ThreadStatic] private static Compressor? _compressor;
+        [ThreadStatic] private static int _compressorLevel;
 
         /// <summary>
         /// Encodes `raw` into a fresh, exactly-sized buffer using zstd at
-        /// CompressionLevel. The caller decides what to do with the result.
+        /// EditSharpConfig.EsrpCompressionLevel. The caller decides what to do with the result.
         /// </summary>
-        //a compressor holds sizeable state at high levels; reuse one per thread
-        [ThreadStatic] private static Compressor? _compressor;
-
         public static byte[] Encode(ReadOnlySpan<byte> raw)
         {
-            _compressor ??= new Compressor(CompressionLevel);
+            int level = EditSharpConfig.EsrpCompressionLevel;
+
+            if (_compressor is null || _compressorLevel != level)
+            {
+                _compressor?.Dispose();
+                _compressor = new Compressor(level);
+                _compressorLevel = level;
+            }
+
             return _compressor.Wrap(raw).ToArray();
         }
 
