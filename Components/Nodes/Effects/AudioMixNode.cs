@@ -1,3 +1,5 @@
+using EditSharp.Audio.Processors;
+using EditSharp.Audio.Engine;
 using System.Collections.Generic;
 using EditSharp.Components;
 using EditSharp.Components.Nodes;
@@ -40,6 +42,7 @@ namespace EditSharp.Components.Nodes.Effects
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
  
         public override IEnumerable<IAnimatable> Animatables => [MixA, MixB];
+        internal override IAudioProcessor CreateAudioProcessor(AudioSession session) => new AudioMixProcessor(this);
 
         public override Node Duplicate() => Transaction.Suppressed(() => new AudioMixNode
         {

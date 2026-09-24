@@ -1,3 +1,5 @@
+using EditSharp.Audio.Processors;
+using EditSharp.Audio.Engine;
 using System.Collections.Generic;
 using EditSharp.Components;
 using EditSharp.Components.Nodes;
@@ -31,6 +33,8 @@ namespace EditSharp.Components.Nodes.Sources
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
  
         public override IEnumerable<IAnimatable> Animatables => [Frequency, Amplitude];
+        internal override IAudioProcessor CreateAudioProcessor(AudioSession session) =>
+            new ContentInputProcessor(() => this, () => new ToneContentAudio(this, session.Format), session);
 
         public override Node Duplicate() => Transaction.Suppressed(() => new ToneGeneratorInputNode
         {

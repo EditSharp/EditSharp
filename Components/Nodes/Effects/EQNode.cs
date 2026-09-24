@@ -1,3 +1,5 @@
+using EditSharp.Audio.Processors;
+using EditSharp.Audio.Engine;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components;
@@ -42,6 +44,7 @@ namespace EditSharp.Components.Nodes.Effects
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
  
         public override IEnumerable<IAnimatable> Animatables => Bands.SelectMany(b => new IAnimatable[] { b.FrequencyHz, b.GainDb, b.Q });
+        internal override IAudioProcessor CreateAudioProcessor(AudioSession session) => new EqProcessor(this);
 
         public override Node Duplicate() => Transaction.Suppressed(() => new EQNode
         {

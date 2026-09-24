@@ -1,3 +1,5 @@
+using EditSharp.Audio.Processors;
+using EditSharp.Audio.Engine;
 using System.Collections.Generic;
 using EditSharp.Components;
 using EditSharp.Components.Nodes;
@@ -34,6 +36,7 @@ namespace EditSharp.Components.Nodes.Effects
  
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
         public override IEnumerable<IAnimatable> Animatables => [Gain];
+        internal override IAudioProcessor CreateAudioProcessor(AudioSession session) => new GainProcessor(this);
 
         public override Node Duplicate() => Transaction.Suppressed(() => new GainNode { Enabled = Enabled, Gain = Gain.Duplicate() });
     }

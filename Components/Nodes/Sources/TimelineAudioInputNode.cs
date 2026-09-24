@@ -1,3 +1,5 @@
+using EditSharp.Audio.Processors;
+using EditSharp.Audio.Engine;
 using System;
 using System.Collections.Generic;
 using EditSharp.Components.Clips;
@@ -20,6 +22,8 @@ namespace EditSharp.Components.Nodes.Sources
  
         private static readonly NodePort[] StaticPorts = [new("Audio", PortType.Audio, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
+        internal override IAudioProcessor CreateAudioProcessor(AudioSession session) =>
+            new ContentInputProcessor(() => Reference, () => new NestedTimelineContentAudio(Reference, session), session);
         public override Node Duplicate() => Transaction.Suppressed(() => new TimelineAudioInputNode { Enabled = Enabled, Reference = Reference.Duplicate() });
  
         public TimeSpan InPoint

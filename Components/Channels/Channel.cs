@@ -29,6 +29,9 @@ namespace EditSharp.Components.Channels
     /// </summary>
     public abstract class Channel
     {
+        /// <summary>Runtime identity (not saved), e.g. for tapping a channel's audio.</summary>
+        public Guid Id { get; } = Guid.NewGuid();
+
         string _name = "Channel";
         [Editable("Name")]
         public string Name { get => _name; set => Transaction.Set(this, ref _name, value, static (o, v) => o._name = v); }

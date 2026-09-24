@@ -1,0 +1,52 @@
+using System;
+using EditSharp.Audio.Engine;
+
+namespace EditSharp.Audio.Processors
+{
+    /// <summary>
+    /// The processor behind every audio input node: reads the node's content
+    /// stream through a ContentWarp at the clip's speed. `identity` is what the
+    /// stream was made from (a node's Source, a nested timeline reference);
+    /// when it changes the stream is rebuilt.
+    /// </summary>
+    internal sealed class ContentInputProcessor(Func<object> identity, Func<IContentAudio> create, AudioSession session) : IAudioProcessor
+    {
+        private object? _identity;
+        private ContentWarp? _warp;
+
+        /// <summary>Starts preparing ahead of time; true once reads can start.</summary>
+        public bool Prepare() => Warp().Content.Ready(false);
+
+        public void Process(in AudioTick tick, AudioPortBuffers ports)
+        {
+            Span<float> output = ports.Outputs[0].AsSpan(0, tick.Samples);
+            ContentWarp warp = Warp();
+
+            //a preview doesn't wait: silence until the material is ready
+            if (!warp.Content.Ready(session.WaitForSources))
+            {
+                output.Clear();
+                return;
+            }
+
+            double rate = tick.Format.SampleRate;
+            warp.Render(tick.ContentStart.TotalSeconds * rate, tick.ContentStep * rate, tick.Frames, output);
+        }
+
+        private ContentWarp Warp()
+        {
+            object current = identity();
+
+            if (_warp is null || !ReferenceEquals(current, _identity))
+            {
+                _warp?.Dispose();
+                _warp = new ContentWarp(create(), session.Format.Channels);
+                _identity = current;
+            }
+
+            return _warp;
+        }
+
+        public void Dispose() => _warp?.Dispose();
+    }
+}

@@ -1,3 +1,4 @@
+using EditSharp.Audio.Engine;
 using System;
 using System.Collections.Generic;
 using EditSharp.History;
@@ -34,6 +35,9 @@ namespace EditSharp.Components.Nodes
         /// following the content when the clip's head moves.
         /// </summary>
         public virtual IEnumerable<IAnimatable> Animatables => [];
+
+        /// <summary>This node's audio DSP for a playback or export session; null for nodes that don't process audio.</summary>
+        internal virtual IAudioProcessor? CreateAudioProcessor(AudioSession session) => null;
     }
 }
  

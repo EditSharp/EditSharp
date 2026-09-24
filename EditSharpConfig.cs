@@ -138,6 +138,35 @@ namespace EditSharp
                 : throw new ArgumentOutOfRangeException(nameof(value), "SourceLookahead can't be negative.");
         }
 
+        private static int _audioBlockFrames = 512;
+
+        /// <summary>
+        /// Frames of audio processed per engine tick. Parameter changes land
+        /// within one block (512 frames is about 10.7 ms at 48 kHz). Read when a
+        /// session starts.
+        /// </summary>
+        public static int AudioBlockFrames
+        {
+            get => _audioBlockFrames;
+            set => _audioBlockFrames = value is >= 32 and <= 16384
+                ? value
+                : throw new ArgumentOutOfRangeException(nameof(value), "AudioBlockFrames must be between 32 and 16384.");
+        }
+
+        private static TimeSpan _audioLatency = TimeSpan.FromMilliseconds(100);
+
+        /// <summary>
+        /// How far ahead of the speakers playback renders audio, which is also
+        /// how long an edit takes to be heard. Read when a session starts.
+        /// </summary>
+        public static TimeSpan AudioLatency
+        {
+            get => _audioLatency;
+            set => _audioLatency = value > TimeSpan.Zero
+                ? value
+                : throw new ArgumentOutOfRangeException(nameof(value), "AudioLatency must be positive.");
+        }
+
         private static int _readerBufferFrames = 8;
 
         /// <summary>
