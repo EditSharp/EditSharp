@@ -5,7 +5,10 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
-using EditSharp.Components;
+using EditSharp.Components.Sources;
+using EditSharp.Components.Sources.Audio;
+using EditSharp.Components.Sources.Video;
+using EditSharp.History;
  
 namespace EditSharp.Video
 {
@@ -30,15 +33,8 @@ namespace EditSharp.Video
         /// not re-encoded, so this is cheap but only works when the container at
         /// outputPath can legally hold both codecs as-is.
         /// </summary>
-        public static async Task<Source> MuxAudioVideoAsync(Source video, Source audio, string outputPath)
+        public static async Task<MediaVideoSource> MuxAudioVideoAsync(MediaVideoSource video, MediaAudioSource audio, string outputPath)
         {
-            if (video.Type != SourceType.Video)
-                throw new ArgumentException($"'{video.Path}' is not a Video source.", nameof(video));
- 
-            if (audio.Type != SourceType.Audio && audio.Type != SourceType.Video)
-                throw new ArgumentException(
-                    $"'{audio.Path}' is neither an Audio nor a Video source.", nameof(audio));
- 
             if (!File.Exists(video.Path))
                 throw new FileNotFoundException($"Video input not found: {video.Path}", video.Path);
  
@@ -47,8 +43,8 @@ namespace EditSharp.Video
  
             var args = new List<string> { "-y", "-v", "error" };
  
-            AddTrimmedInput(args, video);
-            AddTrimmedInput(args, audio);
+            AddTrimmedInput(args, video, video.Path);
+            AddTrimmedInput(args, audio, audio.Path);
  
             args.AddRange(new[]
             {
@@ -85,11 +81,7 @@ namespace EditSharp.Video
                 throw new InvalidOperationException(
                     $"ffmpeg exited with code {process.ExitCode}:\n{stderr}");
  
-            return new Source
-            {
-                Type = SourceType.Video,
-                Path = outputPath,
-            };
+            return Transaction.Suppressed(() => new MediaVideoSource { Path = outputPath });
         }
  
         /// <summary>
@@ -129,11 +121,8 @@ namespace EditSharp.Video
         /// growing pipeline-specific knowledge.
         /// </summary>
         public static async Task<string> ReencodeVideoAsync(
-            Source source, VideoCodec codec, (int Width, int Height)? scaleTo = null)
+            MediaVideoSource source, VideoCodec codec, (int Width, int Height)? scaleTo = null)
         {
-            if (source.Type != SourceType.Video)
-                throw new ArgumentException($"'{source.Path}' is not a Video source.", nameof(source));
- 
             if (!File.Exists(source.Path))
                 throw new FileNotFoundException($"Input not found: {source.Path}", source.Path);
  
@@ -152,7 +141,7 @@ namespace EditSharp.Video
             //because these are GLOBAL options and must precede -i.
             args.AddRange(FfmpegArgs.FilterThreadingArgs());
  
-            AddTrimmedInput(args, source);
+            AddTrimmedInput(args, source, source.Path);
  
             if (scaleTo is { } size)
             {
@@ -423,11 +412,11 @@ namespace EditSharp.Video
         /// only land on a keyframe — accurate-to-the-sample trimming would need
         /// a re-encode, which this function deliberately avoids.
         /// </summary>
-        private static void AddTrimmedInput(List<string> args, Source source)
+        private static void AddTrimmedInput(List<string> args, Source source, string path)
         {
             args.AddRange(TrimArgsFor(source));
             args.Add("-i");
-            args.Add(source.Path);
+            args.Add(path);
         }
  
         /// <summary>

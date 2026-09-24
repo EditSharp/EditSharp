@@ -1,6 +1,8 @@
 using EditSharp;
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -21,7 +23,9 @@ namespace EditSharp.Video
         int Width,
         int Height,
         bool HasAudio,
-        TimeSpan? Duration);
+        TimeSpan? Duration,
+        bool IsStillImage,
+        double? FrameRate);
 
     /// <summary>
     /// Thin wrapper around ffprobe (invoked directly via Process, no FFMpegCore
@@ -64,6 +68,32 @@ namespace EditSharp.Video
         /// </summary>
         public static MediaInfo Probe(string path) => Parse(RunFfprobe(ProbeArgs(path)));
 
+        private static readonly ConcurrentDictionary<(string Path, long Length, long LastWriteTicks), Lazy<Task<MediaInfo>>> Cache = new();
+
+        /// <summary>
+        /// ProbeAsync, remembered per file for as long as the file is unchanged
+        /// (keyed by full path, size and last-write time, so an edited file is
+        /// re-probed). Concurrent callers share one ffprobe. A missing file
+        /// throws FileNotFoundException rather than probing; a failed probe is
+        /// forgotten so the next call retries.
+        /// </summary>
+        public static Task<MediaInfo> ProbeCachedAsync(string path)
+        {
+            var file = new FileInfo(path);
+
+            if (!file.Exists)
+                throw new FileNotFoundException($"Media not found: '{path}'", path);
+
+            var key = (file.FullName, file.Length, file.LastWriteTimeUtc.Ticks);
+            Lazy<Task<MediaInfo>> probe = Cache.GetOrAdd(key, _ => new Lazy<Task<MediaInfo>>(() => ProbeAsync(path)));
+
+            return probe.Value.ContinueWith(task =>
+            {
+                if (!task.IsCompletedSuccessfully) Cache.TryRemove(key, out _);
+                return task;
+            }, TaskScheduler.Default).Unwrap();
+        }
+
         private static MediaInfo Parse(string json)
         {
             using var document = JsonDocument.Parse(json);
@@ -73,6 +103,7 @@ namespace EditSharp.Video
             bool hasAudio = false;
             int width = 0;
             int height = 0;
+            double? frameRate = null;
 
             if (root.TryGetProperty("streams", out JsonElement streams))
             {
@@ -88,6 +119,8 @@ namespace EditSharp.Video
                             hasVideo = true;
                             if (stream.TryGetProperty("width", out JsonElement w)) width = w.GetInt32();
                             if (stream.TryGetProperty("height", out JsonElement h)) height = h.GetInt32();
+                            //average first: right for variable-rate phone footage
+                            frameRate = ParseRate(stream, "avg_frame_rate") ?? ParseRate(stream, "r_frame_rate");
                             break;
 
                         case "audio":
@@ -98,6 +131,17 @@ namespace EditSharp.Video
             }
 
             TimeSpan? duration = null;
+            bool isStillImage = false;
+
+            //still images come through the image demuxers: image2 for files
+            //by extension, <codec>_pipe when ffprobe sniffed the content
+            if (root.TryGetProperty("format", out JsonElement imageFormat) &&
+                imageFormat.TryGetProperty("format_name", out JsonElement formatName) &&
+                formatName.GetString() is { } name)
+            {
+                isStillImage = name == "image2" || name.EndsWith("_pipe", StringComparison.Ordinal);
+            }
+
             if (root.TryGetProperty("format", out JsonElement format) &&
                 format.TryGetProperty("duration", out JsonElement durationProperty) &&
                 durationProperty.GetString() is { } durationText &&
@@ -107,7 +151,22 @@ namespace EditSharp.Video
                 duration = TimeSpan.FromSeconds(seconds);
             }
 
-            return new MediaInfo(hasVideo, width, height, hasAudio, duration);
+            return new MediaInfo(hasVideo, width, height, hasAudio, isStillImage ? null : duration, isStillImage, frameRate);
+        }
+
+        //ffprobe rates are fractions ("30000/1001"); "0/0" means unknown
+        private static double? ParseRate(JsonElement stream, string property)
+        {
+            if (!stream.TryGetProperty(property, out JsonElement value) || value.GetString() is not { } text) return null;
+
+            string[] parts = text.Split('/');
+            if (parts.Length != 2 ||
+                !double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out double numerator) ||
+                !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double denominator) ||
+                numerator <= 0 || denominator <= 0)
+                return null;
+
+            return numerator / denominator;
         }
 
         /// <summary>

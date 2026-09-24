@@ -1,10 +1,10 @@
 using System;
 
-namespace EditSharp.Caching.ScrubProxy
+namespace EditSharp.Caching.Proxy
 {
     /// <summary>
     /// A simple, fast, lossless PackBits-style byte-level run-length codec —
-    /// the ScrubProxyCompressionScheme.Rle scheme (see ScrubProxyFormat).
+    /// the EsrpCompressionScheme.Rle scheme (see EsrpFormat).
     /// DECIDED IN CONVERSATION after real-world testing (in a separate
     /// application) showed this exact style of RLE costs negligible CPU
     /// even on a hot per-tick decode path, in exchange for a real, often
@@ -21,7 +21,7 @@ namespace EditSharp.Caching.ScrubProxy
     /// FORMAT (classic PackBits, applied to an arbitrary interleaved byte
     /// stream — no per-channel/per-pixel structure assumed, this is pure
     /// byte-level compression, used both for raw RGBA8888 frame bytes and,
-    /// as of ScrubProxyPixelFormat.Indexed8, for a frame's separate index-
+    /// as of EsrpPixelFormat.Indexed8, for a frame's separate index-
     /// byte plane): a sequence of packets, each starting with one signed
     /// control byte `n`:
     ///   n in [0, 127]    -&gt; the next (n + 1) bytes are LITERAL, copy as-is.
@@ -73,12 +73,12 @@ namespace EditSharp.Caching.ScrubProxy
     /// MinRepeatRun is 3 — see that constant's remarks): fully
     /// incompressible input costs exactly one control byte per 128 literal
     /// bytes (~0.8% overhead) — nowhere near enough to justify a per-frame
-    /// raw-fallback escape hatch (see ScrubProxyFormat's own remarks on why
+    /// raw-fallback escape hatch (see EsrpFormat's own remarks on why
     /// CompressionScheme is a file-wide choice, not per-frame). This bound
     /// is now enforced structurally by #2 above regardless, not just
     /// trusted by proof.
     /// </summary>
-    internal static class ScrubProxyRle
+    internal static class EsrpRle
     {
         private const int MaxLiteralRun = 128;
         private const int MaxRepeatRun = 128;
@@ -102,10 +102,10 @@ namespace EditSharp.Caching.ScrubProxy
 
         /// <summary>
         /// Encodes `raw` into a fresh, exactly-sized (trimmed) buffer. The
-        /// caller decides what to do with the result — ScrubProxyCache.
+        /// caller decides what to do with the result — ProxyCache.
         /// EncodeFramePixels writes it straight to the frame's own slot in
         /// the .esrp file, recording the actual returned length in the
-        /// frame index (see ScrubProxyFormat's LAYOUT remarks).
+        /// frame index (see EsrpFormat's LAYOUT remarks).
         /// </summary>
         public static byte[] Encode(ReadOnlySpan<byte> raw)
         {
@@ -211,10 +211,10 @@ namespace EditSharp.Caching.ScrubProxy
 
         /// <summary>
         /// Decodes `compressed` into `destination`, which must be exactly
-        /// the known decompressed size — ScrubProxyReader always knows
+        /// the known decompressed size — EsrpReader always knows
         /// this ahead of time (either Width * Height * 4 for an Rgba8888
         /// frame, or Width * Height for an Indexed8 frame's index plane —
-        /// see ScrubProxyPixelFormat), so there's no need to grow a buffer
+        /// see EsrpPixelFormat), so there's no need to grow a buffer
         /// here. Throws if `compressed` decodes to more or fewer bytes than
         /// `destination`'s length, or would read/write past either buffer
         /// mid-packet — either means a corrupt/truncated file or a
@@ -240,7 +240,7 @@ namespace EditSharp.Caching.ScrubProxy
                     int literalLength = control + 1;
                     if (outPos + literalLength > destination.Length || inPos + literalLength > compressed.Length)
                         throw new InvalidOperationException(
-                            "ScrubProxyRle.Decode: literal packet overruns the destination/source buffer — " +
+                            "EsrpRle.Decode: literal packet overruns the destination/source buffer — " +
                             "the compressed frame data is corrupt or truncated.");
 
                     compressed.Slice(inPos, literalLength).CopyTo(destination.Slice(outPos));
@@ -252,7 +252,7 @@ namespace EditSharp.Caching.ScrubProxy
                     int repeatLength = 1 - control;
                     if (outPos + repeatLength > destination.Length || inPos >= compressed.Length)
                         throw new InvalidOperationException(
-                            "ScrubProxyRle.Decode: repeat packet overruns the destination/source buffer — " +
+                            "EsrpRle.Decode: repeat packet overruns the destination/source buffer — " +
                             "the compressed frame data is corrupt or truncated.");
 
                     byte value = compressed[inPos++];
@@ -263,7 +263,7 @@ namespace EditSharp.Caching.ScrubProxy
 
             if (outPos != destination.Length)
                 throw new InvalidOperationException(
-                    $"ScrubProxyRle.Decode: decoded {outPos} bytes, expected exactly {destination.Length} — " +
+                    $"EsrpRle.Decode: decoded {outPos} bytes, expected exactly {destination.Length} — " +
                     "the compressed frame data is corrupt, truncated, or was encoded for a different frame size.");
         }
     }

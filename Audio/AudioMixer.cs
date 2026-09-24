@@ -8,6 +8,9 @@ using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Sources;
+using EditSharp.Components.Sources.Audio;
+using EditSharp.Rendering;
 
 namespace EditSharp.Audio
 {
@@ -57,7 +60,7 @@ namespace EditSharp.Audio
         /// Timeline calls back into this same method for that nested timeline.
         /// </summary>
         public static async Task<AudioBuffer> ComposeAsync(
-            Timeline timeline, int sampleRate, int channels, CancellationToken token = default)
+            Timeline timeline, int sampleRate, int channels, CancellationToken token = default, RenderReportBuilder? report = null)
         {
             int totalFrames = AudioBuffer.FramesForDuration(timeline.Duration, sampleRate);
             var master = AudioBuffer.Silence(sampleRate, channels, totalFrames);
@@ -73,7 +76,7 @@ namespace EditSharp.Audio
                     //real fallback path.
                     if (clip is not AudioClip audio) continue;
 
-                    AudioBuffer evaluated = await ComposeClipAsync(audio, sampleRate, channels, token);
+                    AudioBuffer evaluated = await ComposeClipAsync(audio, sampleRate, channels, token, report);
 
                     int startFrame = AudioBuffer.FramesForDuration(clip.Start, sampleRate);
                     channelBuffer.MixFrom(evaluated, startFrame);
@@ -92,7 +95,7 @@ namespace EditSharp.Audio
         /// the clip's whole graph for real via AudioGraphEvaluator.
         /// </summary>
         private static async Task<AudioBuffer> ComposeClipAsync(
-            AudioClip clip, int sampleRate, int channels, CancellationToken token)
+            AudioClip clip, int sampleRate, int channels, CancellationToken token, RenderReportBuilder? report)
         {
             var resolvedInputs = new Dictionary<Guid, AudioBuffer>();
 
@@ -108,7 +111,7 @@ namespace EditSharp.Audio
                 AudioBuffer atContentRate = node switch
                 {
                     AudioSourceNode media =>
-                        await PcmAudioDecoder.DecodeAsync(media.Source, content, sampleRate, channels, token),
+                        await ReadSourceAsync(clip, media, content, sampleRate, channels, report, token),
 
                     ToneGeneratorInputNode tone =>
                         SynthesizeTone(tone, content, sampleRate, channels),
@@ -175,6 +178,46 @@ namespace EditSharp.Audio
         /// recursively mixes its embedded Timeline and windows the result per
         /// its TimelineReference, then fits to the owning clip's Duration.
         /// </summary>
+        /// <summary>
+        /// `content` worth of a source's audio, drained from one streaming
+        /// reader. Stand-in until the mixer itself streams: whatever the source
+        /// can't provide (its end, or a failure) is silence, and a failure is
+        /// logged and recorded in `report` when there is one.
+        /// </summary>
+        private static Task<AudioBuffer> ReadSourceAsync(
+            AudioClip clip, AudioSourceNode node, TimeSpan content, int sampleRate, int channels,
+            RenderReportBuilder? report, CancellationToken token) => Task.Run(async () =>
+        {
+            int frames = AudioBuffer.FramesForDuration(content, sampleRate);
+            var samples = new float[frames * channels];
+
+            try
+            {
+                using IPreparedAudioSource prepared = await node.Source.PrepareAsync(token);
+                using IAudioSampleReader reader = prepared.OpenReader(new AudioReaderOptions(sampleRate, channels, TimeSpan.Zero));
+
+                int filled = 0;
+                while (filled < frames)
+                {
+                    token.ThrowIfCancellationRequested();
+
+                    int read = reader.Read(samples.AsSpan(filled * channels, Math.Min(frames - filled, sampleRate) * channels));
+                    if (read == 0) break;
+                    filled += read;
+                }
+            }
+            catch (SourceUnavailableException ex) when (ex.Reason != SourceUnavailableReason.EndOfSource)
+            {
+                EditSharpConfig.Logger.LogWarning($"Audio source for a clip at {clip.Start} failed, using silence: {ex.Message}");
+                report?.Record(node.Id, node.Source.GetType().Name, ex.Reason, ex.Message, clip.Start);
+            }
+            catch (SourceUnavailableException)
+            {
+            }
+
+            return new AudioBuffer(sampleRate, channels, samples);
+        }, token);
+
         private static async Task<AudioBuffer> ResolveNestedTimelineAudioAsync(
             TimelineReference reference, TimeSpan clipDuration, int sampleRate, int channels, CancellationToken token)
         {

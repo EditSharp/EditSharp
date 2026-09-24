@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components;
+using EditSharp.Components.Sources;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
 
@@ -110,9 +111,7 @@ namespace EditSharp.Editing
 
                 //the in-point is the anchor, not content; the rest is
                 case Source source:
-                    hash.Add(source.Path);
-                    hash.Add(source.Type);
-                    hash.Add(source.Duration);
+                    source.AddFingerprint(ref hash);
                     break;
 
                 case string s:

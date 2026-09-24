@@ -280,7 +280,7 @@ namespace EditSharp.Video
             Path.GetFullPath(path).ToLowerInvariant();
 
         private static string SidecarPath =>
-            Path.Combine(EditSharpConfig.OptimizedMediaDirectory, "hash-index-v2.json");
+            Path.Combine(EditSharpConfig.ProxyDirectory, "hash-index-v2.json");
 
         private static async Task EnsureSidecarLoadedAsync(CancellationToken ct)
         {
@@ -345,7 +345,7 @@ namespace EditSharp.Video
                     Hash = hash,
                 };
 
-                Directory.CreateDirectory(EditSharpConfig.OptimizedMediaDirectory);
+                Directory.CreateDirectory(EditSharpConfig.ProxyDirectory);
                 string tempPath = Path.Combine(
                     Path.GetDirectoryName(SidecarPath) ?? "",
                     $"{Path.GetFileName(SidecarPath)}.tmp-{Guid.NewGuid():N}");

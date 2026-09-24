@@ -3,7 +3,8 @@ using SkiaSharp;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Sources;
 using EditSharp.History;
-using EditSharp.Components; // Source, FontFace
+using EditSharp.Components; // FontFace
+using EditSharp.Components.Sources.Video;
  
 namespace EditSharp.Components.Clips
 {
@@ -35,7 +36,7 @@ namespace EditSharp.Components.Clips
         // constructing a distinct Clip subtype.
         // ---------------------------------------------------------------
  
-        public static VideoClip CreateFromSource(Source source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new VideoSourceNode { Source = source })) { Start = start, Duration = duration });
+        public static VideoClip CreateFromSource(VideoSource source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new VideoSourceNode { Source = source })) { Start = start, Duration = duration });
  
         public static VideoClip CreateText(
             string content, TimeSpan start, TimeSpan duration,

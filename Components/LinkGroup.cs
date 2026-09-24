@@ -261,28 +261,7 @@ namespace EditSharp.Components
         // Source instance between them would risk.
         // ---------------------------------------------------------------
 
-        /// <summary>
-        /// The everyday "drag a video file with audio onto the timeline"
-        /// case: split-and-link in one call. Returns unattached clips —
-        /// placement onto actual channels is left to the caller.
-        /// </summary>
-        public static (VideoClip Video, AudioClip Audio) CreateAudioVideoPair(
-            Source source, TimeSpan start, TimeSpan duration)
-        {
-            using var _ = Transaction.Suppress();
-            
-            Guid groupId = Guid.NewGuid();
-
-            VideoClip video = VideoClip.CreateFromSource(source.Duplicate(), start, duration);
-            video.LinkGroupId = groupId;
-
-            AudioClip audio = AudioClip.CreateFromSource(source.Duplicate(), start, duration);
-            audio.LinkGroupId = groupId;
-
-            return (video, audio);
-        }
-
-        /// <summary>Mirrors CreateAudioVideoPair for nested timelines — see the schema doc.</summary>
+        /// <summary>A linked video + audio pair of clips, both embedding `reference`. Returns them unattached; placing them is up to the caller.</summary>
         public static (VideoClip Video, AudioClip Audio) CreateTimelineAudioVideoPair(
             TimelineReference reference, TimeSpan start, TimeSpan duration)
         {

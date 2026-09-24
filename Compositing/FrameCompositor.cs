@@ -76,7 +76,7 @@ namespace EditSharp.Compositing
 
                 foreach (FrameChannel channel in frame.Channels)
                 {
-                    SKImage? drawn = ComposeChannel(channel, contentSource, canvasWidth, canvasHeight, fps, pool);
+                    SKImage? drawn = ComposeChannel(channel, frame.FrameIndex, contentSource, canvasWidth, canvasHeight, fps, pool);
                     if (drawn == null) continue;
 
                     using (drawn)
@@ -118,7 +118,7 @@ namespace EditSharp.Compositing
         /// onto the accumulator.
         /// </summary>
         private static SKImage? ComposeChannel(
-            FrameChannel channel, IClipContentSource contentSource,
+            FrameChannel channel, int frameIndex, IClipContentSource contentSource,
             int canvasWidth, int canvasHeight, int fps, SurfacePool pool)
         {
             var rendered = new List<SKImage>(channel.Clips.Count);
@@ -130,7 +130,7 @@ namespace EditSharp.Compositing
                 {
                     clipSurface.Canvas.Clear(SKColors.Transparent);
 
-                    DrawClip(clipSurface.Canvas, clip, contentSource, canvasWidth, canvasHeight, fps, pool);
+                    DrawClip(clipSurface.Canvas, clip, frameIndex, contentSource, canvasWidth, canvasHeight, fps, pool);
 
                     rendered.Add(clipSurface.Snapshot());
                 }
@@ -164,13 +164,13 @@ namespace EditSharp.Compositing
         /// FrameChannel — see FrameStateResolver.
         /// </summary>
         private static void DrawClip(
-            SKCanvas canvas, FrameClip frameClip, IClipContentSource contentSource,
+            SKCanvas canvas, FrameClip frameClip, int frameIndex, IClipContentSource contentSource,
             int canvasWidth, int canvasHeight, int fps, SurfacePool pool)
         {
             if (frameClip.Clip is not VideoClip clip) return; //defensive — see class remarks
 
             IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> resolved =
-                contentSource.GetContent(clip, frameClip.ClipSeconds, canvasWidth, canvasHeight, pool);
+                contentSource.GetContent(clip, frameClip.ClipSeconds, frameIndex, canvasWidth, canvasHeight, pool);
 
             var plain = new Dictionary<Guid, SKImage>(resolved.Count);
             foreach (KeyValuePair<Guid, (SKImage Image, bool Transient)> entry in resolved)

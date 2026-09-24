@@ -1,5 +1,5 @@
 using System;
-using EditSharp.Caching.ScrubProxy;
+using EditSharp.Caching.Proxy;
 using EditSharp.Video;
 
 namespace EditSharp
@@ -39,291 +39,103 @@ namespace EditSharp
             set => _tempDirectory = value ?? throw new ArgumentNullException(nameof(value));
         }
 
-        private static string _optimizedMediaDirectory = Path.Combine(AppContext.BaseDirectory, "OptimizedMedia");
+        private static string _proxyDirectory = Path.Combine(AppContext.BaseDirectory, "Proxy");
 
         /// <summary>
-        /// Root directory OptimizedMediaCache reads and writes its
-        /// persistent, content-addressed optimized media into — the
-        /// DNxHR/ProRes proxies (plus their .meta.json companions and the
-        /// hash-index.json sidecar MediaHasher maintains) that back fast
-        /// seeking during playback and, opportunistically, rendering.
-        ///
-        /// DEFAULT MATCHES TempDirectory'S OWN CONVENTION, DECIDED IN
-        /// CONVERSATION: AppContext.BaseDirectory (next to the host app's
-        /// own executable), not the OS temp path or app-data — this is
-        /// UNLIKE TempDirectory in one important way, though: this
-        /// directory's contents are meant to PERSIST across app runs
-        /// (that's the entire point of a content-addressed cache an NLE
-        /// can reopen a project against later — see OptimizedMediaCache's
-        /// own class remarks), so nothing in this pipeline ever deletes
-        /// from here the way Renderer/Playback sweep their own tempFiles
-        /// bags. A consumer that wants this cache cleared is expected to
-        /// delete the directory itself (or point this at a fresh one).
-        ///
-        /// Created lazily on first write, same as TempDirectory — nothing
-        /// needs to exist here ahead of time.
+        /// Root directory ProxyCache reads and writes proxies in (and where
+        /// MediaHasher keeps its hash index). Persistent across runs: nothing
+        /// in EditSharp ever deletes it, so a consumer can point it somewhere
+        /// durable and reopen projects against the same proxies later.
         /// </summary>
-        public static string OptimizedMediaDirectory
+        public static string ProxyDirectory
         {
-            get => _optimizedMediaDirectory;
-            set => _optimizedMediaDirectory = value ?? throw new ArgumentNullException(nameof(value));
+            get => _proxyDirectory;
+            set => _proxyDirectory = value ?? throw new ArgumentNullException(nameof(value));
         }
 
         /// <summary>
-        /// Which codec OptimizedMediaCache builds persistent optimized media
-        /// with — DNxHR or ProRes, decided in conversation to be
-        /// configurable rather than fixed to one. Defaults to
-        /// VideoCodec.DNxHR: an open format with no licensing friction,
-        /// where ffmpeg's encoder support is equally solid cross-platform —
-        /// see VideoCodec.DNxHR's own remarks for the fuller reasoning.
-        ///
-        /// CHANGING THIS MID-PROJECT DOES NOT INVALIDATE EXISTING CACHE
-        /// ENTRIES built under the previous codec — they simply stop being
-        /// matched by TryLoadExistingAsync (which checks the configured
-        /// codec against each entry's own recorded one) and are
-        /// transparently rebuilt, at the SAME hash-addressed path, the next
-        /// time something asks for that source's optimized media. See
-        /// OptimizedMediaCache.TryLoadExistingAsync's own remarks on why
-        /// DNxHR and ProRes sharing the ".mov" extension is deliberate, not
-        /// a collision to avoid.
+        /// The format ProxyCache.BuildAsync builds when none is named. The
+        /// .esrp formats read with no subprocess at all (true random access);
+        /// DNxHR/ProRes are for compatibility and read through ffmpeg.
         /// </summary>
-        public static VideoCodec OptimizedMediaCodec { get; set; } = VideoCodec.DNxHR;
+        public static ProxyFormat ProxyFormat { get; set; } = ProxyFormat.EsrpDelta7;
 
-        private static int _optimizedMediaMaxDimension = 3840;
+        private static int _proxyMaxDimension = 1280;
 
         /// <summary>
-        /// The cap OptimizedMediaCache builds a source's optimized media
-        /// at, on its longest axis — native resolution if the source is
-        /// already at or under this, otherwise downscaled (aspect
-        /// preserved, never upscaled) to fit it. Defaults to 3840 (a 4K
-        /// cap) — decided in conversation as "one canonical resolution per
-        /// source, capped at a configurable max" rather than multiple
-        /// quality tiers; see OptimizedMediaCache's class remarks for the
-        /// full reasoning, including what happens when a clip actually
-        /// needs MORE resolution than this cap provides (falls back to the
-        /// true original source rather than upscaling from the proxy — see
-        /// ContentPreparation.ProbeVideoAsync).
+        /// The longest side a proxy is built at (never upscaled). Proxies keep
+        /// the source's own frame rate, so one proxy serves scrubbing and
+        /// playback alike.
         /// </summary>
-        public static int OptimizedMediaMaxDimension
+        public static int ProxyMaxDimension
         {
-            get => _optimizedMediaMaxDimension;
-            set => _optimizedMediaMaxDimension = value > 0
+            get => _proxyMaxDimension;
+            set => _proxyMaxDimension = value > 0
                 ? value
-                : throw new ArgumentOutOfRangeException(
-                    nameof(value), "OptimizedMediaMaxDimension must be positive.");
+                : throw new ArgumentOutOfRangeException(nameof(value), "ProxyMaxDimension must be positive.");
         }
 
-        private static string _scrubProxyDirectory = Path.Combine(AppContext.BaseDirectory, "ScrubProxy");
+        /// <summary>How .esrp proxies compress each frame. Applies to newly built proxies only.</summary>
+        public static EsrpCompressionScheme EsrpCompressionScheme { get; set; } = EsrpCompressionScheme.Zstd;
+
+        private static int _maxConcurrentProxyBuilds = 1;
 
         /// <summary>
-        /// Root directory ScrubProxyCache reads and writes its persistent,
-        /// content-addressed raw scrub proxies into — self-contained .esrp
-        /// files (metadata embedded, no separate companion file — see
-        /// ScrubProxyFormat/ScrubProxyMeta/ScrubProxyCache). A DELIBERATELY
-        /// SEPARATE directory from OptimizedMediaDirectory — see
-        /// ScrubProxyCache's own class remarks on why this is a distinct
-        /// cache, not a third quality tier of optimized media.
-        ///
-        /// Same persistence contract as OptimizedMediaDirectory: nothing in
-        /// this pipeline ever deletes from here on its own; a consumer that
-        /// wants it cleared deletes the directory (or points this at a
-        /// fresh one). Created lazily on first write.
+        /// How many proxies may build at once; further BuildAsync calls queue
+        /// (ProxyState.Queued) in order. Read when a build is dequeued, so a
+        /// change applies to builds that haven't started yet.
         /// </summary>
-        public static string ScrubProxyDirectory
+        public static int MaxConcurrentProxyBuilds
         {
-            get => _scrubProxyDirectory;
-            set => _scrubProxyDirectory = value ?? throw new ArgumentNullException(nameof(value));
-        }
-
-        private static int _scrubProxyTargetShortSide = 144;
-
-        /// <summary>
-        /// The target size, on whichever axis is a source's own SHORT side,
-        /// that ScrubProxyCache builds a scrub proxy at (the other axis
-        /// scaled proportionally, aspect preserved, never upscaled past
-        /// native — see ScrubProxyCache.ComputeProxySize). Defaults to 144
-        /// ("144p"-scale) — decided in conversation: small enough that
-        /// decode/scale cost during the one-time build is trivial and the
-        /// resulting .esrp file stays a reasonable size, while still being
-        /// a perfectly legible scrub preview at typical preview-window
-        /// sizes (this is a scrub/rewind indicator, never used for a final
-        /// render — see ScrubFrameSource).
-        ///
-        /// WORTH REVISITING NOW THAT IndexedDelta7/Zstd EXIST (see
-        /// ScrubProxyPixelFormat.IndexedDelta7's own remarks and
-        /// ScrubProxyCompressionScheme.Zstd's own remarks): the whole point
-        /// of their size savings is that they buy back room to raise this
-        /// toward native resolution — the user's stated ideal target is
-        /// 720p30fps at a reasonable size while keeping fully frame-
-        /// independent seeking. IndexedDelta7's V6 shared/global palette
-        /// (see ScrubProxyFormat's own remarks) is one lever toward that
-        /// target. A GPU-accelerated IndexedDelta7 BUILD path was also
-        /// tried as a second lever (ScrubProxyGpuEncoder) but was measured
-        /// to be dramatically slower than the plain CPU encode at typical
-        /// proxy resolutions, and produced incorrect output besides — it
-        /// was reverted entirely (see ScrubProxyCache's own class remarks).
-        /// IndexedDelta7 is understood as this cache's deliberately low-
-        /// resolution/low-power-device option now (trading encode speed
-        /// and build-time CPU cost for on-disk size), not something this
-        /// cache accelerates with hardware — so raising this value trades
-        /// straightforwardly against CPU-only build time, with no GPU
-        /// lever in play. Left at its original default here rather than
-        /// changed as part of any one format/scheme's own introduction —
-        /// nothing about either's own correctness depends on a particular
-        /// target short side, so raising this is a separate, purely-
-        /// quality-vs-size tuning decision for later.
-        /// </summary>
-        public static int ScrubProxyTargetShortSide
-        {
-            get => _scrubProxyTargetShortSide;
-            set => _scrubProxyTargetShortSide = value > 0
+            get => _maxConcurrentProxyBuilds;
+            set => _maxConcurrentProxyBuilds = value >= 1
                 ? value
-                : throw new ArgumentOutOfRangeException(
-                    nameof(value), "ScrubProxyTargetShortSide must be positive.");
+                : throw new ArgumentOutOfRangeException(nameof(value), "MaxConcurrentProxyBuilds must be at least 1.");
         }
 
-        private static double _scrubProxySampleRate = 10.0;
+        private static TimeSpan _sourceRetryInterval = TimeSpan.FromSeconds(2);
 
         /// <summary>
-        /// How many frames per second of SOURCE TIME a scrub proxy stores —
-        /// completely decoupled from the source's own fps or keyframe
-        /// spacing (see ScrubProxyFormat's own remarks). Defaults to 10.0:
-        /// finer scrub granularity than the earlier keyframe-snapped
-        /// approach ever gave (keyframes can be several seconds apart),
-        /// while keeping a proxy's file size and one-time build cost
-        /// reasonable. Raising this trades disk space and build time for
-        /// finer scrub granularity; a fast human drag rarely perceives
-        /// granularity finer than this by much.
-        ///
-        /// Rounded to the nearest integer at build time (see
-        /// ScrubProxyCache.BuildAsync) — the stored header value and the
-        /// decoder's own fps-conform target must be the exact same number,
-        /// or GetFrameAt's seek arithmetic would desync from what was
-        /// actually decoded.
+        /// How long a preview waits before retrying a source that failed with
+        /// MediaOffline or DecodeError (a drive may be reconnected, a file
+        /// re-exported). Renders never retry.
         /// </summary>
-        public static double ScrubProxySampleRate
+        public static TimeSpan SourceRetryInterval
         {
-            get => _scrubProxySampleRate;
-            set => _scrubProxySampleRate = value > 0
+            get => _sourceRetryInterval;
+            set => _sourceRetryInterval = value > TimeSpan.Zero
                 ? value
-                : throw new ArgumentOutOfRangeException(
-                    nameof(value), "ScrubProxySampleRate must be positive.");
+                : throw new ArgumentOutOfRangeException(nameof(value), "SourceRetryInterval must be positive.");
         }
 
-        private static ScrubProxyCompressionScheme _scrubProxyCompressionScheme = ScrubProxyCompressionScheme.Zstd;
+        private static TimeSpan _sourceLookahead = TimeSpan.FromSeconds(2);
 
         /// <summary>
-        /// Which lossless per-frame transform, if any, ScrubProxyCache
-        /// applies to every stored frame in a NEWLY BUILT .esrp scrub proxy
-        /// — see ScrubProxyFormat.ScrubProxyCompressionScheme and
-        /// ScrubProxyZstd for the actual codec.
-        ///
-        /// TWO VALUES AVAILABLE:
-        ///   - None: fully raw proxies (the original v1 shape).
-        ///   - Zstd (DEFAULT): Zstandard compression via ZstdSharp.Port (a
-        ///     fully-managed, pure-C# port — no native/P-Invoke
-        ///     dependency). CONFIRMED ON REAL HARDWARE alongside
-        ///     IndexedDelta7 to produce a real, often substantial
-        ///     reduction in a scrub proxy's on-disk size — chosen because
-        ///     Zstd's decode speed is roughly independent of the
-        ///     compression level used at encode time (see ScrubProxyZstd's
-        ///     own remarks), so an aggressive one-time build-time level
-        ///     costs nothing extra per scrub tick. Alongside IndexedDelta7,
-        ///     this is the settled, best-performing combination this cache
-        ///     builds — the earlier Rle scheme it replaced as the default
-        ///     was removed entirely (decided in conversation: unnecessary
-        ///     complexity once Zstd proved better). NOTED FOR LATER, NOT
-        ///     YET PURSUED: pushing the compression level past its current
-        ///     19 (see ScrubProxyZstd.CompressionLevel) was raised as a
-        ///     further size lever and deliberately deferred in favor of
-        ///     IndexedDelta7's V6 shared/global palette.
-        ///
-        /// ONLY AFFECTS NEW BUILDS. An existing cached .esrp file's own
-        /// CompressionScheme (recorded in its own header at build time) is
-        /// what ScrubProxyReader actually honors when reading it back —
-        /// changing this setting does not retroactively touch anything
-        /// already on disk, and there is no need to rebuild existing
-        /// entries just because this changed; entries built under either
-        /// value coexist fine side by side in the same cache directory.
-        /// APPLIES TO IndexedDelta7 FRAMES' CONTROL-BYTE PLANE TOO (see
-        /// that format's own remarks) — this one knob governs whichever
-        /// ScrubProxyPixelFormat below is also configured.
+        /// How far ahead of the playhead (behind, in reverse) playback and
+        /// export prepare a clip's sources and open their readers, so a clip
+        /// arriving on screen already has frames waiting instead of stalling.
         /// </summary>
-        public static ScrubProxyCompressionScheme ScrubProxyCompressionScheme
+        public static TimeSpan SourceLookahead
         {
-            get => _scrubProxyCompressionScheme;
-            set => _scrubProxyCompressionScheme = value;
+            get => _sourceLookahead;
+            set => _sourceLookahead = value >= TimeSpan.Zero
+                ? value
+                : throw new ArgumentOutOfRangeException(nameof(value), "SourceLookahead can't be negative.");
         }
 
-        private static ScrubProxyPixelFormat _scrubProxyPixelFormat = ScrubProxyPixelFormat.IndexedDelta7;
+        private static int _readerBufferFrames = 8;
 
         /// <summary>
-        /// How ScrubProxyCache stores each frame's pixels in a NEWLY BUILT
-        /// .esrp scrub proxy — see ScrubProxyFormat.ScrubProxyPixelFormat
-        /// and IndexedDelta7Codec (IndexedDelta7's own encode/decode
-        /// machinery) for how it actually works.
-        ///
-        /// TWO VALUES AVAILABLE:
-        ///   - Rgba8888: fully lossless (modulo CompressionScheme) — the
-        ///     original v1/v2 shape, still fully supported, just no longer
-        ///     the default now that IndexedDelta7 exists.
-        ///   - IndexedDelta7 (DEFAULT): a hybrid 128-color palette +
-        ///     per-pixel predictive-delta encoding, direct implementation
-        ///     of a user-proposed design (see IndexedDelta7Codec's own
-        ///     remarks) — CONFIRMED ON REAL HARDWARE to deliver a
-        ///     dramatic size reduction with correct behavior and good
-        ///     visual quality (no dithering, exact per-pixel delta
-        ///     instead). Alongside Zstd compression, this is the settled,
-        ///     best-performing combination this cache builds — the
-        ///     earlier Indexed8 format it replaced as the default was
-        ///     removed entirely (decided in conversation: unnecessary
-        ///     complexity once IndexedDelta7 proved better). NOW
-        ///     UNDERSTOOD AS A LOW-RESOLUTION/LOW-POWER-DEVICE OPTION,
-        ///     ENCODED CPU-ONLY (decided in conversation, after a GPU
-        ///     encode attempt — ScrubProxyGpuEncoder — was measured to be
-        ///     dramatically slower than the CPU path and produced visibly
-        ///     wrong output; that attempt was reverted entirely — see
-        ///     ScrubProxyCache's own class remarks): it trades encode
-        ///     speed and build-time CPU cost against Rgba8888 for a
-        ///     smaller on-disk footprint, which is exactly the right
-        ///     trade for a lower-end device building proxies at a smaller
-        ///     target resolution, not a format this cache tries to
-        ///     accelerate with hardware.
-        ///
-        ///     V6 FORMAT CHANGE, DECIDED IN CONVERSATION: IndexedDelta7 now
-        ///     stores exactly ONE palette for the whole file (built from a
-        ///     bounded sample of frames spread across the source, before
-        ///     the real encode pass — see ScrubProxyCache's own remarks on
-        ///     BuildGlobalDelta7Palette), rather than a fresh palette per
-        ///     frame — a further size lever toward the user's stated ideal
-        ///     target of 720p30fps at a reasonable size with fully
-        ///     frame-independent seeking. This bumped
-        ///     ScrubProxyFormat.CurrentVersion 5 -> 6 and the
-        ///     fixed header from 40 to 44 bytes — any pre-V6 cached file is
-        ///     treated as a cache miss and rebuilt, same as every earlier
-        ///     format-version bump. NOTED FOR LATER, NOT YET PURSUED
-        ///     alongside this: re-tuning the delta bit-split/color-space
-        ///     weighting (IndexedDelta7Codec's RStep/GStep/BStep
-        ///     constants), a larger/alternate palette+delta format
-        ///     variant, and a genuinely GPU-friendly proxy-encode
-        ///     accelerator (a small per-tile learned autoencoder was
-        ///     discussed as a promising direction, since it has no
-        ///     cross-tile sequential dependency, unlike the reverted
-        ///     shader approach) — all raised as further size/speed levers
-        ///     and deliberately deferred, none of them wired in here yet.
-        ///
-        /// ONLY AFFECTS NEW BUILDS — same non-retroactive contract as
-        /// ScrubProxyCompressionScheme immediately above: an existing
-        /// cached .esrp file's own PixelFormat (recorded in its own header
-        /// at build time) is what ScrubProxyReader actually honors when
-        /// reading it back, so changing this does not touch anything
-        /// already on disk, and entries built under either value coexist
-        /// fine side by side in the same cache directory.
+        /// How many frames each open reader decodes ahead of (behind, in
+        /// reverse) the one being shown. Memory is roughly this many decoded
+        /// frames per visible or upcoming media input.
         /// </summary>
-        public static ScrubProxyPixelFormat ScrubProxyPixelFormat
+        public static int ReaderBufferFrames
         {
-            get => _scrubProxyPixelFormat;
-            set => _scrubProxyPixelFormat = value;
+            get => _readerBufferFrames;
+            set => _readerBufferFrames = value >= 1
+                ? value
+                : throw new ArgumentOutOfRangeException(nameof(value), "ReaderBufferFrames must be at least 1.");
         }
 
         /// <summary>

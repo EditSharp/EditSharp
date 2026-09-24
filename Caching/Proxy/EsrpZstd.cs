@@ -1,13 +1,13 @@
 using System;
 using ZstdSharp;
 
-namespace EditSharp.Caching.ScrubProxy
+namespace EditSharp.Caching.Proxy
 {
     /// <summary>
     /// A thin wrapper around ZstdSharp.Port (a fully-managed, pure-C# port
     /// of the Zstandard compression library — NO native/P-Invoke
     /// dependency, confirmed against the library's own GitHub source) —
-    /// the ScrubProxyCompressionScheme.Zstd scheme (see ScrubProxyFormat).
+    /// the EsrpCompressionScheme.Zstd scheme (see EsrpFormat).
     ///
     /// DECIDED IN CONVERSATION: the user asked to revisit scrub-proxy
     /// compression once IndexedDelta7 proved the pixel-encoding side had
@@ -23,9 +23,9 @@ namespace EditSharp.Caching.ScrubProxy
     /// WHY ZSTD SPECIFICALLY (the two reasons that drove the choice):
     ///   - Zstd's DECODE speed is roughly independent of the COMPRESSION
     ///     LEVEL used at encode time. This scrub-proxy pipeline only ever
-    ///     compresses once, at build time (see ScrubProxyCache.BuildAsync),
+    ///     compresses once, at build time (see ProxyCache.BuildAsync),
     ///     but decompresses on every single scrub tick (see
-    ///     ScrubProxyReader.GetFrameAt) — so an aggressive, slow, one-time
+    ///     EsrpReader.GetFrameAt) — so an aggressive, slow, one-time
     ///     build-time compression level costs nothing extra per tick,
     ///     unlike a codec whose decode cost scales with how hard the
     ///     encoder worked.
@@ -38,7 +38,7 @@ namespace EditSharp.Caching.ScrubProxy
     /// WHY A WRAPPER CLASS AT ALL, RATHER THAN CALLING ZstdSharp DIRECTLY
     /// AT EACH CALL SITE: a simple Encode(ReadOnlySpan&lt;byte&gt;) -&gt; byte[] /
     /// Decode(ReadOnlySpan&lt;byte&gt;, Span&lt;byte&gt;) shape, so
-    /// ScrubProxyCache.EncodeFramePixels and ScrubProxyReader's
+    /// ProxyCache.EncodeFramePixels and EsrpReader's
     /// Read*Frame methods can dispatch across None/Zstd through one
     /// shared code path each (see those classes' own remarks) without
     /// caring which concrete codec is behind a given scheme value, and so
@@ -57,7 +57,7 @@ namespace EditSharp.Caching.ScrubProxy
     /// STRICTLY INTRA-FRAME, LIKE EVERY OTHER PART OF THIS FORMAT: each
     /// call compresses/decompresses exactly one frame's own plane, in
     /// isolation, with no reference to any other frame's bytes. This is
-    /// load-bearing, not incidental — see ScrubProxyFormat's own class
+    /// load-bearing, not incidental — see EsrpFormat's own class
     /// remarks on why the whole point of this file format is O(1) random-
     /// access reads with no keyframe/GOP concept; a cross-frame delta
     /// scheme (Zstd dictionaries built from a neighboring frame, a
@@ -66,7 +66,7 @@ namespace EditSharp.Caching.ScrubProxy
     /// eliminate, and must never be pursued here regardless of any future
     /// size-reduction opportunity that might come from it.
     /// </summary>
-    internal static class ScrubProxyZstd
+    internal static class EsrpZstd
     {
         /// <summary>
         /// The one-time build-time compression level Encode uses. 19 is a
@@ -77,7 +77,7 @@ namespace EditSharp.Caching.ScrubProxy
         /// for existing (see class remarks): decode speed doesn't pay for
         /// a higher encode level, and encoding only ever happens once, at
         /// build time, off the per-tick scrub path entirely (see
-        /// ScrubProxyCache.BuildAsync). NOT the library's absolute max
+        /// ProxyCache.BuildAsync). NOT the library's absolute max
         /// (22) — the last few levels buy diminishing compression for a
         /// real, sometimes large, additional one-time build-time cost, and
         /// 19 was picked as a reasonable starting trade-off rather than a
@@ -103,7 +103,7 @@ namespace EditSharp.Caching.ScrubProxy
 
         /// <summary>
         /// Decodes `compressed` into `destination`, which must be exactly
-        /// the known decompressed size: ScrubProxyReader always knows the
+        /// the known decompressed size: EsrpReader always knows the
         /// exact expected size ahead of time (Width * Height * 4 for an
         /// Rgba8888 frame, or Width * Height for an IndexedDelta7 frame's
         /// own control-byte plane), so there's no need to let Unwrap
@@ -121,7 +121,7 @@ namespace EditSharp.Caching.ScrubProxy
 
             if (written != destination.Length)
                 throw new InvalidOperationException(
-                    $"ScrubProxyZstd.Decode: decoded {written} bytes, expected exactly " +
+                    $"EsrpZstd.Decode: decoded {written} bytes, expected exactly " +
                     $"{destination.Length} — the compressed frame data is corrupt, truncated, or was " +
                     "encoded for a different frame size.");
         }

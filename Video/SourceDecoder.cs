@@ -139,6 +139,12 @@ namespace EditSharp.Video
         private byte[]? _lastFrameBytes;
         private bool _exhausted;
 
+        /// <summary>
+        /// True once the source has run out. Every NextFrame from then on
+        /// (including the one that discovered it) repeats the last real frame.
+        /// </summary>
+        public bool IsExhausted => _exhausted;
+
         // Bounded capture of this decoder's own ffmpeg subprocess's stderr —
         // see the constructor's remarks and NextFrame's "produced no frames
         // at all" exception, which is what this exists for. Capped rather
@@ -232,7 +238,7 @@ namespace EditSharp.Video
         /// both use cases.
         /// </summary>
         public static SourceDecoder Start(
-            string sourcePath, double sourceStartSeconds, int fps, int width, int height,
+            string sourcePath, double sourceStartSeconds, double fps, int width, int height,
             DecodeHwAccelPlan? plan = null, bool fastOpen = false, double speed = 1d)
         {
             plan ??= DecodeHwAccelPlan.Software;

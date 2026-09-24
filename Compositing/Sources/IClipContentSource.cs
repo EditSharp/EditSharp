@@ -7,23 +7,15 @@ using EditSharp.Compositing.Gpu;
 namespace EditSharp.Compositing.Sources
 {
     /// <summary>
-    /// Shared surface FrameCompositor composites against. Two very
-    /// different implementations satisfy it:
-    ///   - ClipContentSource: a persistent, forward-only decode (one
-    ///     long-lived ffmpeg pipe per Video-type VideoSourceNode) — used by
-    ///     Render and by Playback's normal forward playback loop.
-    ///   - ScrubFrameSource: a one-shot, arbitrary-position I-frame decode
-    ///     with no persistent pipe — used by Playback.ScrubToAsync and
-    ///     reverse playback, where "jump to any position instantly" is the
-    ///     whole point and a forward-only pipe cannot do that.
-    ///
-    /// Kept as a plain interface rather than a shared base class — the two
-    /// implementations share almost nothing beyond this one call shape (see
-    /// each class's own remarks).
+    /// What FrameCompositor composites against: this frame's image for every
+    /// InputNode of a clip, keyed by node Id, each flagged with whether the
+    /// caller disposes it (Transient) or it stays owned by the source.
+    /// `frameIndex` is the timeline frame being composed (buffered sources
+    /// key their prefetch on it); `clipSeconds` is that frame's content time.
     /// </summary>
     internal interface IClipContentSource
     {
         IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> GetContent(
-            VideoClip clip, double clipSeconds, int canvasWidth, int canvasHeight, SurfacePool pool);
+            VideoClip clip, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool);
     }
 }

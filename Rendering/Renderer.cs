@@ -17,6 +17,7 @@ using EditSharp.Components.Transitions;
 using EditSharp.Compositing;
 using EditSharp.Compositing.Gpu;
 using EditSharp.Compositing.Sources;
+using EditSharp.Components.Sources.Video;
 using EditSharp.Video;
 
 namespace EditSharp.Rendering
@@ -120,7 +121,13 @@ namespace EditSharp.Rendering
         private const int AudioSampleRate = 48000;
         private const int AudioChannelCount = 2;
 
-        public static async Task RenderAsync(Blueprint blueprint)
+        /// <summary>
+        /// Renders `blueprint` to its output file. A source that can't provide
+        /// a frame doesn't abort the render: it's drawn as a labeled
+        /// placeholder, and the returned report says which sources failed,
+        /// why, and where on the timeline.
+        /// </summary>
+        public static async Task<RenderReport> RenderAsync(Blueprint blueprint)
         {
             Validate(blueprint);
 
@@ -131,8 +138,11 @@ namespace EditSharp.Rendering
 
             try
             {
-                await RenderCoreAsync(blueprint, tempFiles);
-                EditSharpConfig.Logger.Log($"Render complete in {sw.Elapsed}.");
+                RenderReport report = await RenderCoreAsync(blueprint, tempFiles);
+                EditSharpConfig.Logger.Log(report.HasProblems
+                    ? $"Render complete in {sw.Elapsed}, with {report.Problems.Count} source problem(s) rendered as placeholders."
+                    : $"Render complete in {sw.Elapsed}.");
+                return report;
             }
             finally
             {
@@ -143,7 +153,7 @@ namespace EditSharp.Rendering
             }
         }
 
-        private static async Task RenderCoreAsync(Blueprint blueprint, ConcurrentBag<string> tempFiles)
+        private static async Task<RenderReport> RenderCoreAsync(Blueprint blueprint, ConcurrentBag<string> tempFiles)
         {
             Timeline timeline = blueprint.Timeline;
             int width = (int)blueprint.RenderSettings.Resolution.X;
@@ -151,22 +161,19 @@ namespace EditSharp.Rendering
             int fps = blueprint.RenderSettings.Framerate;
             HardwareAccelerator hwAccel = blueprint.RenderSettings.HardwareAccelerator;
 
-            var nativeSizes = new ConcurrentDictionary<Guid, (int, int)>();
-            var decodePlans = new ConcurrentDictionary<Guid, DecodeHwAccelPlan>();
-            var decodeSourcePaths = new ConcurrentDictionary<Guid, string>();
-
-            var prepSw = Stopwatch.StartNew();
-            await ContentPreparation.PrepareContentAsync(
-                timeline, width, height, hwAccel, nativeSizes, decodePlans, decodeSourcePaths);
-            EditSharpConfig.Logger.LogVerbose($"Content prepared in {prepSw.ElapsedMilliseconds}ms.");
-
-            Dictionary<int, List<Clip>> decoderReleaseSchedule =
-                ContentPreparation.BuildDecoderReleaseSchedule(timeline, fps);
+            var report = new RenderReportBuilder();
 
             int totalFrames = Math.Max(1, (int)Math.Ceiling(timeline.Duration.TotalSeconds * fps));
 
-            using var contentSource = new ClipContentSource(
-                fps, hwAccel, nativeSizes, decodePlans, decodeSourcePaths: decodeSourcePaths);
+            //read ahead of the frame being composed, from originals unless the settings say otherwise
+            using var contentSource = new ClipContentSource(new ContentSourceOptions(
+                fps, width, height, hwAccel, blueprint.RenderSettings.SourceMode,
+                VideoReadMode.Sequential, ContentFailurePolicy.Export, Buffered: true, Direction: 1, Report: report));
+
+            var prepSw = Stopwatch.StartNew();
+            await contentSource.PrepareAsync(
+                FrameStateResolver.Resolve(timeline, 0, fps).Channels.SelectMany(c => c.Clips).Select(c => c.Clip).OfType<VideoClip>());
+            EditSharpConfig.Logger.LogVerbose($"Opening sources prepared in {prepSw.ElapsedMilliseconds}ms.");
 
             using GpuContext gpuContext = GpuContext.Create(
                 hwAccel, blueprint.RenderSettings.GpuAdapterIndex);
@@ -181,7 +188,7 @@ namespace EditSharp.Rendering
             //process frame rendering streams into can't be spawned until the
             //mixed audio has already been written to a real, complete file
             //ffmpeg can open as an input.
-            AudioBuffer masterAudio = await AudioMixer.ComposeAsync(timeline, AudioSampleRate, AudioChannelCount);
+            AudioBuffer masterAudio = await AudioMixer.ComposeAsync(timeline, AudioSampleRate, AudioChannelCount, report: report);
 
             string audioPath = TempPaths.GetAudioTempFilePath($"master_{Guid.NewGuid():N}.pcm");
             await File.WriteAllBytesAsync(audioPath, masterAudio.ToFloat32Bytes());
@@ -194,9 +201,11 @@ namespace EditSharp.Rendering
 
             var renderSw = Stopwatch.StartNew();
             await RenderAndEncodeAsync(
-                timeline, fps, width, height, contentSource, decoderReleaseSchedule, totalFrames,
+                timeline, fps, width, height, contentSource, totalFrames,
                 surfacePool, audioPath, masterAudio, blueprint);
             EditSharpConfig.Logger.Log($"Render + encode complete in {renderSw.ElapsedMilliseconds}ms.");
+
+            return report.Build();
         }
 
         /// <summary>
@@ -211,7 +220,6 @@ namespace EditSharp.Rendering
         private static async Task RenderAndEncodeAsync(
             Timeline timeline, int fps, int width, int height,
             ClipContentSource contentSource,
-            Dictionary<int, List<Clip>> decoderReleaseSchedule,
             int totalFrames, SurfacePool surfacePool,
             string audioPath, AudioBuffer masterAudio, Blueprint blueprint)
         {
@@ -305,7 +313,7 @@ namespace EditSharp.Rendering
             {
                 await RenderAllFramesAsync(
                     timeline, fps, width, height, contentSource,
-                    decoderReleaseSchedule, totalFrames, stdin, surfacePool);
+                    totalFrames, stdin, surfacePool);
             }
             finally
             {
@@ -326,7 +334,6 @@ namespace EditSharp.Rendering
         private static async Task RenderAllFramesAsync(
             Timeline timeline, int fps, int width, int height,
             ClipContentSource contentSource,
-            Dictionary<int, List<Clip>> decoderReleaseSchedule,
             int totalFrames, Stream accumulator, SurfacePool surfacePool)
         {
             var sw = Stopwatch.StartNew();
@@ -335,7 +342,10 @@ namespace EditSharp.Rendering
 
             for (int frameIndex = 0; frameIndex < totalFrames; frameIndex++)
             {
+                //an export always waits for every frame
+                contentSource.Anticipate(timeline, frameIndex);
                 FrameState state = FrameStateResolver.Resolve(timeline, frameIndex, fps);
+                contentSource.WaitReady(state, System.Threading.Timeout.InfiniteTimeSpan);
 
                 (byte[] buffer, int length) = FrameCompositor.RenderFrame(
                     state, contentSource, width, height, fps, surfacePool);
@@ -347,11 +357,6 @@ namespace EditSharp.Rendering
                 finally
                 {
                     ArrayPool<byte>.Shared.Return(buffer);
-                }
-
-                if (decoderReleaseSchedule.TryGetValue(frameIndex, out List<Clip>? finished))
-                {
-                    foreach (Clip clip in finished) contentSource.ReleaseDecoder(clip);
                 }
 
                 long currentElapsedMs = sw.ElapsedMilliseconds;

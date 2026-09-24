@@ -2,7 +2,8 @@ using System;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Sources;
 using EditSharp.History;
-using EditSharp.Components; // Source
+using EditSharp.Components;
+using EditSharp.Components.Sources.Audio;
  
 namespace EditSharp.Components.Clips
 {
@@ -24,7 +25,7 @@ namespace EditSharp.Components.Clips
  
         private AudioClip(Graph graph) => _graph = graph;
  
-        public static AudioClip CreateFromSource(Source source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(new AudioSourceNode { Source = source })) { Start = start, Duration = duration });
+        public static AudioClip CreateFromSource(AudioSource source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(new AudioSourceNode { Source = source })) { Start = start, Duration = duration });
  
         public static AudioClip CreateTone(
             TimeSpan start, TimeSpan duration, Waveform waveform = Waveform.Sine,

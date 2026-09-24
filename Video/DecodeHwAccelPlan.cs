@@ -109,7 +109,7 @@ namespace EditSharp.Video
         /// Clip.Speed. setpts only rewrites timestamps, so it sits happily
         /// in front of a GPU-surface chain too.
         /// </summary>
-        public string BuildFilterGraph(int fps, int width, int height, double speed = 1d)
+        public string BuildFilterGraph(double fps, int width, int height, double speed = 1d)
         {
             string retime = speed == 1d ? "" : $"setpts=PTS/{FfmpegArgs.Num(speed)},";
 
@@ -119,7 +119,8 @@ namespace EditSharp.Video
 
             string download = UsesGpuScale ? ",hwdownload,format=nv12" : "";
 
-            return $"{retime}fps={fps},{scale}{download},format=rgba,settb=AVTB";
+            //round-trip format: a source rate like 30000/1001 must not drift over a long proxy build
+            return $"{retime}fps={fps.ToString("R", System.Globalization.CultureInfo.InvariantCulture)},{scale}{download},format=rgba,settb=AVTB";
         }
     }
 }

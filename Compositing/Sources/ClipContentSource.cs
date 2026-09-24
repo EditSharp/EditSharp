@@ -1,121 +1,253 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using SkiaSharp;
 using EditSharp.Components;
+using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Sources;
+using EditSharp.Components.Sources.Video;
 using EditSharp.Compositing.Generators;
 using EditSharp.Compositing.Gpu;
 using EditSharp.Compositing.Transforms;
+using EditSharp.Rendering;
 using EditSharp.Video;
 
 namespace EditSharp.Compositing.Sources
 {
+    /// <summary>How a session treats a source that can't provide a frame.</summary>
+    internal enum ContentFailurePolicy
+    {
+        /// <summary>Labeled placeholder; MediaOffline/DecodeError are retried after EditSharpConfig.SourceRetryInterval.</summary>
+        Preview,
+
+        /// <summary>Labeled placeholder, recorded in the session's RenderReport; never retried.</summary>
+        Export,
+    }
+
     /// <summary>
-    /// Resolves this frame's pixel content for EVERY InputNode in a
-    /// VideoClip's graph, and owns whatever state needs to live across many
-    /// frames to make that cheap — a video decoder per Video-type
-    /// VideoSourceNode, a cached SKImage per Image-type VideoSourceNode or
-    /// TextInputNode, a NestedTimelineRenderer per TimelineVideoInputNode.
+    /// Everything a content session needs to know up front. Buffered sessions
+    /// (playback, export) prefetch each media input on its own thread in
+    /// `Direction` and should be driven through Anticipate/WaitReady; unbuffered
+    /// ones (scrubbing, thumbnails, nested timelines) read on demand.
+    /// </summary>
+    internal sealed record ContentSourceOptions(
+        int Fps,
+        int CanvasWidth,
+        int CanvasHeight,
+        HardwareAccelerator HwAccel,
+        SourceMode SourceMode,
+        VideoReadMode ReadMode,
+        ContentFailurePolicy Failures,
+        bool Buffered = false,
+        int Direction = 1,
+        RenderReportBuilder? Report = null);
+
+    /// <summary>
+    /// Resolves this frame's image for every InputNode of a VideoClip's graph.
+    /// Media inputs (VideoSourceNode) go through their VideoSource; prepared,
+    /// read and failed entirely on the source's terms, so this class never
+    /// knows what kind of source it's reading. Generators, text and nested
+    /// timelines are still resolved here until they become sources too.
     ///
-    /// IMPLEMENTS IClipContentSource alongside ScrubFrameSource — see that
-    /// interface's own remarks for why FrameCompositor is written against
-    /// it rather than this concrete type: this class's video path is a
-    /// persistent, forward-only decode, structurally unable to serve
-    /// scrubbing/reverse playback's "arbitrary position, right now" need,
-    /// which ScrubFrameSource exists to cover instead.
+    /// ONE CLASS FOR EVERY CONTEXT: playback, export, scrubbing, reverse and
+    /// thumbnails differ only in their ContentSourceOptions; read mode,
+    /// whether reads are buffered and in which direction, and what a failure
+    /// turns into.
     ///
-    /// "CLIPS ARE GRAPHS" REWRITE — this is the piece that changed the most:
-    ///   - GetContent used to resolve ONE image per Clip (dispatching on
-    ///     Clip subtype: VideoClip/TextClip/GeneratorClip/NoiseClip). Now a
-    ///     VideoClip's graph can contain any number of InputNodes, so
-    ///     GetContent resolves ONE image PER INPUT NODE, keyed by that node's
-    ///     own Id, and dispatches on INPUT NODE type instead of Clip subtype.
-    ///     Every internal cache (video decoders, cached static images, nested
-    ///     renderers) is rekeyed the same way, by node Id rather than by Clip.
-    ///   - ColorGeneratorInputNode/NoiseInputNode now render directly at
-    ///     canvas resolution (rather than the old 1x1-fill-then-external-resize
-    ///     approach) — TransformNode derives its own "native size" from
-    ///     whatever image is actually upstream of it (see ImageGraphEvaluator's
-    ///     own remarks), so a generator/noise InputNode's resolved image
-    ///     needs to already BE the size that native-size inference should see,
-    ///     which for a canvas-filling generator/noise field is canvas size —
-    ///     matching the old FrameClip.NativeWidth/Height override exactly,
-    ///     just moved from an external substitution into the image itself.
-    ///   - TextInputNode rasterization moved HERE, lazily, cached by node Id
-    ///     — ContentPreparation no longer prepares text up front (see
-    ///     its own remarks) because there's no longer a tempFiles bag it's
-    ///     natural for it to own; this class creates its own temp PNGs and
-    ///     deletes them itself on Dispose.
-    ///   - TimelineVideoInputNode is brand new here: recursively renders one
-    ///     frame of the embedded Timeline via NestedTimelineRenderer.
+    /// AHEAD OF TIME (buffered sessions): Anticipate, called once per frame
+    /// before the frame is composed, prepares the sources of every clip that
+    /// will be on screen within EditSharpConfig.SourceLookahead, opens a
+    /// BufferedVideoReader for each as soon as it's prepared (so its first
+    /// frames are decoded before it appears), and releases inputs whose clip
+    /// the playhead has left. WaitReady then lets the caller decide what to do
+    /// about a frame that isn't ready in time (see Playback's late-frame
+    /// handling).
     ///
-    /// CALLER CONTRACT, load-bearing: GetContent must be called for a given
-    /// video clip exactly once per frame it's visible on, in strictly
-    /// increasing frame order, matching SourceDecoder.NextFrame's own
-    /// contract for every Video-type VideoSourceNode in its graph — this
-    /// class does not itself enforce that, it just forwards to the decoders.
+    /// FAILURES: a source's SourceUnavailableException becomes a
+    /// MediaPlaceholder for its reason (EndOfSource: transparent). Opening and
+    /// ProxyPending also mark the frame incomplete (LastFrameIncomplete).
+    /// MediaOffline and DecodeError are remembered per input; a Preview
+    /// session tries again after EditSharpConfig.SourceRetryInterval, an
+    /// Export session records every affected frame in its RenderReport.
+    ///
+    /// NOT THREAD-SAFE: Anticipate, WaitReady, PrepareAsync's caller and
+    /// GetContent must be driven from one logical sequence (they are, by every
+    /// session loop). Only preparation and each buffer's producer run in the
+    /// background, and they touch nothing shared.
     /// </summary>
     internal sealed class ClipContentSource : IClipContentSource, IDisposable
     {
-        private readonly int _fps;
-        private readonly HardwareAccelerator _hwAccel;
-        private readonly IReadOnlyDictionary<Guid, (int Width, int Height)> _nativeSizes;
-        private readonly IReadOnlyDictionary<Guid, DecodeHwAccelPlan> _decodePlans;
-        private readonly IReadOnlyDictionary<Clip, TimeSpan> _seekOffsets;
-        private readonly IReadOnlyDictionary<Guid, string> _decodeSourcePaths;
+        private sealed class MediaInput(VideoClip clip, VideoSourceNode node, VideoSource source)
+        {
+            public VideoClip Clip { get; } = clip;
+            public VideoSourceNode Node { get; } = node;
+            public VideoSource Source { get; } = source;
 
-        private readonly Dictionary<Guid, SourceDecoder> _videoDecoders = new();
-        private readonly Dictionary<Clip, List<Guid>> _videoDecodersByClip = new();
+            public Task<IPreparedVideoSource>? Preparing { get; set; }
+            public IPreparedVideoSource? Prepared { get; set; }
+            public IVideoFrameReader? Reader { get; set; }
+            public BufferedVideoReader? Buffer { get; set; }
+
+            public SourceUnavailableException? Failure { get; set; }
+            public long FailedAt { get; set; }
+        }
+
+        private readonly ContentSourceOptions _options;
+
+        private readonly Dictionary<Guid, MediaInput> _media = new();
         private readonly Dictionary<Guid, SKImage> _staticContent = new();
         private readonly Dictionary<Guid, string> _ownedTempFiles = new();
         private readonly Dictionary<Guid, NestedTimelineRenderer> _nestedRenderers = new();
+        private readonly HashSet<Guid> _brokenStatic = new();
 
-        public ClipContentSource(
-            int fps,
-            HardwareAccelerator hwAccel,
-            IReadOnlyDictionary<Guid, (int Width, int Height)> nativeSizes,
-            IReadOnlyDictionary<Guid, DecodeHwAccelPlan> decodePlans,
-            IReadOnlyDictionary<Clip, TimeSpan>? seekOffsets = null,
-            IReadOnlyDictionary<Guid, string>? decodeSourcePaths = null)
+        public ClipContentSource(ContentSourceOptions options) => _options = options;
+
+        /// <summary>Whether the last GetContent substituted anything still on its way (Opening, ProxyPending).</summary>
+        public bool LastFrameIncomplete { get; private set; }
+
+        // ---------------------------------------------------------------
+        // Ahead of time
+        // ---------------------------------------------------------------
+
+        /// <summary>Prepares every media input of `clips`, waiting for all of them. Failures are recorded, not thrown.</summary>
+        public async Task PrepareAsync(IEnumerable<VideoClip> clips, CancellationToken ct = default)
         {
-            _fps = fps;
-            _hwAccel = hwAccel;
-            _nativeSizes = nativeSizes;
-            _decodePlans = decodePlans;
-            _seekOffsets = seekOffsets ?? new Dictionary<Clip, TimeSpan>();
-            _decodeSourcePaths = decodeSourcePaths ?? new Dictionary<Guid, string>();
+            var pending = new List<Task>();
+
+            foreach (VideoClip clip in clips)
+            {
+                foreach (VideoSourceNode node in clip.Graph.AllNodes.OfType<VideoSourceNode>())
+                {
+                    if (StartPreparing(Input(clip, node)) is { } task) pending.Add(task);
+                }
+            }
+
+            try { await Task.WhenAll(pending).WaitAsync(ct); }
+            catch (Exception) when (!ct.IsCancellationRequested) { /* surfaced per input when read */ }
         }
 
         /// <summary>
-        /// This frame's pixel content for every InputNode in `clip`'s graph,
-        /// keyed by that node's own Id, each with whether the CALLER owns
-        /// disposing it. Transient content (a video decoder's frame, a
-        /// generator/noise field, a nested-timeline frame) is fresh every
-        /// call and must be disposed by the caller once this frame's draw is
-        /// done. Long-lived content (a cached static image, a rasterized text
-        /// block) is owned by THIS class and must NOT be disposed by the
-        /// caller — it's reused on every future frame that node is visible on.
+        /// Buffered sessions, once per frame before composing it: get upcoming
+        /// clips' sources prepared and buffering, and let go of passed ones.
+        /// </summary>
+        public void Anticipate(Timeline timeline, int frameIndex)
+        {
+            TimeSpan now = FrameStateResolver.TimeOfFrame(frameIndex, _options.Fps);
+            TimeSpan lookahead = EditSharpConfig.SourceLookahead;
+            var live = new HashSet<Guid>();
+
+            foreach (VideoChannel channel in timeline.VideoChannels)
+            {
+                foreach (Clip clip in channel.Clips)
+                {
+                    if (clip is not VideoClip video) continue;
+
+                    TimeSpan reachEnd = ReachEnd(channel, clip);
+
+                    bool upcoming = _options.Direction > 0
+                        ? clip.Start <= now + lookahead && reachEnd > now
+                        : reachEnd >= now - lookahead && clip.Start <= now;
+
+                    if (!upcoming) continue;
+
+                    foreach (VideoSourceNode node in video.Graph.AllNodes.OfType<VideoSourceNode>())
+                    {
+                        MediaInput input = Input(video, node);
+                        live.Add(node.Id);
+                        StartPreparing(input);
+
+                        if (_options.Buffered && input.Buffer is null && input.Failure is null && TryTakePrepared(input) is { } prepared)
+                            OpenBuffer(input, prepared, EntryFrame(clip, reachEnd, frameIndex), reachEnd);
+                    }
+                }
+            }
+
+            foreach (MediaInput passed in _media.Values.Where(m => !live.Contains(m.Node.Id)).ToList())
+            {
+                Release(passed);
+                _media.Remove(passed.Node.Id);
+            }
+        }
+
+        /// <summary>
+        /// Waits (up to `timeout`, or Timeout.InfiniteTimeSpan) until every
+        /// media input of `state` can hand over its frame without blocking.
+        /// Inputs that have failed count as ready; they'll show their
+        /// placeholder. False means the frame isn't ready in time.
+        /// </summary>
+        public bool WaitReady(FrameState state, TimeSpan timeout)
+        {
+            var clock = Stopwatch.StartNew();
+            TimeSpan Remaining() => timeout == Timeout.InfiniteTimeSpan ? Timeout.InfiniteTimeSpan : Max(TimeSpan.Zero, timeout - clock.Elapsed);
+
+            foreach (FrameClip frameClip in state.Channels.SelectMany(c => c.Clips))
+            {
+                if (frameClip.Clip is not VideoClip clip) continue;
+
+                foreach (VideoSourceNode node in clip.Graph.AllNodes.OfType<VideoSourceNode>())
+                {
+                    MediaInput input = Input(clip, node);
+                    if (input.Failure is not null) continue;
+
+                    Task<IPreparedVideoSource>? preparing = StartPreparing(input);
+                    if (preparing is not null && !WaitQuietly(preparing, Remaining())) return false;
+
+                    if (!_options.Buffered) continue;
+
+                    if (input.Buffer is null)
+                    {
+                        if (TryTakePrepared(input) is not { } prepared) continue; //failed: placeholder
+                        OpenBuffer(input, prepared, state.FrameIndex, ReachEnd(null, clip));
+                    }
+
+                    TimeSpan content = TimeSpan.FromSeconds(frameClip.ClipSeconds);
+                    if (!input.Buffer!.WaitReady(state.FrameIndex, content, Remaining())) return false;
+                }
+            }
+
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Per frame
+        // ---------------------------------------------------------------
+
+        public IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> GetContent(
+            VideoClip clip, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool) =>
+            GetContent(clip, clipSeconds, frameIndex, canvasWidth, canvasHeight, pool, null);
+
+        /// <summary>
+        /// GetContent with some inputs already resolved (see
+        /// GetMediaFramesOnceAsync): those are passed through untouched and
+        /// only the rest are resolved here.
         /// </summary>
         public IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> GetContent(
-            VideoClip clip, double clipSeconds, int canvasWidth, int canvasHeight, SurfacePool pool)
+            VideoClip clip, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool,
+            IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)>? resolved)
         {
             var result = new Dictionary<Guid, (SKImage, bool)>();
+            LastFrameIncomplete = false;
 
             foreach (InputNode node in clip.Graph.AllNodes.OfType<InputNode>())
             {
+                if (resolved is not null && resolved.TryGetValue(node.Id, out (SKImage Image, bool Transient) known))
+                {
+                    result[node.Id] = known;
+                    continue;
+                }
+
                 result[node.Id] = node switch
                 {
-                    VideoSourceNode { Source.Type: SourceType.Video } media =>
-                        (GetOrOpenDecoder(clip, media, canvasWidth, canvasHeight).NextFrame(), true),
+                    VideoSourceNode media => ResolveMedia(clip, media, clipSeconds, frameIndex, canvasWidth, canvasHeight),
 
-                    VideoSourceNode { Source.Type: SourceType.Image } media =>
-                        (GetOrLoadStaticImage(media.Id, media.Source.Path), false),
-
-                    TextInputNode text =>
-                        (GetOrRasterizeText(text, canvasWidth, canvasHeight), false),
+                    TextInputNode text => GetOrRasterizeText(text, frameIndex, canvasWidth, canvasHeight),
 
                     ColorGeneratorInputNode color =>
                         (ColorGenerator.Render(color, clipSeconds, canvasWidth, canvasHeight, pool), true),
@@ -126,144 +258,324 @@ namespace EditSharp.Compositing.Sources
                     TimelineVideoInputNode embed =>
                         (GetOrCreateNestedRenderer(embed).RenderFrame(clipSeconds, canvasWidth, canvasHeight), true),
 
-                    _ => throw new NotSupportedException(
-                        $"ClipContentSource has no dispatch for {node.GetType().Name}."),
+                    _ => throw new NotSupportedException($"ClipContentSource has no dispatch for {node.GetType().Name}."),
                 };
             }
 
             return result;
         }
 
-        private SourceDecoder GetOrOpenDecoder(
-            VideoClip clip, VideoSourceNode media, int canvasWidth, int canvasHeight)
+        /// <summary>
+        /// Every media input of `clip` at `clipSeconds` through a one-shot
+        /// VideoSource.GetFrameAtAsync; nothing is kept open, so a caller
+        /// touching many clips (thumbnails) holds no readers. Failures become
+        /// placeholders; Complete is false if any was something still on its
+        /// way (ProxyPending, Opening). Hand the result to GetContent.
+        /// </summary>
+        public async Task<(IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> Media, bool Complete)> GetMediaFramesOnceAsync(
+            VideoClip clip, double clipSeconds, int width, int height, CancellationToken ct = default)
         {
-            if (_videoDecoders.TryGetValue(media.Id, out SourceDecoder? existing))
-                return existing;
+            TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
+            VideoSourceNode[] nodes = clip.Graph.AllNodes.OfType<VideoSourceNode>().ToArray();
 
-            (int nativeWidth, int nativeHeight) = _nativeSizes.TryGetValue(media.Id, out var size)
-                ? size
+            var frames = await Task.WhenAll(nodes.Select(async node =>
+            {
+                try
+                {
+                    SKImage image = await node.Source.GetFrameAtAsync(content, _options.SourceMode, width, height, ct);
+                    return (Id: node.Id, Image: image, Transient: true, Pending: false);
+                }
+                catch (SourceUnavailableException ex)
+                {
+                    bool pending = ex.Reason is SourceUnavailableReason.ProxyPending or SourceUnavailableReason.Opening;
+                    return (Id: node.Id, Image: MediaPlaceholder.Get(width, height, ex.Reason), Transient: false, Pending: pending);
+                }
+            }));
+
+            var media = frames.ToDictionary(f => f.Id, f => (f.Image, f.Transient));
+            return (media, !frames.Any(f => f.Pending));
+        }
+
+        private (SKImage, bool) ResolveMedia(VideoClip clip, VideoSourceNode node, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight)
+        {
+            MediaInput input = Input(clip, node);
+            TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
+
+            try
+            {
+                if (input.Failure is { } failure)
+                {
+                    if (!RetryDue(input)) throw failure;
+
+                    input.Failure = null;
+                    StartPreparing(input);
+                }
+
+                IPreparedVideoSource prepared = AwaitPrepared(input);
+
+                if (_options.Buffered)
+                {
+                    input.Buffer ??= OpenBuffer(input, prepared, frameIndex, ReachEnd(null, clip));
+                    return Owned(input.Buffer.Take(frameIndex, content));
+                }
+
+                input.Reader ??= prepared.OpenReader(ReaderOptions(input, prepared, content, callerOwnsFrames: false));
+                return Owned(input.Reader.GetFrame(content));
+            }
+            catch (SourceUnavailableException ex)
+            {
+                return Unavailable(input, ex, frameIndex, canvasWidth, canvasHeight);
+            }
+
+            static (SKImage, bool) Owned(VideoFrame frame) => (frame.Image, frame.Transient);
+        }
+
+        private (SKImage, bool) Unavailable(MediaInput input, SourceUnavailableException ex, int frameIndex, int canvasWidth, int canvasHeight)
+        {
+            switch (ex.Reason)
+            {
+                case SourceUnavailableReason.EndOfSource:
+                    break;
+
+                case SourceUnavailableReason.Opening:
+                case SourceUnavailableReason.ProxyPending:
+                    LastFrameIncomplete = true;
+                    RecordProblem(input, ex, frameIndex);
+                    break;
+
+                default:
+                    if (input.Failure is null)
+                    {
+                        input.Failure = ex;
+                        input.FailedAt = Environment.TickCount64;
+                        Release(input);
+
+                        if (_options.Failures == ContentFailurePolicy.Preview)
+                            EditSharpConfig.Logger.LogWarning($"{Describe(input.Source)}: {ex.Message} Showing a placeholder.");
+                    }
+
+                    RecordProblem(input, ex, frameIndex);
+                    break;
+            }
+
+            return (MediaPlaceholder.Get(canvasWidth, canvasHeight, ex.Reason), false);
+        }
+
+        private void RecordProblem(MediaInput input, SourceUnavailableException ex, int frameIndex)
+        {
+            if (_options.Report is not { } report) return;
+
+            TimeSpan at = FrameStateResolver.TimeOfFrame(frameIndex, _options.Fps);
+            if (report.Record(input.Node.Id, Describe(input.Source), ex.Reason, ex.Message, at))
+                EditSharpConfig.Logger.LogWarning($"{Describe(input.Source)}: {ex.Message} Rendering a placeholder from {at}.");
+        }
+
+        private bool RetryDue(MediaInput input) =>
+            _options.Failures == ContentFailurePolicy.Preview &&
+            input.Failure!.Reason is SourceUnavailableReason.MediaOffline or SourceUnavailableReason.DecodeError &&
+            Environment.TickCount64 - input.FailedAt >= EditSharpConfig.SourceRetryInterval.TotalMilliseconds;
+
+        // ---------------------------------------------------------------
+        // Inputs
+        // ---------------------------------------------------------------
+
+        //the node's current source; swapping it mid-session drops everything held for the old one
+        private MediaInput Input(VideoClip clip, VideoSourceNode node)
+        {
+            if (_media.TryGetValue(node.Id, out MediaInput? known) && ReferenceEquals(known.Source, node.Source) && ReferenceEquals(known.Clip, clip))
+                return known;
+
+            if (known is not null) Release(known);
+
+            var input = new MediaInput(clip, node, node.Source);
+            _media[node.Id] = input;
+            return input;
+        }
+
+        /// <summary>Starts preparing if nothing is prepared or preparing; returns the task still to finish, if any.</summary>
+        private Task<IPreparedVideoSource>? StartPreparing(MediaInput input)
+        {
+            if (input.Prepared is not null || input.Failure is not null) return null;
+
+            input.Preparing ??= Task.Run(() => input.Source.PrepareAsync(new VideoPrepareContext(_options.HwAccel, _options.SourceMode)));
+            return input.Preparing.IsCompleted ? null : input.Preparing;
+        }
+
+        /// <summary>The prepared handle if preparing has finished; records a failure (and returns null) if it failed.</summary>
+        private IPreparedVideoSource? TryTakePrepared(MediaInput input)
+        {
+            if (input.Prepared is not null) return input.Prepared;
+            if (input.Preparing is not { IsCompleted: true } done) return null;
+
+            input.Preparing = null;
+
+            if (done.IsCompletedSuccessfully) return input.Prepared = done.Result;
+
+            input.Failure = AsUnavailable(done.Exception?.InnerException, input.Source);
+            input.FailedAt = Environment.TickCount64;
+            return null;
+        }
+
+        /// <summary>
+        /// The prepared handle, waiting for preparation if needed; except in a
+        /// buffered preview, which must never stall on it and shows Opening
+        /// instead (WaitReady is where a preview chooses to wait).
+        /// </summary>
+        private IPreparedVideoSource AwaitPrepared(MediaInput input)
+        {
+            if (input.Prepared is { } prepared) return prepared;
+
+            Task<IPreparedVideoSource> preparing = input.Preparing ?? StartPreparing(input) ?? input.Preparing!;
+
+            if (!preparing.IsCompleted && _options.Buffered && _options.Failures == ContentFailurePolicy.Preview)
+                throw new SourceUnavailableException(SourceUnavailableReason.Opening, $"{Describe(input.Source)} is still opening.");
+
+            WaitQuietly(preparing, Timeout.InfiniteTimeSpan);
+
+            return TryTakePrepared(input) ?? throw input.Failure!;
+        }
+
+        private BufferedVideoReader OpenBuffer(MediaInput input, IPreparedVideoSource prepared, int firstFrame, TimeSpan reachEnd)
+        {
+            VideoClip clip = input.Clip;
+            TimeSpan content = ContentTimeOf(clip, firstFrame);
+
+            int firstClipFrame = (int)Math.Ceiling(clip.Start.TotalSeconds * _options.Fps - 1e-9);
+            int endFrame = (int)Math.Ceiling(reachEnd.TotalSeconds * _options.Fps - 1e-9);
+
+            IVideoFrameReader reader = prepared.OpenReader(ReaderOptions(input, prepared, content, callerOwnsFrames: true));
+
+            return input.Buffer = new BufferedVideoReader(
+                reader, firstFrame, _options.Direction, EditSharpConfig.ReaderBufferFrames,
+                frame => ContentTimeOf(clip, frame),
+                frame => frame >= firstClipFrame && frame < endFrame);
+        }
+
+        private VideoReaderOptions ReaderOptions(MediaInput input, IPreparedVideoSource prepared, TimeSpan startAt, bool callerOwnsFrames)
+        {
+            //decode only as large as the clip's own transform will ever show it
+            (int nativeWidth, int nativeHeight) = prepared.NativeSize;
+            ClipTransform transform = DecodeSizeHeuristics.FindDownstreamTransform(input.Clip.Graph.Flattened, input.Node)?.Transform ?? new ClipTransform();
+
+            (int width, int height) = nativeWidth > 0 && nativeHeight > 0
+                ? TransformProjection.ComputeContentSize(transform, nativeWidth, nativeHeight, _options.CanvasWidth, _options.CanvasHeight)
                 : (0, 0);
 
-            if (nativeWidth <= 0 || nativeHeight <= 0)
-                throw new InvalidOperationException(
-                    "No native size registered for a VideoSourceNode — ContentPreparation must " +
-                    "run (see ContentPreparation.PrepareContentAsync) before rendering.");
-
-            //Source.Start already carries any head-trim advance (see
-            //Clip.OnHeadInPointShift / VideoSourceNode.InPoint) — this IS the
-            //one-time seek SourceDecoder's own remarks describe, paid once
-            //at stream setup rather than once per frame. seekOffsets adds
-            //however far INTO the clip's visible window playback is already
-            //starting — zero for a full render, which reproduces the
-            //original behaviour exactly. Still keyed by Clip (not node):
-            //every media input on the same clip starts that same amount
-            //further in, regardless of how many it has.
-            double startSeconds = (media.Source.Start ?? TimeSpan.Zero).TotalSeconds;
-
-            if (_seekOffsets.TryGetValue(clip, out TimeSpan extra))
-                startSeconds += extra.TotalSeconds;
-
-            //Decode target: the max-scale-across-the-graph's-own-keyframe-
-            //range content size TransformProjection.ComputeContentSize
-            //already computes for the Skia resize step, capped at native
-            //resolution per axis independently — see DecodeSizeHeuristics'
-            //own remarks on the downstream-TransformNode approximation.
-            ClipTransform transform =
-                DecodeSizeHeuristics.FindDownstreamTransform(clip.Graph.Flattened, media)?.Transform ?? new ClipTransform();
-
-            (int desiredWidth, int desiredHeight) = TransformProjection.ComputeContentSize(
-                transform, nativeWidth, nativeHeight, canvasWidth, canvasHeight);
-
-            int decodeWidth = Math.Min(desiredWidth, nativeWidth);
-            int decodeHeight = Math.Min(desiredHeight, nativeHeight);
-
-            DecodeHwAccelPlan plan = _decodePlans.TryGetValue(media.Id, out DecodeHwAccelPlan? resolvedPlan)
-                ? resolvedPlan
-                : DecodeHwAccelPlan.Software;
-
-            //defaults to the node's own original source path when
-            //ContentPreparation found no suitable cache entry
-            string decodeSourcePath = _decodeSourcePaths.TryGetValue(media.Id, out string? overridden)
-                ? overridden
-                : media.Source.Path;
-
-            //true only when the file actually being opened is an
-            //OptimizedMediaCache entry — never the node's own original source
-            bool fastOpen = decodeSourcePath != media.Source.Path;
-
-            //Speed retimes the decode itself (see SourceDecoder.Start), so
-            //NextFrame keeps handing back exactly one frame per timeline frame
-            SourceDecoder decoder = SourceDecoder.Start(
-                decodeSourcePath, startSeconds, _fps, decodeWidth, decodeHeight, plan, fastOpen, clip.Speed);
-
-            _videoDecoders[media.Id] = decoder;
-
-            if (!_videoDecodersByClip.TryGetValue(clip, out List<Guid>? list))
-                _videoDecodersByClip[clip] = list = [];
-            list.Add(media.Id);
-
-            return decoder;
+            return new VideoReaderOptions(
+                _options.ReadMode, startAt, _options.Fps, input.Clip.Speed, width, height, callerOwnsFrames);
         }
 
-        private SKImage GetOrLoadStaticImage(Guid nodeId, string path)
+        private void Release(MediaInput input)
         {
-            if (_staticContent.TryGetValue(nodeId, out SKImage? cached))
-                return cached;
+            input.Buffer?.Dispose();
+            input.Buffer = null;
+            input.Reader?.Dispose();
+            input.Reader = null;
+            input.Prepared?.Dispose();
+            input.Prepared = null;
 
-            using SKData data = SKData.Create(path)
-                ?? throw new InvalidOperationException($"Could not read '{path}'.");
-
-            SKImage image = SKImage.FromEncodedData(data)
-                ?? throw new InvalidOperationException($"Could not decode image '{path}'.");
-
-            _staticContent[nodeId] = image;
-            return image;
+            //still preparing: dispose whatever it produces once it's done
+            if (input.Preparing is { } preparing)
+            {
+                input.Preparing = null;
+                preparing.ContinueWith(static t => { if (t.IsCompletedSuccessfully) t.Result.Dispose(); }, TaskScheduler.Default);
+            }
         }
 
-        private SKImage GetOrRasterizeText(TextInputNode text, int canvasWidth, int canvasHeight)
+        // ---------------------------------------------------------------
+        // Timeline arithmetic
+        // ---------------------------------------------------------------
+
+        private TimeSpan ContentTimeOf(Clip clip, int frame) =>
+            TimeSpan.FromSeconds(FrameStateResolver.ClipSecondsAt(clip, FrameStateResolver.TimeOfFrame(frame, _options.Fps)));
+
+        /// <summary>
+        /// How far past its own end a clip is still composited: through the
+        /// transition into the next clip, if its channel has one (the outgoing
+        /// clip is drawn under it).
+        /// </summary>
+        private static TimeSpan ReachEnd(Channel? channel, Clip clip)
         {
-            if (_staticContent.TryGetValue(text.Id, out SKImage? cached))
-                return cached;
+            channel ??= clip.Channel;
+            TimeSpan transition = channel?.Transitions.FirstOrDefault(t => ReferenceEquals(t.From, clip))?.Duration ?? TimeSpan.Zero;
+            return clip.End + Max(TimeSpan.Zero, transition);
+        }
 
-            string path = TextRasterizer.Rasterize(text, canvasWidth, canvasHeight, out _, out _);
-            _ownedTempFiles[text.Id] = path;
+        //where a clip's buffer starts: the playhead if the clip is already on screen, else where it'll first appear
+        private int EntryFrame(Clip clip, TimeSpan reachEnd, int frameIndex)
+        {
+            int first = (int)Math.Ceiling(clip.Start.TotalSeconds * _options.Fps - 1e-9);
+            int last = (int)Math.Ceiling(reachEnd.TotalSeconds * _options.Fps - 1e-9) - 1;
 
-            SKImage image = GetOrLoadStaticImage(text.Id, path);
-            return image;
+            return _options.Direction > 0 ? Math.Max(first, frameIndex) : Math.Min(last, frameIndex);
+        }
+
+        private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+
+        private static bool WaitQuietly(Task task, TimeSpan timeout)
+        {
+            try { return task.Wait(timeout); }
+            catch (AggregateException) { return true; } //finished, by failing; TryTakePrepared records it
+        }
+
+        private static SourceUnavailableException AsUnavailable(Exception? ex, Source source) => ex as SourceUnavailableException
+            ?? new SourceUnavailableException(SourceUnavailableReason.DecodeError, $"{Describe(source)} could not be prepared.", ex);
+
+        /// <summary>A person-readable name for a source: its kind id, and its file if it has one.</summary>
+        private static string Describe(Source source)
+        {
+            string kind = source.GetType().GetCustomAttribute<SourceKindAttribute>()?.Id ?? source.GetType().Name;
+            return source is IFileBackedSource file ? $"{kind}: {file.FilePath}" : kind;
+        }
+
+        // ---------------------------------------------------------------
+        // Not-yet-sources: text and nested timelines
+        // ---------------------------------------------------------------
+
+        private (SKImage, bool) GetOrRasterizeText(TextInputNode text, int frameIndex, int canvasWidth, int canvasHeight)
+        {
+            if (_staticContent.TryGetValue(text.Id, out SKImage? cached)) return (cached, false);
+
+            if (_brokenStatic.Contains(text.Id))
+                return (MediaPlaceholder.Get(canvasWidth, canvasHeight, SourceUnavailableReason.DecodeError), false);
+
+            try
+            {
+                string path = TextRasterizer.Rasterize(text, canvasWidth, canvasHeight, out _, out _);
+                _ownedTempFiles[text.Id] = path;
+
+                using SKData data = SKData.Create(path) ?? throw new InvalidOperationException($"Could not read '{path}'.");
+                SKImage image = SKImage.FromEncodedData(data) ?? throw new InvalidOperationException($"Could not decode '{path}'.");
+
+                _staticContent[text.Id] = image;
+                return (image, false);
+            }
+            catch (Exception ex)
+            {
+                _brokenStatic.Add(text.Id);
+                EditSharpConfig.Logger.LogWarning($"A text node couldn't be rasterized, showing a placeholder: {ex.Message}");
+
+                _options.Report?.Record(text.Id, "text", SourceUnavailableReason.DecodeError, ex.Message,
+                    FrameStateResolver.TimeOfFrame(frameIndex, _options.Fps));
+
+                return (MediaPlaceholder.Get(canvasWidth, canvasHeight, SourceUnavailableReason.DecodeError), false);
+            }
         }
 
         private NestedTimelineRenderer GetOrCreateNestedRenderer(TimelineVideoInputNode embed)
         {
-            if (_nestedRenderers.TryGetValue(embed.Id, out NestedTimelineRenderer? existing))
-                return existing;
+            if (_nestedRenderers.TryGetValue(embed.Id, out NestedTimelineRenderer? existing)) return existing;
 
-            var renderer = new NestedTimelineRenderer(embed.Reference, _fps, _hwAccel);
+            //nested timelines read on demand, in the same mode and under the same failure policy as their parent
+            var renderer = new NestedTimelineRenderer(embed.Reference, _options with { Buffered = false, Direction = 1 });
             _nestedRenderers[embed.Id] = renderer;
             return renderer;
         }
 
-        /// <summary>
-        /// Terminates and forgets every Video-type VideoSourceNode decoder
-        /// belonging to `clip`, once its visible window is over (see
-        /// ContentPreparation's decoder-release schedule). A no-op for
-        /// any clip that never had one.
-        /// </summary>
-        public void ReleaseDecoder(Clip clip)
-        {
-            if (!_videoDecodersByClip.Remove(clip, out List<Guid>? nodeIds)) return;
-
-            foreach (Guid nodeId in nodeIds)
-            {
-                if (_videoDecoders.Remove(nodeId, out SourceDecoder? decoder))
-                    decoder.Dispose();
-            }
-        }
-
         public void Dispose()
         {
-            foreach (SourceDecoder decoder in _videoDecoders.Values) decoder.Dispose();
-            _videoDecoders.Clear();
-            _videoDecodersByClip.Clear();
+            foreach (MediaInput input in _media.Values) Release(input);
+            _media.Clear();
 
             foreach (SKImage image in _staticContent.Values) image.Dispose();
             _staticContent.Clear();

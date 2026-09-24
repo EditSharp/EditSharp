@@ -43,7 +43,7 @@ namespace EditSharp.Compositing
     {
         public static FrameState Resolve(Timeline timeline, int frameIndex, int fps)
         {
-            TimeSpan time = TimeSpan.FromSeconds(frameIndex / (double)fps);
+            TimeSpan time = TimeOfFrame(frameIndex, fps);
 
             var channels = new List<FrameChannel>();
 
@@ -135,13 +135,20 @@ namespace EditSharp.Compositing
             //content time: Speed is how fast the clip's graph plays against
             //the timeline, and everything downstream — keyframes, generators,
             //source frame selection, nested timelines — lives in content time
-            double clipSeconds = (time - clip.Start).TotalSeconds * clip.Speed;
-
             return new FrameClip
             {
                 Clip = clip,
-                ClipSeconds = clipSeconds,
+                ClipSeconds = ClipSecondsAt(clip, time),
             };
         }
+
+        /// <summary>
+        /// The one content-time formula every frame consumer shares — prefetch
+        /// buffers match frames by exact content time, so nothing may compute
+        /// it any other way.
+        /// </summary>
+        public static double ClipSecondsAt(Clip clip, TimeSpan time) => (time - clip.Start).TotalSeconds * clip.Speed;
+
+        public static TimeSpan TimeOfFrame(int frameIndex, int fps) => TimeSpan.FromSeconds(frameIndex / (double)fps);
     }
 }

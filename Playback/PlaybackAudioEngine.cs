@@ -62,7 +62,7 @@ namespace EditSharp.Playback
             Timeline timeline, int fps, int canvasWidth, int canvasHeight,
             TimeSpan startPosition,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
-            PlaybackReferenceClock referenceClock, bool followsReferenceClock,
+            PlaybackReferenceClock referenceClock, bool followsReferenceClock, bool dropsLateChunks,
             Action<AudioSampleEventArgs> onSample, CancellationToken token)
         {
             try
@@ -77,7 +77,7 @@ namespace EditSharp.Playback
             }
  
             _pumpTask = Task.Run(
-                () => PumpAsync(startPosition, startGate, pauseGate, referenceClock, followsReferenceClock, onSample, token),
+                () => PumpAsync(startPosition, startGate, pauseGate, referenceClock, followsReferenceClock, dropsLateChunks, onSample, token),
                 token);
         }
  
@@ -101,9 +101,12 @@ namespace EditSharp.Playback
         private async Task PumpAsync(
             TimeSpan startPosition,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
-            PlaybackReferenceClock referenceClock, bool followsReferenceClock,
+            PlaybackReferenceClock referenceClock, bool followsReferenceClock, bool dropsLateChunks,
             Action<AudioSampleEventArgs> onSample, CancellationToken token)
         {
+            //FrameDropping: a chunk already a whole chunk behind the clock is dropped, not played late
+            TimeSpan chunkDuration = TimeSpan.FromSeconds(ChunkBytes / (double)BytesPerSecond);
+
             long byteOffset = (long)(startPosition.TotalSeconds * BytesPerSecond);
             byteOffset -= byteOffset % BytesPerFrame;
  
@@ -144,6 +147,9 @@ namespace EditSharp.Playback
                 TimeSpan targetElapsed = TimeSpan.FromSeconds(bytesDelivered / (double)BytesPerSecond);
                 TimeSpan position = startPosition + targetElapsed;
                 bytesDelivered += toDeliver;
+
+                if (followsReferenceClock && dropsLateChunks && referenceClock.Position - position > chunkDuration)
+                    continue;
  
                 while (true)
                 {

@@ -12,7 +12,8 @@ using EditSharp.Components;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes.Sources;
-using EditSharp.Caching.ScrubProxy;
+using EditSharp.Components.Sources;
+using EditSharp.Components.Sources.Video;
 using EditSharp.Compositing;
 using EditSharp.Compositing.Gpu;
 using EditSharp.Compositing.Sources;
@@ -778,12 +779,6 @@ namespace EditSharp.Playback
         /// </summary>
         public PlaybackState State => _state;
 
-        // Always true now — see class remarks, SCRUB/REVERSE VIA RAW SCRUB
-        // PROXIES. Kept (rather than removed) purely for API compatibility
-        // with existing callers that gate ScrubToAsync on this; safe to
-        // stop checking it.
-        public bool SupportsScrubbing { get; private set; } = true;
-
         public event EventHandler<AudioSampleEventArgs>? AudioSample;
 
         protected virtual void OnAudioSample(AudioSampleEventArgs e)
@@ -810,19 +805,6 @@ namespace EditSharp.Playback
         protected virtual void OnPlaybackStarted(EventArgs e)
         {
             PlaybackStarted?.Invoke(this, e);
-        }
-
-        /// <summary>
-        /// See class remarks, ScrubProxyReady EVENT — fires whenever a
-        /// background-kicked-off scrub proxy build completes successfully.
-        /// Purely a notification; nothing internally depends on anyone
-        /// handling it, and firing it never touches session state itself.
-        /// </summary>
-        public event EventHandler? ScrubProxyReady;
-
-        protected virtual void OnScrubProxyReady(EventArgs e)
-        {
-            ScrubProxyReady?.Invoke(this, e);
         }
 
         private readonly object _stateLock = new();
@@ -866,11 +848,8 @@ namespace EditSharp.Playback
         private SurfacePool? _scrubSurfacePool;
 
         // Rebuilt every scrub session (EndScrubbing -> next
-        // BuildScrubSessionAsync) — plain file handles/dictionaries, no GPU
-        // resources, so there's no reason to make these persistent too.
-        private ConcurrentDictionary<Guid, ScrubProxyEntry>? _scrubProxies;
-        private HashSet<Guid>? _scrubProxyRequested;
-        private ScrubFrameSource? _scrubContentSource;
+        // BuildScrubSessionAsync): random-access readers, no GPU resources.
+        private ClipContentSource? _scrubContentSource;
 
         // Memoized one-time scrub-session setup — see class remarks, SCRUB
         // COALESCING. Started at most once per session; every ScrubToAsync
@@ -968,7 +947,8 @@ namespace EditSharp.Playback
                 bool audioParticipates = Math.Abs(Speed - 1f) < 0.0001f;
 
                 bool videoFollows = audioParticipates && PlaybackMode == PlaybackMode.SyncToAudio;
-                bool audioFollows = audioParticipates && PlaybackMode == PlaybackMode.EveryFrame;
+                bool audioFollows = audioParticipates && PlaybackMode is PlaybackMode.EveryFrame or PlaybackMode.FrameDropping;
+                bool audioDropsLate = PlaybackMode == PlaybackMode.FrameDropping;
 
                 var startGate = new PlaybackStartGate(
                     audioParticipates ? 2 : 1,
@@ -1003,7 +983,7 @@ namespace EditSharp.Playback
                             Timeline, RenderSettings.Framerate,
                             (int)RenderSettings.Resolution.X, (int)RenderSettings.Resolution.Y,
                             resolvedStart, startGate, pauseGate,
-                            referenceClock, audioFollows, args => OnAudioSample(args), token))
+                            referenceClock, audioFollows, audioDropsLate, args => OnAudioSample(args), token))
                         .ContinueWith(t =>
                         {
                             if (t.IsFaulted)
@@ -1086,38 +1066,6 @@ namespace EditSharp.Playback
 
         /// <summary>True if `token` belongs to the session currently installed — false once Stop() or a newer Play() has replaced it.</summary>
         private bool IsCurrentSession(CancellationToken token) => _cts != null && _cts.Token == token;
-
-        /// <summary>
-        /// Always succeeds now — see class remarks, SCRUB/REVERSE VIA RAW
-        /// SCRUB PROXIES. Kept for API compatibility with existing callers
-        /// that gate ScrubToAsync on this; safe to stop calling.
-        /// </summary>
-        public Task<bool> RefreshScrubbingSupportAsync(CancellationToken ct = default)
-        {
-            SupportsScrubbing = true;
-            return Task.FromResult(true);
-        }
-
-        /// <summary>
-        /// Builds every video source referenced by Timeline's own scrub
-        /// proxy ahead of need, so a later scrub/reverse session's own
-        /// setup (EnsureScrubSessionBaseAsync) finds everything already
-        /// cached and pays no build cost at all — the opt-in "generate
-        /// proxies beforehand" entry point (see class remarks). Entirely
-        /// optional: a scrub/reverse session builds whatever's still
-        /// missing on demand either way (in the BACKGROUND now, without
-        /// blocking — see class remarks, SCRUB PROXY BUILDS RUN ON A REAL
-        /// BACKGROUND THREAD). Safe to call at any time, including while a
-        /// scrub session is already active or playback is running — it
-        /// only ever reads/builds via ScrubProxyCache, it never touches
-        /// this instance's own scrub-session state. UNLIKE that background
-        /// path, THIS method is still fully awaited/blocking for ITS OWN
-        /// caller — that is the entire point of calling it explicitly ahead
-        /// of time.
-        /// </summary>
-        public Task PrewarmScrubProxiesAsync(CancellationToken ct = default) =>
-            Task.WhenAll(EnumerateVideoSourcePaths(Timeline)
-                .Select(path => ScrubProxyCache.PrewarmAsync(path, RenderSettings.HardwareAccelerator, ct)));
 
         /// <summary>
         /// Renders and delivers one frame at `position`, via VideoFrame.
@@ -1272,95 +1220,36 @@ namespace EditSharp.Playback
         }
 
         /// <summary>
-        /// Resolves the FrameState at `position` and composites exactly one
-        /// frame at it. Shared by ScrubToAsync (on demand) and
-        /// ReverseVideoLoopAsync (on its own pacing timer) — both are,
-        /// mechanically, "compose one frame at an arbitrary position,
-        /// instantly."
-        ///
-        /// EVERY GPU-TOUCHING STEP — including PrefetchAsync, which for
-        /// generator/noise/nested-timeline nodes rents/creates surfaces
-        /// through `pool` and therefore through its backing GRContext, not
-        /// just FrameCompositor.RenderFrame itself — runs as ONE unit of
-        /// work on `gpuThread`, the dedicated thread that owns `pool`'s
-        /// GpuContext. See class remarks, GPU WORK MUST STAY ON ONE
-        /// THREAD. PrefetchAsync is blocked on synchronously
-        /// (`.GetAwaiter().GetResult()`) INSIDE that unit of work rather
-        /// than awaited — safe only because ScrubFrameSource's own remarks
-        /// document it as fully synchronous under the hood (always returns
-        /// Task.CompletedTask, and every proxy frame it reads is a plain
-        /// CPU read — see its remarks, EVERY VIDEO-PROXY FRAME IS READ ON
-        /// THE CPU), so this never actually blocks a thread on real I/O or
-        /// attempts a reentrant dispatch onto `gpuThread` from within
-        /// itself.
+        /// One frame at an arbitrary position, for scrubbing: prepares the
+        /// sources of every clip visible there (random-access readers, so any
+        /// position in any order), then composes it on the scrub GPU thread.
         /// </summary>
-        private Task<(byte[] Buffer, int Length)> ComposeInstantFrameAsync(
-            ScrubFrameSource contentSource, SurfacePool pool, GpuThreadDispatcher gpuThread,
+        private async Task<(byte[] Buffer, int Length)> ComposeInstantFrameAsync(
+            ClipContentSource contentSource, SurfacePool pool, GpuThreadDispatcher gpuThread,
             TimeSpan position, int width, int height, int fps, CancellationToken ct = default)
         {
             int frameIndex = (int)(position.TotalSeconds * fps);
             FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps);
 
-            return gpuThread.RunAsync(() =>
-            {
-                foreach (FrameChannel channel in state.Channels)
-                {
-                    foreach (FrameClip frameClip in channel.Clips)
-                    {
-                        if (frameClip.Clip is VideoClip videoClip)
-                        {
-                            contentSource.PrefetchAsync(videoClip, frameClip.ClipSeconds, width, height, pool, ct)
-                                .GetAwaiter().GetResult();
-                        }
-                    }
-                }
+            await contentSource.PrepareAsync(VisibleClips(state), ct).ConfigureAwait(false);
 
-                (byte[] buffer, int length) = FrameCompositor.RenderFrame(
-                    state, contentSource, width, height, fps, pool);
-
-                contentSource.ClearPrefetch();
-
-                return (buffer, length);
-            });
+            return await gpuThread.RunAsync(() =>
+                FrameCompositor.RenderFrame(state, contentSource, width, height, fps, pool)).ConfigureAwait(false);
         }
 
-        /// <summary>
-        /// Kicks off the one-time scrub-session setup at most once
-        /// (_scrubSetupTask, memoized) and returns whatever attempt is
-        /// current — see class remarks, SCRUB COALESCING, point 2. Callers
-        /// wrap the returned Task in their own cancellable WaitAsync rather
-        /// than this method taking a CancellationToken itself: the setup
-        /// must always run to completion once started, regardless of which
-        /// caller triggered it or whether that caller is later superseded.
-        /// </summary>
+        private static IEnumerable<VideoClip> VisibleClips(FrameState state) =>
+            state.Channels.SelectMany(channel => channel.Clips).Select(frameClip => frameClip.Clip).OfType<VideoClip>();
+
+        private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+
         private Task EnsureScrubSessionBaseAsync(int width, int height) =>
             _scrubSetupTask ??= BuildScrubSessionAsync(width, height);
 
         /// <summary>
-        /// Rebuilds `_scrubContentSource`/`_scrubProxies` every session, but
-        /// creates `_scrubGpuThread`/`_scrubGpuContext`/`_scrubSurfacePool`
-        /// AT MOST ONCE for this Playback instance's whole life — see class
-        /// remarks, SCRUB GPU CONTEXT IS NOW PERSISTENT. GpuContext.Create
-        /// and the SurfacePool constructor both run on `_scrubGpuThread`
-        /// itself (see class remarks, GPU WORK MUST STAY ON ONE THREAD), so
-        /// this method's own await here is what actually makes that
-        /// thread-confinement possible.
-        ///
-        /// NO LONGER AWAITS INDIVIDUAL SOURCE PROXY RESOLUTION AT ALL — see
-        /// class remarks, SCRUB PROXY BUILDS RUN ON A REAL BACKGROUND
-        /// THREAD, NEVER BLOCK SESSION STARTUP. KickOffScrubProxyResolution
-        /// fires every referenced source's resolution on the ThreadPool and
-        /// returns immediately; this method (and therefore
-        /// EnsureScrubSessionBaseAsync/ScrubToAsync's own await on it)
-        /// completes as soon as the GPU context/pool exist, regardless of
-        /// whether any given source's proxy has actually finished building.
-        ///
-        /// `_scrubGpuContext`/`_scrubSurfacePool`/`_scrubGpuThread` back
-        /// this session's own COMPOSITING (ComposeInstantFrameAsync's
-        /// PrefetchAsync/RenderFrame calls) — the ScrubFrameSource this
-        /// method constructs does NOT take them: it never touches the GPU
-        /// itself, since every proxy frame it reads is a plain CPU read
-        /// (see that class's own remarks).
+        /// The GPU context/pool are created once per Playback and kept (see
+        /// class remarks, GPU WORK MUST STAY ON ONE THREAD); the content source
+        /// is rebuilt every scrub session. Nothing here builds proxies — a
+        /// source without one yet shows its ProxyPending placeholder.
         /// </summary>
         private async Task BuildScrubSessionAsync(int width, int height)
         {
@@ -1380,38 +1269,19 @@ namespace EditSharp.Playback
                 _scrubSurfacePool = pool;
             }
 
-            var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
-
-            KickOffScrubProxyResolution(Timeline, RenderSettings.HardwareAccelerator, proxies);
-
-            _scrubProxies = proxies;
-            _scrubProxyRequested = new HashSet<Guid>(
-                Timeline.VideoChannels.SelectMany(c => c.Clips).OfType<VideoClip>()
-                    .SelectMany(v => v.Graph.AllNodes.OfType<VideoSourceNode>())
-                    .Where(m => m.Source.Type == SourceType.Video)
-                    .Select(m => m.Id));
-            _scrubContentSource = new ScrubFrameSource(
-                RenderSettings.Framerate, RenderSettings.HardwareAccelerator, proxies);
+            _scrubContentSource = new ClipContentSource(new ContentSourceOptions(
+                RenderSettings.Framerate, width, height, RenderSettings.HardwareAccelerator, RenderSettings.SourceMode,
+                VideoReadMode.RandomAccess, ContentFailurePolicy.Preview));
         }
 
         /// <summary>
-        /// One frame of one clip, rendered on its own - the clip's whole
-        /// graph, at a content time, onto a canvas of the given size - and
-        /// handed back as tightly packed RGBA8888 pixels. This is what a
-        /// thumbnail is: the clip as it would look, not its source.
+        /// One clip composited on its own at `contentTime` (thumbnails). Media
+        /// is read one-shot (VideoSource.GetFrameAtAsync, in
+        /// RenderSettings.SourceMode) so nothing stays open between thumbnails.
+        /// Complete is false when any of it showed a placeholder for something
+        /// still on its way — a proxy not built that far yet, a source still
+        /// opening — so the frame is worth asking for again later.
         /// </summary>
-        /// <remarks>
-        /// Runs on the scrub session, and so shares its GPU context, surface
-        /// pool, proxy readers and proxies with ScrubToAsync; the scrub gate
-        /// serialises the two. The canvas can be any size - transforms are
-        /// canvas-relative, so a small canvas is the same picture, smaller -
-        /// and every size gets its own surfaces in the pool.
-        ///
-        /// A clip whose media proxy is not built yet renders with the
-        /// offline placeholder and <see cref="ClipFrame.Complete"/> false,
-        /// and starts the proxy build if nothing has; <see cref="ScrubProxyReady"/>
-        /// says when to ask again. Content time is clamped at zero.
-        /// </remarks>
         public async Task<ClipFrame> RenderClipFrameAsync(
             VideoClip clip, TimeSpan contentTime, int width, int height, CancellationToken ct = default)
         {
@@ -1429,75 +1299,46 @@ namespace EditSharp.Playback
             {
                 await EnsureScrubSessionBaseAsync(canvasWidth, canvasHeight).WaitAsync(ct).ConfigureAwait(false);
 
-                ScrubFrameSource source = _scrubContentSource!;
+                ClipContentSource source = _scrubContentSource!;
                 SurfacePool pool = _scrubSurfacePool!;
-                ConcurrentDictionary<Guid, ScrubProxyEntry> proxies = _scrubProxies!;
-                HashSet<Guid> requested = _scrubProxyRequested ??= new HashSet<Guid>();
 
-                bool complete = true;
-                var missing = new Dictionary<string, List<Guid>>();
-
-                foreach (VideoSourceNode media in clip.Graph.AllNodes.OfType<VideoSourceNode>())
-                {
-                    if (media.Source.Type != SourceType.Video || proxies.ContainsKey(media.Id)) continue;
-
-                    complete = false;
-
-                    if (!requested.Add(media.Id)) continue;
-
-                    if (!missing.TryGetValue(media.Source.Path, out List<Guid>? ids))
-                        missing[media.Source.Path] = ids = new List<Guid>();
-
-                    ids.Add(media.Id);
-                }
-
-                foreach (KeyValuePair<string, List<Guid>> entry in missing)
-                    KickOffProxyResolution(entry.Key, entry.Value, RenderSettings.HardwareAccelerator, proxies);
+                (IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> media, bool mediaComplete) =
+                    await source.GetMediaFramesOnceAsync(clip, clipSeconds, width, height, ct).ConfigureAwait(false);
 
                 return await _scrubGpuThread!.RunAsync(() =>
                 {
-                    ct.ThrowIfCancellationRequested();
+                    IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> resolved =
+                        source.GetContent(clip, clipSeconds, 0, width, height, pool, media);
+                    bool complete = mediaComplete && !source.LastFrameIncomplete;
 
-                    source.PrefetchAsync(clip, clipSeconds, width, height, pool, ct).GetAwaiter().GetResult();
+                    var plain = new Dictionary<Guid, SKImage>(resolved.Count);
+                    foreach (KeyValuePair<Guid, (SKImage Image, bool Transient)> entry in resolved)
+                        plain[entry.Key] = entry.Value.Image;
 
                     try
                     {
-                        IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> resolved =
-                            source.GetContent(clip, clipSeconds, width, height, pool);
-
-                        var plain = new Dictionary<Guid, SKImage>(resolved.Count);
-                        foreach (KeyValuePair<Guid, (SKImage Image, bool Transient)> entry in resolved)
-                            plain[entry.Key] = entry.Value.Image;
+                        var context = new SkClipChainContext(width, height, fps, 1.0 / fps);
+                        SKSurface surface = pool.Rent(width, height);
 
                         try
                         {
-                            var context = new SkClipChainContext(width, height, fps, 1.0 / fps);
-                            SKSurface surface = pool.Rent(width, height);
+                            surface.Canvas.Clear(SKColors.Black);
+                            ClipCompositor.Composite(surface.Canvas, clip, plain, clipSeconds, context, pool);
 
-                            try
-                            {
-                                surface.Canvas.Clear(SKColors.Black);
-                                ClipCompositor.Composite(surface.Canvas, clip, plain, clipSeconds, context, pool);
-
-                                using SKImage image = surface.Snapshot();
-                                return new ClipFrame(ReadPixels(image, width, height), width, height, complete);
-                            }
-                            finally
-                            {
-                                pool.Return(surface, width, height);
-                            }
+                            using SKImage image = surface.Snapshot();
+                            return new ClipFrame(ReadPixels(image, width, height), width, height, complete);
                         }
                         finally
                         {
-                            foreach (KeyValuePair<Guid, (SKImage Image, bool Transient)> entry in resolved)
-                            {
-                                if (entry.Value.Transient) entry.Value.Image.Dispose();
-                            }
+                            pool.Return(surface, width, height);
                         }
                     }
                     finally
                     {
-                        source.ClearPrefetch();
+                        foreach (KeyValuePair<Guid, (SKImage Image, bool Transient)> entry in resolved)
+                        {
+                            if (entry.Value.Transient) entry.Value.Image.Dispose();
+                        }
                     }
                 }).ConfigureAwait(false);
             }
@@ -1543,15 +1384,6 @@ namespace EditSharp.Playback
 
                 _scrubContentSource?.Dispose();
                 _scrubContentSource = null;
-
-                _scrubProxies = null;
-                _scrubProxyRequested = null;
-
-                // `_scrubGpuThread`/`_scrubGpuContext`/`_scrubSurfacePool`
-                // are DELIBERATELY NOT touched here — see class remarks,
-                // SCRUB GPU CONTEXT IS NOW PERSISTENT. They live for this
-                // Playback instance's whole life; only Dispose() tears them
-                // down, once, for real.
             }
             finally
             {
@@ -1560,135 +1392,16 @@ namespace EditSharp.Playback
         }
 
         /// <summary>
-        /// Fires off resolution for every DISTINCT Video-type source path
-        /// referenced by `timeline` — see class remarks, ONE BACKGROUND
-        /// BUILD PER DISTINCT SOURCE PATH, NOT PER NODE — as an independent
-        /// background task each (see KickOffProxyResolution) and returns
-        /// IMMEDIATELY, without waiting for any of them. Deliberately NOT
-        /// ContentPreparation.PrepareContentAsync, which probes
-        /// native size/decode plan and consults OptimizedMediaCache — none
-        /// of that applies here at all any more; this only ever needs each
-        /// source's already-resolved-or-built ScrubProxyEntry.
-        ///
-        /// GROUPS VideoSourceNodes BY Source.Path FIRST (fixed here — see
-        /// class remarks): several distinct nodes referencing the SAME
-        /// source path collapse into ONE resolution/build for that path,
-        /// whose result is then written into `proxies` for every one of
-        /// those nodes' own Ids once it completes.
-        /// </summary>
-        private void KickOffScrubProxyResolution(
-            Timeline timeline, HardwareAccelerator hwAccel,
-            ConcurrentDictionary<Guid, ScrubProxyEntry> proxies)
-        {
-            var nodeIdsByPath = new Dictionary<string, List<Guid>>();
-
-            foreach (VideoChannel channel in timeline.VideoChannels)
-            {
-                foreach (Clip clip in channel.Clips)
-                {
-                    if (clip is not VideoClip video) continue;
-
-                    foreach (VideoSourceNode media in video.Graph.AllNodes.OfType<VideoSourceNode>())
-                    {
-                        if (media.Source.Type != SourceType.Video) continue;
-
-                        if (!nodeIdsByPath.TryGetValue(media.Source.Path, out List<Guid>? nodeIds))
-                            nodeIdsByPath[media.Source.Path] = nodeIds = new List<Guid>();
-
-                        nodeIds.Add(media.Id);
-                    }
-                }
-            }
-
-            foreach (KeyValuePair<string, List<Guid>> entry in nodeIdsByPath)
-                KickOffProxyResolution(entry.Key, entry.Value, hwAccel, proxies);
-        }
-
-        /// <summary>
-        /// Resolves (looking up, or building on a cache miss) ONE source
-        /// path's scrub proxy via `Task.Run(...)` — a REAL, guaranteed
-        /// ThreadPool hop regardless of any captured SynchronizationContext,
-        /// since `ScrubProxyCache.GetOrBuildAsync`'s own await chain has
-        /// none of its own ConfigureAwait(false) calls (see class remarks,
-        /// SCRUB PROXY BUILDS RUN ON A REAL BACKGROUND THREAD). Called
-        /// exactly ONCE per distinct source path (see
-        /// KickOffScrubProxyResolution and class remarks, ONE BACKGROUND
-        /// BUILD PER DISTINCT SOURCE PATH, NOT PER NODE) — the single
-        /// resulting ScrubProxyEntry is written into `proxies` for EVERY
-        /// node Id in `nodeIds` that shares this path, not just one.
-        /// Fire-and-forget by design — the caller
-        /// (KickOffScrubProxyResolution) doesn't wait for this, so failures
-        /// are caught and logged HERE rather than left to fault an
-        /// unobserved Task; `proxies` simply never gains an entry for any
-        /// of these node Ids if the build fails, which ScrubFrameSource
-        /// already treats as "show the offline placeholder for it" (see
-        /// that class's own remarks) — permanently for this session, since
-        /// nothing here retries a failed build on its own.
-        /// </summary>
-        private void KickOffProxyResolution(
-            string sourcePath, IReadOnlyList<Guid> nodeIds, HardwareAccelerator hwAccel,
-            ConcurrentDictionary<Guid, ScrubProxyEntry> proxies)
-        {
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    ScrubProxyEntry resolvedEntry = await ScrubProxyCache.GetOrBuildAsync(sourcePath, hwAccel);
-                    foreach (Guid nodeId in nodeIds) proxies[nodeId] = resolvedEntry;
-                    OnScrubProxyReady(EventArgs.Empty);
-                }
-                catch (Exception ex)
-                {
-                    EditSharpConfig.Logger.LogError(
-                        $"Playback: failed to resolve a scrub proxy for '{sourcePath}': {ex}");
-                }
-            });
-        }
-
-        /// <summary>Every distinct Video-type source path referenced by `timeline` — used by PrewarmScrubProxiesAsync.</summary>
-        private static IEnumerable<string> EnumerateVideoSourcePaths(Timeline timeline) =>
-            timeline.VideoChannels
-                .SelectMany(channel => channel.Clips)
-                .OfType<VideoClip>()
-                .SelectMany(video => video.Graph.AllNodes.OfType<VideoSourceNode>())
-                .Where(media => media.Source.Type == SourceType.Video)
-                .Select(media => media.Source.Path)
-                .Distinct();
-
-        /// <summary>
-        /// BUG FOUND IN THE FIELD (fixed here): setup (PrepareContentAsync,
-        /// GpuContext.Create, SurfacePool construction, the warm-up
-        /// render) used to run with no surrounding try/catch of its own —
-        /// any exception there propagated straight out of this Task.Run'd
-        /// method without ever calling `startGate.Fault(...)`. When audio
-        /// participates, PlaybackStartGate requires BOTH participants to
-        /// reach ReadyAndWaitAsync before either is released (see its own
-        /// remarks) — if video's setup throws before it ever gets there,
-        /// the audio engine's own await on the same gate hangs forever,
-        /// since nothing was left to complete or fault it. Fixed by wrapping
-        /// the whole loop and calling Fault() on any failure that isn't an
-        /// expected OperationCanceledException from Stop()/Dispose().
-        ///
-        /// GpuContext/SurfacePool/decoders (contentSource) are `using`-
-        /// scoped for the WHOLE session here, created once and torn down
-        /// only when this method returns (Stop()/natural end/fault) — a
-        /// pause is a cheap, instantly-resumable no-op for these resources.
-        /// This was briefly changed to an eager-release-on-pause design and
-        /// then explicitly REVERTED per direct user instruction — see class
-        /// remarks, EAGER RELEASE ON PAUSE, REVERTED, for the full history
-        /// and why.
-        ///
-        /// GPU CREATE/RENDER/DISPOSE ALL RUN ON ONE DEDICATED THREAD
-        /// (`videoGpuThread`, session-scoped — created and disposed
-        /// alongside `gpuContext`/`surfacePool` themselves) — see class
-        /// remarks, GPU WORK MUST STAY ON ONE THREAD. This is the same fix
-        /// applied to scrubbing, extended here for consistency: this loop's
-        /// own awaits (Task.Delay, PlaybackPauseGate.WaitIfPausedAsync) can
-        /// resume on a different thread each time just like ScrubToAsync's
-        /// could, since nothing about that scheduling is pinned to one
-        /// thread by default — so without this, every per-frame
-        /// FrameCompositor.RenderFrame call here carried the same
-        /// cross-thread GRContext hazard scrubbing did.
+        /// Forward playback. Every source is read ahead: the content source
+        /// prepares each clip's media and starts buffering it before the clip
+        /// reaches the playhead (see ClipContentSource.Anticipate). What happens
+        /// when a frame still isn't ready in time depends on PlaybackMode:
+        ///   EveryFrame     video leads its own clock and waits for every frame; audio follows.
+        ///   SyncToAudio    video follows the audio clock; a frame not ready by the time the
+        ///                  next one is due is skipped, jumping to the frame due now.
+        ///   FrameDropping  the wall clock leads: video reports it and skips late frames the
+        ///                  same way; audio follows it and drops chunks that are already late.
+        /// A skipped frame is simply not emitted — the previous one stays on screen.
         /// </summary>
         private async Task VideoLoopAsync(
             CancellationToken token, TimeSpan startPosition,
@@ -1698,26 +1411,22 @@ namespace EditSharp.Playback
             int width = (int)RenderSettings.Resolution.X;
             int height = (int)RenderSettings.Resolution.Y;
             int fps = RenderSettings.Framerate;
-
-            var nativeSizes = new ConcurrentDictionary<Guid, (int, int)>();
-            var decodePlans = new ConcurrentDictionary<Guid, DecodeHwAccelPlan>();
-            var decodeSourcePaths = new ConcurrentDictionary<Guid, string>();
+            PlaybackMode mode = PlaybackMode;
 
             try
             {
                 try
                 {
-                    await ContentPreparation.PrepareContentAsync(
-                        Timeline, width, height, RenderSettings.HardwareAccelerator,
-                        nativeSizes, decodePlans, decodeSourcePaths).WaitAsync(token);
+                    using var contentSource = new ClipContentSource(new ContentSourceOptions(
+                        fps, width, height, RenderSettings.HardwareAccelerator, RenderSettings.SourceMode,
+                        VideoReadMode.Sequential, ContentFailurePolicy.Preview, Buffered: true, Direction: 1));
 
-                    Dictionary<Clip, TimeSpan> seekOffsets = ComputeSeekOffsets(Timeline, startPosition);
+                    int startFrame = (int)(startPosition.TotalSeconds * fps);
+                    int totalFrames = Math.Max(1, (int)Math.Ceiling(Timeline.Duration.TotalSeconds * fps));
 
-                    Dictionary<int, List<Clip>> decoderReleaseSchedule =
-                        ContentPreparation.BuildDecoderReleaseSchedule(Timeline, fps);
-
-                    using var contentSource = new ClipContentSource(
-                        fps, RenderSettings.HardwareAccelerator, nativeSizes, decodePlans, seekOffsets, decodeSourcePaths);
+                    FrameState warmupState = FrameStateResolver.Resolve(Timeline, startFrame, fps);
+                    await contentSource.PrepareAsync(VisibleClips(warmupState), token);
+                    contentSource.Anticipate(Timeline, startFrame);
 
                     using var videoGpuThread = new GpuThreadDispatcher("EditSharp-VideoGPU");
 
@@ -1728,15 +1437,10 @@ namespace EditSharp.Playback
 
                     try
                     {
-                        // Last cheap exit before the warm-up render opens
-                        // decoders — see class remarks, SUPERSEDED SESSIONS
-                        // ARE ABANDONED, NOT AWAITED.
                         token.ThrowIfCancellationRequested();
 
-                        int startFrame = (int)(startPosition.TotalSeconds * fps);
-                        int totalFrames = Math.Max(1, (int)Math.Ceiling(Timeline.Duration.TotalSeconds * fps));
-
-                        FrameState warmupState = FrameStateResolver.Resolve(Timeline, startFrame, fps);
+                        //the first frame always waits: there's nothing on screen yet to keep showing
+                        await Task.Run(() => contentSource.WaitReady(warmupState, Timeout.InfiniteTimeSpan), token);
                         (byte[] warmupBuffer, int warmupLength) = await videoGpuThread.RunAsync(() =>
                             FrameCompositor.RenderFrame(warmupState, contentSource, width, height, fps, surfacePool));
                         EditSharpConfig.Logger.LogVerbose("Video warm-up frame rendered.");
@@ -1758,15 +1462,16 @@ namespace EditSharp.Playback
                             ArrayPool<byte>.Shared.Return(warmupBuffer);
                         }
 
-                        if (decoderReleaseSchedule.TryGetValue(startFrame, out List<Clip>? finishedAtStart))
-                        {
-                            foreach (Clip clip in finishedAtStart) contentSource.ReleaseDecoder(clip);
-                        }
+                        //where the playhead really is right now, for the modes that can fall behind
+                        TimeSpan Now() => followsReferenceClock
+                            ? referenceClock.Position
+                            : startPosition + TimeSpan.FromSeconds(clock!.Elapsed.TotalSeconds * Speed);
+
+                        int skipped = 0;
 
                         for (int frameIndex = startFrame + 1; frameIndex < totalFrames; frameIndex++)
                         {
-                            TimeSpan frameOffset = TimeSpan.FromSeconds((frameIndex - startFrame) / (double)fps);
-                            TimeSpan framePosition = startPosition + frameOffset;
+                            TimeSpan framePosition = FrameStateResolver.TimeOfFrame(frameIndex, fps);
 
                             while (true)
                             {
@@ -1799,14 +1504,44 @@ namespace EditSharp.Playback
                                 break;
                             }
 
+                            TimeSpan readyWait = Timeout.InfiniteTimeSpan;
+
+                            if (mode != PlaybackMode.EveryFrame)
+                            {
+                                //already behind: go straight to the frame that's due now
+                                int due = Math.Min(totalFrames - 1, (int)(Now().TotalSeconds * fps));
+                                if (due > frameIndex)
+                                {
+                                    skipped += due - frameIndex;
+                                    frameIndex = due;
+                                    framePosition = FrameStateResolver.TimeOfFrame(frameIndex, fps);
+                                }
+
+                                //this frame may take until the next one is due, and no longer
+                                TimeSpan untilNext = FrameStateResolver.TimeOfFrame(frameIndex + 1, fps) - Now();
+                                readyWait = Max(TimeSpan.Zero, TimeSpan.FromSeconds(untilNext.TotalSeconds / Math.Max(Speed, 0.0001f)));
+                            }
+
+                            contentSource.Anticipate(Timeline, frameIndex);
                             FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps);
+
+                            bool ready = await Task.Run(() => contentSource.WaitReady(state, readyWait), token);
+
+                            if (mode == PlaybackMode.FrameDropping && !followsReferenceClock)
+                                referenceClock.Report(Now());
+
+                            if (!ready)
+                            {
+                                skipped++;
+                                continue;
+                            }
 
                             (byte[] buffer, int length) = await videoGpuThread.RunAsync(() =>
                                 FrameCompositor.RenderFrame(state, contentSource, width, height, fps, surfacePool));
 
                             if (!followsReferenceClock)
                             {
-                                TimeSpan targetElapsed = TimeSpan.FromSeconds(frameOffset.TotalSeconds / Speed);
+                                TimeSpan targetElapsed = TimeSpan.FromSeconds((framePosition - startPosition).TotalSeconds / Speed);
                                 TimeSpan actualElapsed = clock!.Elapsed;
 
                                 if (targetElapsed > actualElapsed)
@@ -1830,12 +1565,10 @@ namespace EditSharp.Playback
                             {
                                 ArrayPool<byte>.Shared.Return(buffer);
                             }
-
-                            if (decoderReleaseSchedule.TryGetValue(frameIndex, out List<Clip>? finished))
-                            {
-                                foreach (Clip clip in finished) contentSource.ReleaseDecoder(clip);
-                            }
                         }
+
+                        if (skipped > 0)
+                            EditSharpConfig.Logger.LogVerbose($"Playback skipped {skipped} frame(s) that weren't ready in time.");
 
                         TearDownAfterNaturalEnd(token);
 
@@ -1856,11 +1589,6 @@ namespace EditSharp.Playback
                 }
                 catch (Exception ex)
                 {
-                    // Setup (or an otherwise-unhandled mid-loop failure)
-                    // blew up — release whichever partner (audio, if
-                    // participating) is still waiting at the start gate
-                    // instead of leaving it to hang forever. A no-op if the
-                    // gate already opened normally.
                     startGate.Fault(ex);
                     throw;
                 }
@@ -1872,63 +1600,10 @@ namespace EditSharp.Playback
         }
 
         /// <summary>
-        /// REVERSE PLAYBACK (Speed &lt; 0): steps backward through the
-        /// timeline, reusing the exact same instant, decoder-less raw scrub
-        /// proxy read ScrubToAsync uses (ScrubFrameSource / ScrubProxyCache
-        /// / ScrubProxyReader), NOT the persistent forward-only
-        /// SourceDecoder pipe VideoLoopAsync uses, which structurally
-        /// cannot move backward at all. See Playback's class remarks,
-        /// SCRUB/REVERSE VIA RAW SCRUB PROXIES.
-        ///
-        /// Audio never participates here — Play() already gates audio to
-        /// Speed == 1 (audioParticipates), which negative Speed never
-        /// satisfies — so this loop is always the sole leader of its own
-        /// session; there is no reference-clock-follow branch to consider,
-        /// unlike VideoLoopAsync.
-        ///
-        /// PACING mirrors VideoLoopAsync's own leader pacing (a Stopwatch,
-        /// content-time-offset-scaled-by-1/|Speed|) just walking frame
-        /// indices DOWN instead of up. Every step recomposes a full frame at
-        /// its own arbitrary TimeSpan position via ComposeInstantFrameAsync,
-        /// passing `token` through so Stop()/Dispose() cancels any in-flight
-        /// work promptly (same cancellation plumbing ScrubToAsync uses —
-        /// see class remarks, SCRUB COALESCING).
-        ///
-        /// VISUAL CHARACTER: every step reads its OWN scrub-proxy frame at
-        /// its own exact position — see class remarks for why this now
-        /// looks like a smooth, evenly-paced backward step at the proxy's
-        /// own fixed sample rate, not the earlier keyframe-snapped "fast
-        /// rewind" jumpiness.
-        ///
-        /// PROXY RESOLUTION NO LONGER BLOCKS THIS LOOP'S OWN STARTUP EITHER
-        /// — see class remarks, SCRUB PROXY BUILDS RUN ON A REAL BACKGROUND
-        /// THREAD: `proxies` is populated via the SAME
-        /// KickOffScrubProxyResolution ScrubToAsync's own session setup
-        /// uses (deduplicated by source path — see ONE BACKGROUND BUILD
-        /// PER DISTINCT SOURCE PATH, NOT PER NODE), fired off and NOT
-        /// awaited, so this loop's warm-up frame can render (via the
-        /// offline placeholder for whatever isn't ready yet — see
-        /// ScrubFrameSource's own remarks) without waiting on any source's
-        /// build to finish first.
-        ///
-        /// GpuContext/SurfacePool/contentSource are session-scoped here
-        /// too — same revert as VideoLoopAsync, see class remarks, EAGER
-        /// RELEASE ON PAUSE, REVERTED. Uses its OWN session-scoped
-        /// `reverseGpuThread` (NOT the persistent `_scrubGpuThread` scrub
-        /// sessions use) — a reverse session already creates and tears down
-        /// its own GpuContext/SurfacePool every time it starts/stops
-        /// (unlike scrubbing, this wasn't changed to be persistent, since
-        /// the user's request to preserve the GPU context was specifically
-        /// about scrubbing), so a matching session-scoped dispatcher is the
-        /// right shape here — see class remarks, GPU WORK MUST STAY ON ONE
-        /// THREAD.
-        ///
-        /// `gpuContext`/`surfacePool`/`reverseGpuThread` back this
-        /// session's own COMPOSITING (ComposeInstantFrameAsync's
-        /// PrefetchAsync/RenderFrame calls) — the ScrubFrameSource this
-        /// method constructs does NOT take them: it never touches the GPU
-        /// itself, since every proxy frame it reads is a plain CPU read
-        /// (see that class's own remarks).
+        /// Reverse playback, video only. Reads are random-access (the proxy),
+        /// buffered BEHIND the playhead, and paced by this loop's own clock.
+        /// EveryFrame waits for every frame; the other modes skip a frame that
+        /// isn't ready in time and jump to the frame due now.
         /// </summary>
         private async Task ReverseVideoLoopAsync(
             CancellationToken token, TimeSpan startPosition,
@@ -1939,11 +1614,22 @@ namespace EditSharp.Playback
             int height = (int)RenderSettings.Resolution.Y;
             int fps = RenderSettings.Framerate;
             double speedMagnitude = Math.Abs(Speed);
+            PlaybackMode mode = PlaybackMode;
 
             try
             {
                 try
                 {
+                    using var contentSource = new ClipContentSource(new ContentSourceOptions(
+                        fps, width, height, RenderSettings.HardwareAccelerator, RenderSettings.SourceMode,
+                        VideoReadMode.RandomAccess, ContentFailurePolicy.Preview, Buffered: true, Direction: -1));
+
+                    int startFrame = (int)(startPosition.TotalSeconds * fps);
+
+                    FrameState warmupState = FrameStateResolver.Resolve(Timeline, startFrame, fps);
+                    await contentSource.PrepareAsync(VisibleClips(warmupState), token);
+                    contentSource.Anticipate(Timeline, startFrame);
+
                     using var reverseGpuThread = new GpuThreadDispatcher("EditSharp-ReverseGPU");
 
                     GpuContext gpuContext = await reverseGpuThread.RunAsync(() =>
@@ -1951,24 +1637,13 @@ namespace EditSharp.Playback
                     SurfacePool surfacePool = await reverseGpuThread.RunAsync(() =>
                         new SurfacePool(gpuContext.GRContext, width, height, Timeline.VideoChannels.Count));
 
-                    var proxies = new ConcurrentDictionary<Guid, ScrubProxyEntry>();
-
-                    KickOffScrubProxyResolution(Timeline, RenderSettings.HardwareAccelerator, proxies);
-
-                    using var contentSource = new ScrubFrameSource(
-                        fps, RenderSettings.HardwareAccelerator, proxies);
-
                     try
                     {
-                        // Last cheap exit before the warm-up render opens
-                        // decoders — see class remarks, SUPERSEDED SESSIONS
-                        // ARE ABANDONED, NOT AWAITED.
                         token.ThrowIfCancellationRequested();
 
-                        int startFrame = (int)(startPosition.TotalSeconds * fps);
-
-                        (byte[] warmupBuffer, int warmupLength) = await ComposeInstantFrameAsync(
-                            contentSource, surfacePool, reverseGpuThread, startPosition, width, height, fps, token);
+                        await Task.Run(() => contentSource.WaitReady(warmupState, Timeout.InfiniteTimeSpan), token);
+                        (byte[] warmupBuffer, int warmupLength) = await reverseGpuThread.RunAsync(() =>
+                            FrameCompositor.RenderFrame(warmupState, contentSource, width, height, fps, surfacePool));
                         EditSharpConfig.Logger.LogVerbose("Reverse video warm-up frame rendered.");
 
                         await startGate.ReadyAndWaitAsync(token);
@@ -1986,19 +1661,10 @@ namespace EditSharp.Playback
                             ArrayPool<byte>.Shared.Return(warmupBuffer);
                         }
 
-                        if (startFrame <= 0)
-                        {
-                            TearDownAfterNaturalEnd(token);
-                            OnEndReached(EventArgs.Empty);
-                            return;
-                        }
+                        int skipped = 0;
 
                         for (int frameIndex = startFrame - 1; frameIndex >= 0; frameIndex--)
                         {
-                            TimeSpan frameOffset = TimeSpan.FromSeconds((startFrame - frameIndex) / (double)fps);
-                            TimeSpan framePosition = startPosition - frameOffset;
-                            if (framePosition < TimeSpan.Zero) framePosition = TimeSpan.Zero;
-
                             while (true)
                             {
                                 if (token.IsCancellationRequested) return;
@@ -2015,7 +1681,33 @@ namespace EditSharp.Playback
                                 break;
                             }
 
-                            TimeSpan targetElapsed = TimeSpan.FromSeconds(frameOffset.TotalSeconds / speedMagnitude);
+                            TimeSpan readyWait = Timeout.InfiniteTimeSpan;
+
+                            if (mode != PlaybackMode.EveryFrame)
+                            {
+                                int due = Math.Max(0, startFrame - (int)(clock.Elapsed.TotalSeconds * speedMagnitude * fps));
+                                if (due < frameIndex)
+                                {
+                                    skipped += frameIndex - due;
+                                    frameIndex = due;
+                                }
+
+                                TimeSpan nextDue = TimeSpan.FromSeconds((startFrame - frameIndex + 1) / (fps * speedMagnitude));
+                                readyWait = Max(TimeSpan.Zero, nextDue - clock.Elapsed);
+                            }
+
+                            TimeSpan framePosition = FrameStateResolver.TimeOfFrame(frameIndex, fps);
+
+                            contentSource.Anticipate(Timeline, frameIndex);
+                            FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps);
+
+                            if (!await Task.Run(() => contentSource.WaitReady(state, readyWait), token))
+                            {
+                                skipped++;
+                                continue;
+                            }
+
+                            TimeSpan targetElapsed = TimeSpan.FromSeconds((startFrame - frameIndex) / (fps * speedMagnitude));
                             TimeSpan actualElapsed = clock.Elapsed;
 
                             if (targetElapsed > actualElapsed)
@@ -2024,8 +1716,8 @@ namespace EditSharp.Playback
                                 catch (OperationCanceledException) { return; }
                             }
 
-                            (byte[] buffer, int length) = await ComposeInstantFrameAsync(
-                                contentSource, surfacePool, reverseGpuThread, framePosition, width, height, fps, token);
+                            (byte[] buffer, int length) = await reverseGpuThread.RunAsync(() =>
+                                FrameCompositor.RenderFrame(state, contentSource, width, height, fps, surfacePool));
 
                             referenceClock.Report(framePosition);
 
@@ -2037,9 +1729,10 @@ namespace EditSharp.Playback
                             {
                                 ArrayPool<byte>.Shared.Return(buffer);
                             }
-
-                            if (framePosition == TimeSpan.Zero) break;
                         }
+
+                        if (skipped > 0)
+                            EditSharpConfig.Logger.LogVerbose($"Reverse playback skipped {skipped} frame(s) that weren't ready in time.");
 
                         TearDownAfterNaturalEnd(token);
 
@@ -2087,34 +1780,6 @@ namespace EditSharp.Playback
 
             _audioEngine?.Dispose();
             _audioEngine = null;
-        }
-
-        /// <summary>
-        /// For every video clip already visible at `position`, the
-        /// additional offset (beyond the clip's own trim start) its
-        /// decoder(s) need to open at. Still keyed by Clip, not by node — a
-        /// clip's media inputs all start that same amount further in,
-        /// regardless of how many it has (see ClipContentSource.GetOrOpenDecoder).
-        /// </summary>
-        private static Dictionary<Clip, TimeSpan> ComputeSeekOffsets(Timeline timeline, TimeSpan position)
-        {
-            var offsets = new Dictionary<Clip, TimeSpan>();
-
-            foreach (VideoChannel channel in timeline.VideoChannels)
-            {
-                foreach (Clip clip in channel.Clips)
-                {
-                    if (clip is not VideoClip video) continue;
-                    if (!video.Graph.AllNodes.OfType<VideoSourceNode>().Any(m => m.Source.Type == SourceType.Video)) continue;
-                    if (position < clip.Start || position >= clip.End) continue;
-
-                    //content time — the decoder is opened that far into the
-                    //source, and a retimed clip covers Speed times as much
-                    offsets[clip] = clip.ToContentTime(position - clip.Start);
-                }
-            }
-
-            return offsets;
         }
 
         /// <summary>

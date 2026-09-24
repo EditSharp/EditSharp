@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Generic;
 
-namespace EditSharp.Caching.ScrubProxy
+namespace EditSharp.Caching.Proxy
 {
     /// <summary>
-    /// Encoder/decoder for ScrubProxyPixelFormat.IndexedDelta7 — DIRECT
+    /// Encoder/decoder for EsrpPixelFormat.IndexedDelta7 — DIRECT
     /// IMPLEMENTATION OF A USER-PROPOSED PSEUDOCODE DESIGN: every pixel is
     /// stored as ONE control byte that is EITHER "the nearest color in this
     /// file's own small palette" OR "a small modulation of the pixel
@@ -28,7 +28,7 @@ namespace EditSharp.Caching.ScrubProxy
     /// distinct palette colors. RGB-only (no alpha channel in the palette
     /// or the delta math) because this format is used EXCLUSIVELY for
     /// Video-type VideoSourceNode frames (see
-    /// ScrubProxyCache.EncodeFramePixels/ScrubFrameSource — Image/Text
+    /// ProxyCache.EncodeFramePixels/the scrub content source — Image/Text
     /// input nodes never go through a scrub proxy at all), and
     /// SourceDecoder's raw pipe always decodes video fully opaque — an
     /// alpha channel would cost real bits for a value that's always 255 in
@@ -64,7 +64,7 @@ namespace EditSharp.Caching.ScrubProxy
     /// but NOT acted on this round: a luma-weighted re-split of the delta
     /// bit budget, and a larger/alternate palette size, are both real
     /// levers still on the table for the 720p30 size target — see
-    /// EditSharpConfig.ScrubProxyPixelFormat's own remarks.
+    /// EditSharpConfig.ProxyFormat's own remarks.
     ///
     /// THE ENCODER MUST MIRROR THE DECODER'S OWN RECONSTRUCTED STATE, NOT
     /// THE ORIGINAL SOURCE PIXELS — the single most important correctness
@@ -96,13 +96,13 @@ namespace EditSharp.Caching.ScrubProxy
     /// FOR EITHER DIRECTION, THOUGH, BOTH TRIED AND BOTH REMOVED: an
     /// earlier GPU decode attempt was removed as unneeded complexity,
     /// since a proxy read is already a cheap, single positioned file read
-    /// regardless of pixel format (see ScrubFrameSource's own remarks);
-    /// and a later GPU encode attempt (ScrubProxyGpuEncoder, since
+    /// regardless of pixel format (see the scrub content source's own remarks);
+    /// and a later GPU encode attempt (the GPU encoder, since
     /// deleted) was measured to be dramatically slower than this plain
     /// CPU path — its own per-column sequential draw-call structure ended
     /// up dominated by GPU submission overhead, not the actual math — and
     /// also produced visibly incorrect output, so it was reverted entirely
-    /// (see ScrubProxyCache's own class remarks). Every row of every frame
+    /// (see ProxyCache's own class remarks). Every row of every frame
     /// is encoded and decoded on the CPU now.
     ///
     /// PER-PIXEL SEARCH IS EXACT, NOT A PER-CHANNEL APPROXIMATION: for each
@@ -115,7 +115,7 @@ namespace EditSharp.Caching.ScrubProxy
     /// decides palette-vs-delta in the first place. 128 evaluations is
     /// trivial next to a real frame's own pixel count, and — like every
     /// cost in this codec — is paid exactly ONCE per proxy BUILD, never
-    /// per scrub tick (see ScrubProxyCache.EncodeAsync's own remarks: a
+    /// per scrub tick (see ProxyCache.EncodeAsync's own remarks: a
     /// one-time linear pass, not a per-tick cost). A zero-delta EXACT match
     /// (this pixel's real color already equals its own left-neighbor's
     /// reconstructed color) is special-cased as an immediate, distance-0
@@ -128,9 +128,9 @@ namespace EditSharp.Caching.ScrubProxy
     /// frame USED TO carry its own freshly-built 384-byte palette (v4/v5
     /// shape); as of format version 6, IndexedDelta7 files instead store
     /// ONE palette for the WHOLE FILE (built from a sample of frames across
-    /// the source — see ScrubProxyCache.BuildAsync's sampling pass), kept
-    /// once in the file's own layout (see ScrubProxyFormat's VERSION 6
-    /// remarks) and read once by ScrubProxyReader at Open() time, exactly
+    /// the source — see ProxyCache.BuildAsync's sampling pass), kept
+    /// once in the file's own layout (see EsrpFormat's VERSION 6
+    /// remarks) and read once by EsrpReader at Open() time, exactly
     /// like the frame index table already is. This is a genuine ARCHITECTURE
     /// change to this codec's public surface, split into three pieces so
     /// each can be tested/reasoned about independently:
@@ -149,7 +149,7 @@ namespace EditSharp.Caching.ScrubProxy
     ///     helper so it can run against an EXTERNALLY SUPPLIED palette
     ///     (the shared one) instead of building its own. Encode (below)
     ///     still exists, unchanged in behavior, and still calls EncodeRows
-    ///     too — it's simply no longer what ScrubProxyCache actually calls
+    ///     too — it's simply no longer what ProxyCache actually calls
     ///     for a new build; kept as a simple, still-correct, self-contained
     ///     one-shot entry point (useful for testing this codec against a
     ///     single frame in isolation, or for any future caller that
@@ -160,18 +160,18 @@ namespace EditSharp.Caching.ScrubProxy
     /// frame) instead of a freshly-read per-frame one is exactly what its
     /// existing signature was already built to support.
     ///
-    /// THE DEFAULT PIXEL FORMAT (see EditSharpConfig.ScrubProxyPixelFormat)
+    /// THE DEFAULT PIXEL FORMAT (see EditSharpConfig.ProxyFormat)
     /// — CONFIRMED ON REAL HARDWARE to deliver a dramatic size reduction
     /// with correct behavior and good visual quality. The earlier Indexed8
     /// format it replaced as the default was removed entirely (decided in
     /// conversation: unnecessary complexity once IndexedDelta7 proved
-    /// better). See ScrubProxyPixelFormat.IndexedDelta7's own remarks for
+    /// better). See EsrpPixelFormat.IndexedDelta7's own remarks for
     /// the on-disk shape this feeds and EditSharpConfig for the build-time
     /// knob.
     /// </summary>
     internal static class IndexedDelta7Codec
     {
-        private const int PaletteSize = ScrubProxyFormat.Delta7PaletteEntryCount; // 128
+        private const int PaletteSize = EsrpFormat.Delta7PaletteEntryCount; // 128
 
         private const byte ModeBit = 0x80;
         private const byte PaletteIndexMask = 0x7F;
@@ -198,7 +198,7 @@ namespace EditSharp.Caching.ScrubProxy
         /// (`paletteOut`, exactly Delta7PaletteByteSize bytes) and one
         /// control byte per pixel (`pixelsOut`, exactly `width * height`
         /// bytes). See class remarks, SHARED/GLOBAL PALETTE (V6) — this
-        /// method is NOT what ScrubProxyCache actually calls for a new
+        /// method is NOT what ProxyCache actually calls for a new
         /// build any more (that's AccumulateHistogram + BuildPaletteFromHistogram
         /// + EncodeWithPalette instead), but is kept as a simple, still-
         /// correct, self-contained one-shot entry point.
@@ -212,9 +212,9 @@ namespace EditSharp.Caching.ScrubProxy
                 throw new ArgumentException(
                     $"source must be exactly {pixelCount * 4} bytes for a {width}x{height} RGBA8888 frame, got {source.Length}.",
                     nameof(source));
-            if (paletteOut.Length != ScrubProxyFormat.Delta7PaletteByteSize)
+            if (paletteOut.Length != EsrpFormat.Delta7PaletteByteSize)
                 throw new ArgumentException(
-                    $"paletteOut must be exactly {ScrubProxyFormat.Delta7PaletteByteSize} bytes.", nameof(paletteOut));
+                    $"paletteOut must be exactly {EsrpFormat.Delta7PaletteByteSize} bytes.", nameof(paletteOut));
 
             var histogram = new Dictionary<uint, int>();
             AccumulateHistogram(source, width, height, histogram);
@@ -231,7 +231,7 @@ namespace EditSharp.Caching.ScrubProxy
         /// whatever counts it already holds rather than replacing them —
         /// see class remarks, SHARED/GLOBAL PALETTE (V6). Calling this
         /// once per sampled frame (against the SAME dictionary instance)
-        /// is exactly how ScrubProxyCache.BuildAsync's sampling pass builds
+        /// is exactly how ProxyCache.BuildAsync's sampling pass builds
         /// a histogram representative of the whole source, not just one
         /// frame, before calling BuildPaletteFromHistogram on the result.
         /// Alpha is read but never used, same as everywhere else in this
@@ -258,15 +258,15 @@ namespace EditSharp.Caching.ScrubProxy
         /// calls) down to a 128-entry RGB palette and writes it to
         /// `paletteOut` — the exact same BuildPalette+WritePalette pair
         /// Encode always ran internally, just exposed directly so
-        /// ScrubProxyCache can build ONE shared palette from a multi-frame
+        /// ProxyCache can build ONE shared palette from a multi-frame
         /// histogram instead of Encode building a fresh one per frame. See
         /// class remarks, SHARED/GLOBAL PALETTE (V6).
         /// </summary>
         public static void BuildPaletteFromHistogram(Dictionary<uint, int> histogram, Span<byte> paletteOut)
         {
-            if (paletteOut.Length != ScrubProxyFormat.Delta7PaletteByteSize)
+            if (paletteOut.Length != EsrpFormat.Delta7PaletteByteSize)
                 throw new ArgumentException(
-                    $"paletteOut must be exactly {ScrubProxyFormat.Delta7PaletteByteSize} bytes.", nameof(paletteOut));
+                    $"paletteOut must be exactly {EsrpFormat.Delta7PaletteByteSize} bytes.", nameof(paletteOut));
 
             (uint Color, int Count)[] palette = BuildPalette(histogram);
             WritePalette(palette, paletteOut);
@@ -278,7 +278,7 @@ namespace EditSharp.Caching.ScrubProxy
         /// shared/global palette read from, or about to be written to, the
         /// file's own header-level palette section) rather than building a
         /// fresh one from this frame alone. See class remarks, SHARED/GLOBAL
-        /// PALETTE (V6) — this is what ScrubProxyCache.EncodeFramePixels
+        /// PALETTE (V6) — this is what ProxyCache.EncodeFramePixels
         /// actually calls for every frame of a new IndexedDelta7 build.
         /// </summary>
         public static void EncodeWithPalette(
@@ -290,9 +290,9 @@ namespace EditSharp.Caching.ScrubProxy
                 throw new ArgumentException(
                     $"source must be exactly {pixelCount * 4} bytes for a {width}x{height} RGBA8888 frame, got {source.Length}.",
                     nameof(source));
-            if (palette.Length != ScrubProxyFormat.Delta7PaletteByteSize)
+            if (palette.Length != EsrpFormat.Delta7PaletteByteSize)
                 throw new ArgumentException(
-                    $"palette must be exactly {ScrubProxyFormat.Delta7PaletteByteSize} bytes.", nameof(palette));
+                    $"palette must be exactly {EsrpFormat.Delta7PaletteByteSize} bytes.", nameof(palette));
 
             EncodeRows(source, width, height, palette, pixelsOut);
         }
@@ -391,7 +391,7 @@ namespace EditSharp.Caching.ScrubProxy
         /// <summary>
         /// Expands one IndexedDelta7 frame back to full RGBA8888 — the
         /// read-side counterpart to Encode/EncodeWithPalette, used by
-        /// ScrubProxyReader.GetFrameAt. `palette` is whatever palette this
+        /// EsrpReader.GetFrameAt. `palette` is whatever palette this
         /// file actually uses for every frame — as of V6, the ONE shared/
         /// global palette read once at Open() time (see class remarks,
         /// SHARED/GLOBAL PALETTE (V6)) — this method needed no change at
@@ -405,9 +405,9 @@ namespace EditSharp.Caching.ScrubProxy
         {
             int pixelCount = width * height;
 
-            if (palette.Length != ScrubProxyFormat.Delta7PaletteByteSize)
+            if (palette.Length != EsrpFormat.Delta7PaletteByteSize)
                 throw new ArgumentException(
-                    $"palette must be exactly {ScrubProxyFormat.Delta7PaletteByteSize} bytes.", nameof(palette));
+                    $"palette must be exactly {EsrpFormat.Delta7PaletteByteSize} bytes.", nameof(palette));
             if (pixels.Length != pixelCount)
                 throw new ArgumentException($"pixels must be exactly {pixelCount} bytes.", nameof(pixels));
             if (destination.Length != pixelCount * 4)
@@ -459,8 +459,8 @@ namespace EditSharp.Caching.ScrubProxy
         /// MIRROR THE DECODER'S OWN RECONSTRUCTED STATE.
         ///
         /// A GPU re-implementation of this exact clamp/offset formula was
-        /// tried once (ScrubProxyGpuEncoder, since deleted — see
-        /// ScrubProxyCache's own class remarks on why) but is gone now;
+        /// tried once (the GPU encoder, since deleted — see
+        /// ProxyCache's own class remarks on why) but is gone now;
         /// this CPU version is the only place this math runs.
         /// </summary>
         private static void ApplyDelta(
@@ -656,7 +656,7 @@ namespace EditSharp.Caching.ScrubProxy
         /// array palette internally, then writes it to bytes via
         /// WritePalette before calling this) and EncodeWithPalette (which
         /// only ever HAS the byte-array shape, since that's what's actually
-        /// stored on disk/passed around at the ScrubProxyCache layer) — so
+        /// stored on disk/passed around at the ProxyCache layer) — so
         /// this method reads bytes directly rather than requiring every
         /// caller to first unpack them back into a tuple array just to
         /// look a color up.

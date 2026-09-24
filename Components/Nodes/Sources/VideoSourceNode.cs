@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using EditSharp.Components;
+using EditSharp.Components.Sources.Video;
 using EditSharp.Components.Nodes;
 using EditSharp.History;
 using EditSharp.Editing;
@@ -8,16 +8,15 @@ using EditSharp.Editing;
 namespace EditSharp.Components.Nodes.Sources
 {
     /// <summary>
-    /// A real media file, or a still image held for the clip's duration
-    /// (an image is a Source with SourceType.Image, same convention as
-    /// before this rewrite — no separate "ImageClip" node type). Replaces
-    /// the old VideoClip.Source property directly.
+    /// Feeds a VideoSource's frames into the graph; a media file, a still
+    /// image, or any other video kind; the node neither knows nor cares
+    /// which. Replaces the old VideoClip.Source property directly.
     /// </summary>
     public sealed class VideoSourceNode : InputNode, ITrimmableInput
     {
-        Source _source = null!;
+        VideoSource _source = null!;
         [Editable("Source")]
-        public required Source Source { get => _source; set => Transaction.Set(this, ref _source, value, static (o, v) => o._source = v); }
+        public required VideoSource Source { get => _source; set => Transaction.Set(this, ref _source, value, static (o, v) => o._source = v); }
  
         private static readonly NodePort[] StaticPorts = [new("Image", PortType.Image, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;

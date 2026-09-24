@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using EditSharp.Components.Sources;
 using EditSharp.Video;
  
 namespace EditSharp.Rendering;
@@ -46,6 +47,15 @@ public struct RenderSettings
         /// Ignored entirely when HardwareAccelerator is None.
         /// </summary>
         public int? GpuAdapterIndex { get; set; } = null;
+
+        /// <summary>
+        /// Proxies or originals, for sources that have proxies. Defaults to
+        /// SourceOnly so an export is full quality unless asked otherwise;
+        /// previews (Playback, thumbnails) opt into ProxiesOnly themselves.
+        /// Read when a session prepares its sources, so a change applies from
+        /// the next session.
+        /// </summary>
+        public SourceMode SourceMode { get; set; } = SourceMode.SourceOnly;
  
         public RenderSettings() { }
  
