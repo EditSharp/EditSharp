@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using SkiaSharp;
 using EditSharp.Video;
@@ -15,11 +17,12 @@ namespace EditSharp.Caching.Proxy
 
     /// <summary>
     /// Builds (or resumes) an .esrp proxy: one SourceDecoder pass at the
-    /// source's own frame rate and proxy size, each frame encoded and handed
-    /// to EsrpWriter, which makes it readable immediately. An IndexedDelta7
-    /// build first samples frames spread across the whole source to build its
-    /// one shared palette; a resumed build reuses the palette already in the
-    /// file.
+    /// source's own frame rate and proxy size. Decoding runs on one thread,
+    /// encoding and compression on every core, and frames are appended to
+    /// the EsrpWriter strictly in order, each readable as soon as it lands. An
+    /// IndexedDelta7 build first samples frames spread across the whole source
+    /// to build its one shared palette; a resumed build reuses the palette
+    /// already in the file.
     /// </summary>
     internal static class EsrpProxyBuilder
     {
@@ -33,26 +36,79 @@ namespace EditSharp.Caching.Proxy
             onFramesWritten(writer.FramesWritten);
 
             if (writer.FramesWritten < writer.Header.Capacity)
-            {
-                double startSeconds = writer.FramesWritten / plan.FrameRate;
-
-                using SourceDecoder decoder = SourceDecoder.Start(
-                    plan.SourcePath, startSeconds, plan.FrameRate, plan.Width, plan.Height, decode);
-
-                while (writer.FramesWritten < writer.Header.Capacity)
-                {
-                    ct.ThrowIfCancellationRequested();
-
-                    using SKImage frame = decoder.NextFrame();
-                    if (decoder.IsExhausted) break;
-
-                    writer.Append(EncodeFrame(frame, writer.Header, writer.Palette));
-                    onFramesWritten(writer.FramesWritten);
-                }
-            }
+                await EncodeRemainingAsync(plan, writer, decode, onFramesWritten, ct);
 
             writer.Complete();
         }, ct);
+
+        private static async Task EncodeRemainingAsync(
+            ProxyBuildPlan plan, EsrpWriter writer, DecodeHwAccelPlan decode, Action<int> onFramesWritten, CancellationToken ct)
+        {
+            EsrpFormat.Header header = writer.Header;
+            IndexedDelta7Encoder? delta7 = header.PixelFormat == EsrpPixelFormat.IndexedDelta7 ? new IndexedDelta7Encoder(writer.Palette) : null;
+            int workers = Environment.ProcessorCount;
+
+            var decoded = Channel.CreateBounded<(int Index, byte[] Pixels)>(workers * 2);
+            var encoded = new ConcurrentDictionary<int, byte[]>();
+            using var landed = new SemaphoreSlim(0);
+
+            //one decoder, in order
+            Task produce = Task.Run(() =>
+            {
+                try
+                {
+                    using SourceDecoder decoder = SourceDecoder.Start(
+                        plan.SourcePath, writer.FramesWritten / plan.FrameRate, plan.FrameRate, plan.Width, plan.Height, decode);
+
+                    for (int index = writer.FramesWritten; index < header.Capacity; index++)
+                    {
+                        using SKImage frame = decoder.NextFrame();
+                        if (decoder.IsExhausted) break;
+
+                        using SKPixmap pixmap = frame.PeekPixels()
+                            ?? throw new InvalidOperationException("Could not read a decoded frame's pixels while building a proxy.");
+
+                        decoded.Writer.WriteAsync((index, pixmap.GetPixelSpan().ToArray()), ct).AsTask().GetAwaiter().GetResult();
+                    }
+
+                    decoded.Writer.Complete();
+                }
+                catch (Exception ex)
+                {
+                    decoded.Writer.Complete(ex);
+                }
+            }, ct);
+
+            //every core encodes
+            Task encode = Parallel.ForEachAsync(
+                decoded.Reader.ReadAllAsync(ct),
+                new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = ct },
+                (item, _) =>
+                {
+                    encoded[item.Index] = EncodeFrame(item.Pixels, header, delta7);
+                    landed.Release();
+                    return ValueTask.CompletedTask;
+                });
+
+            //appended strictly in order
+            int next = writer.FramesWritten;
+            while (true)
+            {
+                while (encoded.TryRemove(next, out byte[]? stored))
+                {
+                    writer.Append(stored);
+                    onFramesWritten(writer.FramesWritten);
+                    next++;
+                }
+
+                if (encode.IsCompleted && !encoded.ContainsKey(next)) break;
+
+                await Task.WhenAny(landed.WaitAsync(ct), encode);
+            }
+
+            await encode;
+            await produce;
+        }
 
         /// <summary>An interrupted build of this same plan, reopened; or null (and the stale file removed) if there isn't a usable one.</summary>
         private static EsrpWriter? TryResume(ProxyBuildPlan plan, string path)
@@ -146,21 +202,13 @@ namespace EditSharp.Caching.Proxy
             return palette;
         }
 
-        private static byte[] EncodeFrame(SKImage frame, EsrpFormat.Header header, byte[] palette)
+        private static byte[] EncodeFrame(byte[] pixels, EsrpFormat.Header header, IndexedDelta7Encoder? delta7)
         {
-            using SKPixmap pixmap = frame.PeekPixels()
-                ?? throw new InvalidOperationException("Could not read a decoded frame's pixels while building a proxy.");
+            if (delta7 is null) return Compress(pixels, header.CompressionScheme);
 
-            ReadOnlySpan<byte> raw = pixmap.GetPixelSpan();
-
-            if (header.PixelFormat == EsrpPixelFormat.IndexedDelta7)
-            {
-                byte[] codes = new byte[header.Width * header.Height];
-                IndexedDelta7Codec.EncodeWithPalette(raw, header.Width, header.Height, palette, codes);
-                return Compress(codes, header.CompressionScheme);
-            }
-
-            return Compress(raw, header.CompressionScheme);
+            byte[] codes = new byte[header.Width * header.Height];
+            delta7.Encode(pixels, header.Width, header.Height, codes);
+            return Compress(codes, header.CompressionScheme);
         }
 
         private static byte[] Compress(ReadOnlySpan<byte> plane, EsrpCompressionScheme scheme) => scheme switch

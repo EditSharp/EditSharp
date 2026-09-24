@@ -95,10 +95,13 @@ namespace EditSharp.Caching.Proxy
         /// Encodes `raw` into a fresh, exactly-sized buffer using zstd at
         /// CompressionLevel. The caller decides what to do with the result.
         /// </summary>
+        //a compressor holds sizeable state at high levels; reuse one per thread
+        [ThreadStatic] private static Compressor? _compressor;
+
         public static byte[] Encode(ReadOnlySpan<byte> raw)
         {
-            using var compressor = new Compressor(CompressionLevel);
-            return compressor.Wrap(raw).ToArray();
+            _compressor ??= new Compressor(CompressionLevel);
+            return _compressor.Wrap(raw).ToArray();
         }
 
         /// <summary>

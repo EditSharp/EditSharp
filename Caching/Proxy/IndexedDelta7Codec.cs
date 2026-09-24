@@ -191,41 +191,6 @@ namespace EditSharp.Caching.Proxy
         private const int BStep = 6;
 
         /// <summary>
-        /// Quantizes one RGBA8888 frame (`source`, exactly `width * height
-        /// * 4` interleaved bytes, no row padding; alpha is read but never
-        /// used, see class remarks) into a FRESH, THIS-FRAME-ONLY 128-entry
-        /// RGB palette
-        /// (`paletteOut`, exactly Delta7PaletteByteSize bytes) and one
-        /// control byte per pixel (`pixelsOut`, exactly `width * height`
-        /// bytes). See class remarks, SHARED/GLOBAL PALETTE (V6) — this
-        /// method is NOT what ProxyCache actually calls for a new
-        /// build any more (that's AccumulateHistogram + BuildPaletteFromHistogram
-        /// + EncodeWithPalette instead), but is kept as a simple, still-
-        /// correct, self-contained one-shot entry point.
-        /// </summary>
-        public static void Encode(
-            ReadOnlySpan<byte> source, int width, int height, Span<byte> paletteOut, Span<byte> pixelsOut)
-        {
-            int pixelCount = width * height;
-
-            if (source.Length != pixelCount * 4)
-                throw new ArgumentException(
-                    $"source must be exactly {pixelCount * 4} bytes for a {width}x{height} RGBA8888 frame, got {source.Length}.",
-                    nameof(source));
-            if (paletteOut.Length != EsrpFormat.Delta7PaletteByteSize)
-                throw new ArgumentException(
-                    $"paletteOut must be exactly {EsrpFormat.Delta7PaletteByteSize} bytes.", nameof(paletteOut));
-
-            var histogram = new Dictionary<uint, int>();
-            AccumulateHistogram(source, width, height, histogram);
-
-            (uint Color, int Count)[] palette = BuildPalette(histogram);
-            WritePalette(palette, paletteOut);
-
-            EncodeRows(source, width, height, paletteOut, pixelsOut);
-        }
-
-        /// <summary>
         /// Counts every pixel's (R,G,B) color in `source` (one frame, same
         /// shape as Encode's own `source`) into `histogram`, ADDING to
         /// whatever counts it already holds rather than replacing them —
@@ -270,122 +235,6 @@ namespace EditSharp.Caching.Proxy
 
             (uint Color, int Count)[] palette = BuildPalette(histogram);
             WritePalette(palette, paletteOut);
-        }
-
-        /// <summary>
-        /// Encodes one frame's control bytes AGAINST AN EXTERNALLY SUPPLIED
-        /// palette (`palette`, exactly Delta7PaletteByteSize bytes — the
-        /// shared/global palette read from, or about to be written to, the
-        /// file's own header-level palette section) rather than building a
-        /// fresh one from this frame alone. See class remarks, SHARED/GLOBAL
-        /// PALETTE (V6) — this is what ProxyCache.EncodeFramePixels
-        /// actually calls for every frame of a new IndexedDelta7 build.
-        /// </summary>
-        public static void EncodeWithPalette(
-            ReadOnlySpan<byte> source, int width, int height, ReadOnlySpan<byte> palette, Span<byte> pixelsOut)
-        {
-            int pixelCount = width * height;
-
-            if (source.Length != pixelCount * 4)
-                throw new ArgumentException(
-                    $"source must be exactly {pixelCount * 4} bytes for a {width}x{height} RGBA8888 frame, got {source.Length}.",
-                    nameof(source));
-            if (palette.Length != EsrpFormat.Delta7PaletteByteSize)
-                throw new ArgumentException(
-                    $"palette must be exactly {EsrpFormat.Delta7PaletteByteSize} bytes.", nameof(palette));
-
-            EncodeRows(source, width, height, palette, pixelsOut);
-        }
-
-        /// <summary>
-        /// THE per-pixel PALETTE-vs-DELTA row loop — shared by Encode (after
-        /// it builds its own per-frame palette) and EncodeWithPalette (given
-        /// an external one). `palette` is always exactly Delta7PaletteByteSize
-        /// raw RGB triples; length/shape validation is the caller's job
-        /// (both public entry points already do it) so this method can stay
-        /// a plain, allocation-light inner loop.
-        /// </summary>
-        private static void EncodeRows(
-            ReadOnlySpan<byte> source, int width, int height, ReadOnlySpan<byte> palette, Span<byte> pixelsOut)
-        {
-            int pixelCount = width * height;
-            if (pixelsOut.Length != pixelCount)
-                throw new ArgumentException($"pixelsOut must be exactly {pixelCount} bytes.", nameof(pixelsOut));
-
-            // Cached per DISTINCT SOURCE COLOR (not per pixel, not per
-            // (color, previous) pair — see class remarks, PER-PIXEL SEARCH
-            // IS EXACT: a color's nearest palette candidate never depends
-            // on the previous pixel, only the delta candidate does, and
-            // that search is cheap enough (128 evals) not to need caching
-            // of its own).
-            var nearestPaletteCache = new Dictionary<uint, (byte Index, byte R, byte G, byte B)>();
-
-            for (int y = 0; y < height; y++)
-            {
-                byte prevR = 0, prevG = 0, prevB = 0;
-
-                for (int x = 0; x < width; x++)
-                {
-                    int pixelOffset = (y * width + x) * 4;
-                    byte r = source[pixelOffset];
-                    byte g = source[pixelOffset + 1];
-                    byte b = source[pixelOffset + 2];
-
-                    uint sourceKey = PackRgb(r, g, b);
-                    if (!nearestPaletteCache.TryGetValue(sourceKey, out var nearest))
-                    {
-                        byte idx = FindNearestPaletteIndex(palette, r, g, b);
-                        int paletteOffset = idx * 3;
-                        nearest = (idx, palette[paletteOffset], palette[paletteOffset + 1], palette[paletteOffset + 2]);
-                        nearestPaletteCache[sourceKey] = nearest;
-                    }
-
-                    byte code;
-                    byte chosenR, chosenG, chosenB;
-
-                    if (x == 0)
-                    {
-                        // See class remarks, ROW-START BOOTSTRAP — no
-                        // left-neighbor exists yet, so this column is
-                        // unconditionally PALETTE mode (mode bit already 0
-                        // via nearest.Index, which is always <= 127).
-                        code = nearest.Index;
-                        chosenR = nearest.R; chosenG = nearest.G; chosenB = nearest.B;
-                    }
-                    else
-                    {
-                        long paletteDistance = DistanceSquared(r, g, b, nearest.R, nearest.G, nearest.B);
-
-                        (byte deltaCode, byte dr, byte dg, byte db, long deltaDistance) =
-                            FindBestDelta(prevR, prevG, prevB, r, g, b);
-
-                        // Whichever candidate is actually closer to the
-                        // real source pixel wins — exactly the user's own
-                        // stated rule ("whichever color is closer to
-                        // original"). Ties favor palette mode arbitrarily
-                        // (<=) — no behavioral significance either way.
-                        if (paletteDistance <= deltaDistance)
-                        {
-                            code = nearest.Index;
-                            chosenR = nearest.R; chosenG = nearest.G; chosenB = nearest.B;
-                        }
-                        else
-                        {
-                            code = (byte)(ModeBit | deltaCode);
-                            chosenR = dr; chosenG = dg; chosenB = db;
-                        }
-                    }
-
-                    pixelsOut[y * width + x] = code;
-
-                    // See class remarks, THE ENCODER MUST MIRROR THE
-                    // DECODER'S OWN RECONSTRUCTED STATE — `prev` becomes
-                    // whichever color was actually CHOSEN (and will
-                    // therefore actually be decoded), never the original
-                    // source pixel.
-                    prevR = chosenR; prevG = chosenG; prevB = chosenB;
-                }
-            }
         }
 
         /// <summary>
@@ -470,53 +319,6 @@ namespace EditSharp.Caching.Proxy
             r = (byte)Math.Clamp(prevR + rLevel * RStep, 0, 255);
             g = (byte)Math.Clamp(prevG + gLevel * GStep, 0, 255);
             b = (byte)Math.Clamp(prevB + bLevel * BStep, 0, 255);
-        }
-
-        /// <summary>
-        /// The best of all 4*8*4=128 reachable delta candidates from
-        /// (prevR, prevG, prevB) toward (targetR, targetG, targetB), under
-        /// the same DistanceSquared metric palette candidates are scored
-        /// with — see class remarks, PER-PIXEL SEARCH IS EXACT. The
-        /// zero-delta exact-match fast path below is an optimization only
-        /// — the general loop would find the identical answer (distance
-        /// 0) on its own, just after needlessly evaluating 127 other
-        /// combinations first.
-        /// </summary>
-        private static (byte Code, byte R, byte G, byte B, long Distance) FindBestDelta(
-            byte prevR, byte prevG, byte prevB, byte targetR, byte targetG, byte targetB)
-        {
-            if (prevR == targetR && prevG == targetG && prevB == targetB)
-            {
-                byte zeroCode = (byte)((ZeroRLevel << (GLevelBits + BLevelBits)) | (ZeroGLevel << BLevelBits) | ZeroBLevel);
-                return (zeroCode, prevR, prevG, prevB, 0);
-            }
-
-            byte bestCode = 0;
-            byte bestR = prevR, bestG = prevG, bestB = prevB;
-            long bestDistance = long.MaxValue;
-
-            for (int rl = 0; rl < RLevelCount; rl++)
-            {
-                for (int gl = 0; gl < GLevelCount; gl++)
-                {
-                    for (int bl = 0; bl < BLevelCount; bl++)
-                    {
-                        ApplyDelta(
-                            prevR, prevG, prevB, rl - ZeroRLevel, gl - ZeroGLevel, bl - ZeroBLevel,
-                            out byte candR, out byte candG, out byte candB);
-
-                        long distance = DistanceSquared(targetR, targetG, targetB, candR, candG, candB);
-                        if (distance < bestDistance)
-                        {
-                            bestDistance = distance;
-                            bestCode = (byte)((rl << (GLevelBits + BLevelBits)) | (gl << BLevelBits) | bl);
-                            bestR = candR; bestG = candG; bestB = candB;
-                        }
-                    }
-                }
-            }
-
-            return (bestCode, bestR, bestG, bestB, bestDistance);
         }
 
         /// <summary>
@@ -645,57 +447,6 @@ namespace EditSharp.Caching.Proxy
             byte avgB = (byte)(sumB / totalWeight);
 
             return (PackRgb(avgR, avgG, avgB), (int)totalWeight);
-        }
-
-        /// <summary>
-        /// Nearest palette entry to (r,g,b), reading directly from the raw
-        /// on-disk RGB-triple byte layout (`palette`, exactly
-        /// Delta7PaletteByteSize bytes) rather than an intermediate
-        /// (uint Color, int Count)[] array — CHANGED FOR V6: EncodeRows is
-        /// now shared between Encode (which still builds its own tuple-
-        /// array palette internally, then writes it to bytes via
-        /// WritePalette before calling this) and EncodeWithPalette (which
-        /// only ever HAS the byte-array shape, since that's what's actually
-        /// stored on disk/passed around at the ProxyCache layer) — so
-        /// this method reads bytes directly rather than requiring every
-        /// caller to first unpack them back into a tuple array just to
-        /// look a color up.
-        /// </summary>
-        private static byte FindNearestPaletteIndex(ReadOnlySpan<byte> palette, int r, int g, int b)
-        {
-            byte best = 0;
-            long bestDistance = long.MaxValue;
-            int count = palette.Length / 3;
-
-            for (int i = 0; i < count; i++)
-            {
-                int offset = i * 3;
-                long distance = DistanceSquared(r, g, b, palette[offset], palette[offset + 1], palette[offset + 2]);
-                if (distance < bestDistance)
-                {
-                    bestDistance = distance;
-                    best = (byte)i;
-                }
-            }
-
-            return best;
-        }
-
-        /// <summary>
-        /// Redmean-style perceptually-weighted squared distance on RGB.
-        /// </summary>
-        private static long DistanceSquared(int r1, int g1, int b1, int r2, int g2, int b2)
-        {
-            long rMean = (r1 + r2) / 2;
-            long dr = r1 - r2;
-            long dg = g1 - g2;
-            long db = b1 - b2;
-
-            long weightR = 512 + rMean;
-            long weightB = 767 - rMean;
-            long weightG = 1024;
-
-            return (weightR * dr * dr) + (weightG * dg * dg) + (weightB * db * db);
         }
 
         private static void WritePalette((uint Color, int Count)[] palette, Span<byte> paletteOut)
