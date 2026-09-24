@@ -769,6 +769,9 @@ namespace EditSharp.Playback
 
         public float Speed = 1f;
 
+        /// <summary>How audio keeps its pitch when Speed isn't 1 (including reverse).</summary>
+        public PitchPreservation PreservePitch = PitchPreservation.WSOLA;
+
         private TimeSpan _lastKnownPosition = TimeSpan.Zero;
         private PlaybackReferenceClock? _referenceClock;
         public TimeSpan Position => _referenceClock?.Position ?? _lastKnownPosition;

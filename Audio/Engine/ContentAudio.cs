@@ -20,6 +20,9 @@ namespace EditSharp.Audio.Engine
         /// <summary>Changes whenever the stream becomes readable afresh (a source prepared again after failing); readers of it start over.</summary>
         int Generation { get; }
 
+        /// <summary>The lowest frame the stream has; windows over it never ask for less.</summary>
+        long FirstFrame => 0;
+
         /// <summary>Moves the next Read to content frame `frame`.</summary>
         void Seek(long frame);
 

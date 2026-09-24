@@ -6,8 +6,8 @@ namespace EditSharp.Audio.Engine
     /// A sliding window of a content stream's frames, addressed by absolute
     /// content frame. Asking for a range that continues from what's held reads
     /// on; anything else seeks the stream (and bumps Epoch, so stateful
-    /// readers of the window know to start over). Frames before 0 or past the
-    /// material's end read as silence.
+    /// readers of the window know to start over). Frames before the stream's
+    /// FirstFrame or past the material's end read as silence.
     /// </summary>
     internal sealed class ContentWindow(IContentAudio content, int channels)
     {
@@ -32,7 +32,7 @@ namespace EditSharp.Audio.Engine
         /// <summary>Makes [first, end) available, as far as the material reaches.</summary>
         public void Ensure(long first, long end)
         {
-            if (first < 0) first = 0;
+            if (first < Content.FirstFrame) first = Content.FirstFrame;
             if (end <= first) return;
 
             bool continues = first >= _start && first <= _start + _count + SeekSlack && _generation == Content.Generation;
