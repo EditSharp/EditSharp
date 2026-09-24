@@ -1,6 +1,7 @@
 using System;
 using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Nodes.Sources;
+using EditSharp.Editing;
 using EditSharp.History;
 using EditSharp.Components;
 using EditSharp.Components.Sources.Audio;
@@ -22,6 +23,11 @@ namespace EditSharp.Components.Clips
     {
         private readonly Graph _graph;
         public override Graph Graph => _graph;
+
+        PitchPreservation _preservePitch = PitchPreservation.WSOLA;
+        /// <summary>How the clip keeps its pitch when Speed isn't 1x.</summary>
+        [Editable("Preserve pitch")]
+        public PitchPreservation PreservePitch { get => _preservePitch; set => Transaction.Set(this, ref _preservePitch, value, static (o, v) => o._preservePitch = v); }
  
         private AudioClip(Graph graph) => _graph = graph;
  
@@ -48,7 +54,7 @@ namespace EditSharp.Components.Clips
             return Transaction.Suppressed(() => new AudioClip(graph) { Start = start, Duration = duration });
         }
  
-        public override AudioClip Duplicate() => Transaction.Suppressed(() => new AudioClip(Graph.Duplicate()) { Start = Start, Duration = Duration, Speed = Speed });
+        public override AudioClip Duplicate() => Transaction.Suppressed(() => new AudioClip(Graph.Duplicate()) { Start = Start, Duration = Duration, Speed = Speed, PreservePitch = PreservePitch });
     }
 }
  

@@ -28,7 +28,7 @@ namespace EditSharp.Audio.Engine
         private readonly Dictionary<AudioClip, ClipAudioNetwork> _networks = new(ReferenceEqualityComparer.Instance);
         private float[] _bus = new float[session.BlockFrames * session.Format.Channels];
 
-        private readonly record struct Audible(AudioClip Clip, long Start, long End, double Speed, Graph Graph);
+        private readonly record struct Audible(AudioClip Clip, long Start, long End, double Speed, PitchPreservation Pitch, Graph Graph);
 
         private readonly record struct ChannelWork(Guid Id, float Volume, List<Audible> Clips);
 
@@ -59,7 +59,7 @@ namespace EditSharp.Audio.Engine
                         long start = session.FrameOf(clip.Start), stop = session.FrameOf(clip.End);
 
                         if (start < end && stop > frame)
-                            audible.Add(new Audible(audio, start, stop, clip.Speed, audio.Graph.Snapshot()));
+                            audible.Add(new Audible(audio, start, stop, clip.Speed, audio.PreservePitch, audio.Graph.Snapshot()));
                         else if (start >= end && start < end + lookahead)
                             upcoming.Add((audio, audio.Graph.Snapshot()));
                     }
@@ -85,8 +85,10 @@ namespace EditSharp.Audio.Engine
                     var tick = new AudioTick(
                         format, from, count,
                         TimeSpan.FromSeconds((from - clip.Start) / (double)format.SampleRate * clip.Speed),
+                        (from - clip.Start) * clip.Speed,
                         clip.Speed / format.SampleRate,
-                        clip.Graph);
+                        clip.Graph,
+                        clip.Pitch);
 
                     Network(clip.Clip).Process(tick, bus.Slice((int)(from - frame) * channels, count * channels));
                 }

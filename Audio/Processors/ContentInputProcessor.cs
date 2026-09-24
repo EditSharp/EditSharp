@@ -5,7 +5,7 @@ namespace EditSharp.Audio.Processors
 {
     /// <summary>
     /// The processor behind every audio input node: reads the node's content
-    /// stream through a ContentWarp at the clip's speed. `identity` is what the
+    /// stream through a ContentWarp at the clip's speed and pitch mode. `identity` is what the
     /// stream was made from (a node's Source, a nested timeline reference);
     /// when it changes the stream is rebuilt.
     /// </summary>
@@ -29,8 +29,7 @@ namespace EditSharp.Audio.Processors
                 return;
             }
 
-            double rate = tick.Format.SampleRate;
-            warp.Render(tick.ContentStart.TotalSeconds * rate, tick.ContentStep * rate, tick.Frames, output);
+            warp.Render(tick.ContentFrame, tick.ContentStep * tick.Format.SampleRate, tick.Frames, tick.Pitch, output);
         }
 
         private ContentWarp Warp()
@@ -40,7 +39,7 @@ namespace EditSharp.Audio.Processors
             if (_warp is null || !ReferenceEquals(current, _identity))
             {
                 _warp?.Dispose();
-                _warp = new ContentWarp(create(), session.Format.Channels);
+                _warp = new ContentWarp(create(), session.Format);
                 _identity = current;
             }
 
