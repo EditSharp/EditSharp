@@ -42,7 +42,7 @@ namespace EditSharp.Audio.Engine
             Build(graph);
             bool ready = true;
             foreach (Step step in _steps)
-                if (step.Processor is ContentInputProcessor input) ready &= input.Prepare(wait);
+                if (step.Processor is ContentInputProcessor input && step.Node.Enabled) ready &= input.Prepare(wait);
             return ready;
         }
 
@@ -56,7 +56,8 @@ namespace EditSharp.Audio.Engine
                 Node node = step.Node;
                 AudioPortBuffers ports = step.Ports;
 
-                if (step.Processor is null)
+                //a disabled source is silent
+                if (step.Processor is null || (!node.Enabled && ports.Inputs.Length == 0))
                 {
                     foreach (float[] output in ports.Outputs) Array.Clear(output, 0, tick.Samples);
                 }

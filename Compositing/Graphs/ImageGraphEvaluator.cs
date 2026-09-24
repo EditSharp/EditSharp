@@ -83,9 +83,10 @@ namespace EditSharp.Compositing.Graphs
  
             foreach (Node node in order)
             {
+                //a disabled source shows nothing, like an unwired input
                 if (node is InputNode)
                 {
-                    images[(node.Id, "Image")] = resolvedInputs.TryGetValue(node.Id, out SKImage? content) ? content : Nothing;
+                    images[(node.Id, "Image")] = node.Enabled && resolvedInputs.TryGetValue(node.Id, out SKImage? content) ? content : Nothing;
                     continue;
                 }
  

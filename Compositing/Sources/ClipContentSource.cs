@@ -126,7 +126,7 @@ namespace EditSharp.Compositing.Sources
 
             foreach ((VideoClip clip, Graph graph) in clips)
             {
-                foreach (VideoSourceNode node in graph.Nodes.OfType<VideoSourceNode>())
+                foreach (VideoSourceNode node in graph.Nodes.OfType<VideoSourceNode>().Where(n => n.Enabled))
                 {
                     if (StartPreparing(Input(clip, node)) is { } task) pending.Add(task);
                 }
@@ -162,7 +162,7 @@ namespace EditSharp.Compositing.Sources
 
                     if (!upcoming) continue;
 
-                    foreach (VideoSourceNode node in video.Graph.AllNodes.OfType<VideoSourceNode>())
+                    foreach (VideoSourceNode node in video.Graph.AllNodes.OfType<VideoSourceNode>().Where(n => n.Enabled))
                     {
                         MediaInput input = Input(video, node);
                         live.Add(node.Id);
@@ -196,7 +196,7 @@ namespace EditSharp.Compositing.Sources
             {
                 if (frameClip.Clip is not VideoClip clip) continue;
 
-                foreach (VideoSourceNode node in frameClip.Graph.Nodes.OfType<VideoSourceNode>())
+                foreach (VideoSourceNode node in frameClip.Graph.Nodes.OfType<VideoSourceNode>().Where(n => n.Enabled))
                 {
                     MediaInput input = Input(clip, node);
                     if (input.Failure is not null) continue;
@@ -241,7 +241,7 @@ namespace EditSharp.Compositing.Sources
             var result = new Dictionary<Guid, (SKImage, bool)>();
             LastFrameIncomplete = false;
 
-            foreach (InputNode node in graph.Nodes.OfType<InputNode>())
+            foreach (InputNode node in graph.Nodes.OfType<InputNode>().Where(n => n.Enabled))
             {
                 if (resolved is not null && resolved.TryGetValue(node.Id, out (SKImage Image, bool Transient) known))
                 {
@@ -276,7 +276,7 @@ namespace EditSharp.Compositing.Sources
             Graph graph, double clipSeconds, int width, int height, CancellationToken ct = default)
         {
             TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
-            VideoSourceNode[] nodes = graph.Nodes.OfType<VideoSourceNode>().ToArray();
+            VideoSourceNode[] nodes = graph.Nodes.OfType<VideoSourceNode>().Where(n => n.Enabled).ToArray();
 
             var frames = await Task.WhenAll(nodes.Select(async node =>
             {
