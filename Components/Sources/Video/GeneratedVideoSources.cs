@@ -88,7 +88,7 @@ public class TextVideoSource : VideoSource, IChoiceProvider
 
     //the font's em size, a fraction of the frame width
     float _size = 0.05f;
-    [Editable("Size", Min = 0.001, Max = 1, Step = 0.001)]
+    [Editable("Size", Min = 0.001, Max = 1, Step = 0.001, Frame = FrameMeasure.Width)]
     public float Size { get => _size; set => Transaction.Set(this, ref _size, value, static (o, v) => o._size = v); }
 
     SKTextAlign _align = SKTextAlign.Center;
@@ -101,7 +101,7 @@ public class TextVideoSource : VideoSource, IChoiceProvider
 
     //the widest a line gets before it wraps, a fraction of the frame width
     float _wrapWidth = 0.9f;
-    [Editable("Wrap width", Min = 0.01, Max = 1, Step = 0.01)]
+    [Editable("Wrap width", Min = 0.01, Max = 1, Step = 0.01, Frame = FrameMeasure.Width)]
     [VisibleWhen(nameof(Wrap), true)]
     public float WrapWidth { get => _wrapWidth; set => Transaction.Set(this, ref _wrapWidth, value, static (o, v) => o._wrapWidth = v); }
 

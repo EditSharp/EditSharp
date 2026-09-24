@@ -11,10 +11,10 @@ namespace EditSharp.Components.Nodes.Effects
     public sealed class DropShadowNode : Node
     {
         Animatable<Vector2> _offset = new(new(0.01f, 0.01f));
-        [Editable("Offset")]
+        [Editable("Offset", Frame = FrameMeasure.HalfFrame)]
         public Animatable<Vector2> Offset { get => _offset; set => Transaction.Set(this, ref _offset, value, static (o, v) => o._offset = v); }
         Animatable<float> _blur = new(0.01f);
-        [Editable("Blur", Min = 0, Max = 0.5, Step = 0.001)]
+        [Editable("Blur", Min = 0, Max = 0.5, Step = 0.001, Frame = FrameMeasure.Width)]
         public Animatable<float> Blur { get => _blur; set => Transaction.Set(this, ref _blur, value, static (o, v) => o._blur = v); }
         Animatable<SKColor> _color = new(SKColors.Black);
         [Editable("Color")]

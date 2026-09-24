@@ -25,7 +25,7 @@ namespace EditSharp.Components.Clips
     public sealed class ClipTransform
     {
         Animatable<Vector2> _position = new(default);
-        [Editable("Position")]
+        [Editable("Position", Frame = FrameMeasure.HalfFrame)]
         public Animatable<Vector2> Position { get => _position; set => Transaction.Set(this, ref _position, value, static (o, v) => o._position = v); }
         Animatable<Vector2> _scale = new(new Vector2(1, 1));
         [Editable("Scale")]

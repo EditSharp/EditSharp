@@ -44,6 +44,7 @@ namespace EditSharp.Editing
         public int Order { get; }
         public string? Tooltip { get; }
         public string? Unit { get; }
+        public FrameMeasure Frame { get; }
         public double? Min { get; }
         public double? Max { get; }
         public double? Step { get; }
@@ -93,6 +94,7 @@ namespace EditSharp.Editing
             Order = attribute.Order;
             Tooltip = attribute.Tooltip;
             Unit = attribute.Unit;
+            Frame = attribute.Frame;
             Min = double.IsNaN(attribute.Min) ? null : attribute.Min;
             Max = double.IsNaN(attribute.Max) ? null : attribute.Max;
             Step = double.IsNaN(attribute.Step) ? null : attribute.Step;

@@ -21,10 +21,10 @@ namespace EditSharp.Components.Nodes.Effects
         [Editable("Shape")]
         public ShapeType Shape { get => _shape; set => Transaction.Set(this, ref _shape, value, static (o, v) => o._shape = v); }
         Animatable<Vector2> _position = new(default);
-        [Editable("Position")]
+        [Editable("Position", Frame = FrameMeasure.HalfFrame)]
         public Animatable<Vector2> Position { get => _position; set => Transaction.Set(this, ref _position, value, static (o, v) => o._position = v); }
         Animatable<Vector2> _size = new(new Vector2(1, 1));
-        [Editable("Size")]
+        [Editable("Size", Frame = FrameMeasure.Frame)]
         public Animatable<Vector2> Size { get => _size; set => Transaction.Set(this, ref _size, value, static (o, v) => o._size = v); }
         Animatable<float> _rotation = new(0f);
         [Editable("Rotation", Editor = PropertyEditor.Angle)]
@@ -37,7 +37,7 @@ namespace EditSharp.Components.Nodes.Effects
         //than dedicated add/remove/reorder endpoints — flagged as an open
         //question in the schema doc, not settled here
         List<Animatable<Vector2>> _polygonPoints = [];
-        [Editable("Points")]
+        [Editable("Points", Frame = FrameMeasure.HalfFrame)]
         [VisibleWhen(nameof(Shape), ShapeType.Polygon)]
         public List<Animatable<Vector2>> PolygonPoints { get => _polygonPoints; set => Transaction.Set(this, ref _polygonPoints, value, static (o, v) => o._polygonPoints = v); }
  

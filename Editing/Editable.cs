@@ -30,6 +30,25 @@ namespace EditSharp.Editing
     }
 
     /// <summary>
+    /// How a value measures against the frame, so an editor can show it in
+    /// pixels of the render resolution. Stored values stay frame-relative,
+    /// which keeps a project independent of its canvas size.
+    /// </summary>
+    public enum FrameMeasure
+    {
+        None,
+
+        /// <summary>A length, as a fraction of the frame width.</summary>
+        Width,
+
+        /// <summary>A size: x as a fraction of the frame width, y of its height.</summary>
+        Frame,
+
+        /// <summary>A position or offset: x in half frame widths, y in half heights, up positive; 0 is the centre.</summary>
+        HalfFrame,
+    }
+
+    /// <summary>
     /// Marks a property as something an inspector or graph editor shows
     /// and edits, and says how. Opt-in: a property without this stays out
     /// of every inspector, however public it is. Everything here is a
@@ -55,6 +74,9 @@ namespace EditSharp.Editing
 
         /// <summary>Shown after the value — "dB", "Hz", "ms".</summary>
         public string? Unit { get; set; }
+
+        /// <summary>How the value measures against the frame; see FrameMeasure. Applies to a list's items too.</summary>
+        public FrameMeasure Frame { get; set; }
 
         public string? Tooltip { get; set; }
 
