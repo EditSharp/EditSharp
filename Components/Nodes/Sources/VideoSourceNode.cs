@@ -20,6 +20,7 @@ namespace EditSharp.Components.Nodes.Sources
  
         private static readonly NodePort[] StaticPorts = [new("Image", PortType.Image, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
+        public override IEnumerable<IAnimatable> Animatables => Source.Animatables;
         public override Node Duplicate() => Transaction.Suppressed(() => new VideoSourceNode { Enabled = Enabled, Source = Source.Duplicate() });
  
         public TimeSpan InPoint

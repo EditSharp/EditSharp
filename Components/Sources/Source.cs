@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using EditSharp.History;
@@ -64,7 +65,18 @@ namespace EditSharp.Components.Sources
         /// Deep copy, through SourceSerializer; see class remarks. History is
         /// suppressed: a fresh copy has no past to undo.
         /// </summary>
-        public virtual Source Duplicate() => Transaction.Suppressed(() => SourceSerializer.Deserialize(SourceSerializer.Serialize(this)));
+        public virtual Source Duplicate() => Transaction.Suppressed(() => SourceSerializer.Deserialize(SourceSerializer.Serialize(this), ReferencedTimeline));
+
+        /// <summary>
+        /// This source's keyframed values. The node holding the source reports
+        /// them as its own, so keyframe editing, fingerprints and head-trim
+        /// keyframe shifting reach them.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonIgnore]
+        public virtual IEnumerable<IAnimatable> Animatables => [];
+
+        /// <summary>The nested timeline with `id` if this source refers to it; lets Duplicate share it.</summary>
+        private protected virtual Timeline? ReferencedTimeline(Guid id) => null;
 
         /// <summary>
         /// Adds whatever identifies this source's CONTENT to a clip fingerprint

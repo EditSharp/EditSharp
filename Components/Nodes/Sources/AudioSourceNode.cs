@@ -18,6 +18,7 @@ namespace EditSharp.Components.Nodes.Sources
  
         private static readonly NodePort[] StaticPorts = [new("Audio", PortType.Audio, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
+        public override IEnumerable<IAnimatable> Animatables => Source.Animatables;
         internal override IAudioProcessor CreateAudioProcessor(AudioSession session) =>
             new ContentInputProcessor(() => Source, () => new SourceContentAudio(Source, Id, session), session);
         public override Node Duplicate() => Transaction.Suppressed(() => new AudioSourceNode { Enabled = Enabled, Source = Source.Duplicate() });

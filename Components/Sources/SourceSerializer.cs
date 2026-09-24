@@ -14,7 +14,9 @@ namespace EditSharp.Components.Sources
     /// VideoSource, AudioSource, ...) is polymorphic, discriminated by "$kind"
     /// with the id from each concrete kind's [SourceKind]; no central list to
     /// edit when a kind is added. Property names are camelCase and TimeSpans
-    /// are "c"-format strings (JsonSerializerDefaults.Web).
+    /// are "c"-format strings (JsonSerializerDefaults.Web). Enums are names,
+    /// keyframed values carry their whole track, colours are "#AARRGGBB", and
+    /// a nested Timeline is saved as its Id (see Deserialize).
     ///
     /// Consumers embedding sources in their own JSON use Options directly (or
     /// chain its TypeInfoResolver into theirs); Serialize/Deserialize are the
@@ -35,14 +37,29 @@ namespace EditSharp.Components.Sources
 
         public static string Serialize(Source source) => JsonSerializer.Serialize(source, Options);
 
-        public static Source Deserialize(string json) => Deserialize<Source>(json);
+        /// <summary>
+        /// Loads a source. Sources that refer to a nested timeline store only its
+        /// Id; `timelines` finds the Timeline for an id (typically from the
+        /// project being loaded).
+        /// </summary>
+        public static Source Deserialize(string json, Func<Guid, Timeline?>? timelines = null) => Deserialize<Source>(json, timelines);
 
-        public static T Deserialize<T>(string json) where T : Source
+        public static T Deserialize<T>(string json, Func<Guid, Timeline?>? timelines = null) where T : Source
         {
-            using (Transaction.Suppress())
+            Func<Guid, Timeline?>? previous = TimelineReferenceJsonConverter.Resolver;
+            TimelineReferenceJsonConverter.Resolver = timelines;
+
+            try
             {
-                return JsonSerializer.Deserialize<T>(json, Options)
-                    ?? throw new JsonException($"Expected a {typeof(T).Name}, got null.");
+                using (Transaction.Suppress())
+                {
+                    return JsonSerializer.Deserialize<T>(json, Options)
+                        ?? throw new JsonException($"Expected a {typeof(T).Name}, got null.");
+                }
+            }
+            finally
+            {
+                TimelineReferenceJsonConverter.Resolver = previous;
             }
         }
 
@@ -51,6 +68,14 @@ namespace EditSharp.Components.Sources
             var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
             {
                 TypeInfoResolver = new DefaultJsonTypeInfoResolver { Modifiers = { AddKinds } },
+                Converters =
+                {
+                    new JsonStringEnumConverter(),
+                    new AnimatableJsonConverterFactory(),
+                    new SKColorJsonConverter(),
+                    new SKFontStyleJsonConverter(),
+                    new TimelineReferenceJsonConverter(),
+                },
             };
 
             options.MakeReadOnly();

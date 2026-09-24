@@ -48,6 +48,9 @@ namespace EditSharp.Components
     /// </summary>
     public sealed class Timeline
     {
+        /// <summary>Stable identity, saved with the timeline; nested-timeline sources refer to it.</summary>
+        public Guid Id { get; init; } = Guid.NewGuid();
+
         private readonly List<VideoChannel> _videoChannels = [];
         private readonly List<AudioChannel> _audioChannels = [];
 
