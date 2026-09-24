@@ -1,4 +1,8 @@
 using System;
+using EditSharp.Audio.Engine;
+using System.Threading;
+using System.Runtime.InteropServices;
+using System.IO.Pipes;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -179,20 +183,6 @@ namespace EditSharp.Rendering
             using var surfacePool = new SurfacePool(
                 gpuContext.GRContext, width, height, timeline.VideoChannels.Count);
 
-            //Audio mixing touches no GPU/Skia state at all, so nothing stops
-            //it running concurrently with the GPU/decoder setup above — but
-            //it IS awaited here, before frame rendering starts, rather than
-            //run concurrently with the frame loop the way this used to work.
-            //See this class's STREAMING REWRITE remarks for why: the ffmpeg
-            //process frame rendering streams into can't be spawned until the
-            //mixed audio has already been written to a real, complete file
-            //ffmpeg can open as an input.
-            AudioBuffer masterAudio = await AudioMixer.ComposeAsync(timeline, AudioSampleRate, AudioChannelCount, report: report);
-
-            string audioPath = TempPaths.GetAudioTempFilePath($"master_{Guid.NewGuid():N}.pcm");
-            await File.WriteAllBytesAsync(audioPath, masterAudio.ToFloat32Bytes());
-            tempFiles.Add(audioPath);
-
             EditSharpConfig.Logger.Log(
                 $"Rendering {totalFrames} frame(s) at {width}x{height}@{fps}fps " +
                 "(sequential, in-process Skia compositor, streamed directly into ffmpeg — " +
@@ -201,7 +191,7 @@ namespace EditSharp.Rendering
             var renderSw = Stopwatch.StartNew();
             await RenderAndEncodeAsync(
                 timeline, fps, width, height, contentSource, totalFrames,
-                surfacePool, audioPath, masterAudio, blueprint);
+                surfacePool, report, blueprint);
             EditSharpConfig.Logger.Log($"Render + encode complete in {renderSw.ElapsedMilliseconds}ms.");
 
             return report.Build();
@@ -220,9 +210,15 @@ namespace EditSharp.Rendering
             Timeline timeline, int fps, int width, int height,
             ClipContentSource contentSource,
             int totalFrames, SurfacePool surfacePool,
-            string audioPath, AudioBuffer masterAudio, Blueprint blueprint)
+            RenderReportBuilder report, Blueprint blueprint)
         {
             bool isGif = blueprint.RenderSettings.VideoCodec == VideoCodec.GIF;
+
+            //audio streams in alongside the frames through a named pipe; GIFs have none
+            string pipeName = $"editsharp-audio-{Guid.NewGuid():N}";
+            using NamedPipeServerStream? audioPipe = isGif
+                ? null
+                : new NamedPipeServerStream(pipeName, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
             (string videoEncoderName, List<string> videoQualityArgs) =
                 await FfmpegRunner.GetVideoEncoderSettingsAsync(
                     blueprint.RenderSettings.VideoCodec, blueprint.RenderSettings.HardwareAccelerator);
@@ -250,9 +246,9 @@ namespace EditSharp.Rendering
                 args.AddRange(
                 [
                     "-f", "f32le",
-                    "-ar", masterAudio.SampleRate.ToString(CultureInfo.InvariantCulture),
-                    "-ac", masterAudio.Channels.ToString(CultureInfo.InvariantCulture),
-                    "-i", audioPath,
+                    "-ar", AudioSampleRate.ToString(CultureInfo.InvariantCulture),
+                    "-ac", AudioChannelCount.ToString(CultureInfo.InvariantCulture),
+                    "-i", $@"\\.\pipe\{pipeName}",
                 ]);
             }
 
@@ -307,6 +303,14 @@ namespace EditSharp.Rendering
             process.BeginErrorReadLine();
             process.BeginOutputReadLine();
 
+            //if ffmpeg dies before it opens the audio pipe, stop waiting for it to
+            using var exited = new CancellationTokenSource();
+            process.Exited += (_, _) => { try { exited.Cancel(); } catch (ObjectDisposedException) { } };
+
+            Task audio = audioPipe is null
+                ? Task.CompletedTask
+                : StreamAudioAsync(timeline, audioPipe, report, exited.Token);
+
             Stream stdin = process.StandardInput.BaseStream;
             try
             {
@@ -316,18 +320,53 @@ namespace EditSharp.Rendering
             }
             finally
             {
-                //Always close stdin, even if frame rendering threw —
-                //otherwise ffmpeg blocks forever waiting for more input that
-                //will never arrive, and the process (and this render) hangs
-                //instead of surfacing the real exception.
+                //always close stdin, or ffmpeg waits forever for more frames
                 stdin.Close();
             }
+
+            Exception? audioError = null;
+            try { await audio; }
+            catch (Exception ex) { audioError = ex; }
 
             await process.WaitForExitAsync();
 
             if (process.ExitCode != 0)
                 throw new InvalidOperationException(
                     $"ffmpeg exited with code {process.ExitCode} rendering output:\n{stderr}");
+
+            if (audioError is not null)
+                throw new InvalidOperationException("Streaming the render's audio failed.", audioError);
+        }
+
+        /// <summary>
+        /// The whole timeline's audio, rendered block by block through the
+        /// streaming engine (sources are waited for; failures are silence and
+        /// go to the report) and written to ffmpeg's audio pipe as f32le.
+        /// </summary>
+        private static async Task StreamAudioAsync(
+            Timeline timeline, NamedPipeServerStream pipe, RenderReportBuilder report, CancellationToken ct)
+        {
+            await pipe.WaitForConnectionAsync(ct);
+
+            await Task.Run(async () =>
+            {
+                var session = new AudioSession(new AudioFormat(AudioSampleRate, AudioChannelCount), waitForSources: true, report);
+                using var master = new MasterAudioStream(timeline, session, 0, 1, PitchPreservation.None);
+
+                long total = session.FrameOf(timeline.Duration);
+                var block = new float[session.BlockFrames * AudioChannelCount];
+
+                for (long frame = 0; frame < total; frame += session.BlockFrames)
+                {
+                    int samples = (int)Math.Min(session.BlockFrames, total - frame) * AudioChannelCount;
+                    master.Read(block.AsSpan(0, samples));
+                    await pipe.WriteAsync(MemoryMarshal.AsBytes(block.AsSpan(0, samples)).ToArray(), ct);
+                }
+
+                await pipe.FlushAsync(ct);
+            }, ct);
+
+            pipe.Disconnect();
         }
 
         private static async Task RenderAllFramesAsync(
