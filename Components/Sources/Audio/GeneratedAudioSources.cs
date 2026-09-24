@@ -121,7 +121,8 @@ public class ToneAudioSource : AudioSource
 /// like any source; its natural length is the timeline's duration. Saved as
 /// the timeline's Id (see SourceSerializer.Deserialize).
 /// </summary>
-[SourceKind("timeline-audio", DisplayName = "Timeline")]
+//unlisted until the GUI has a timeline picker
+[SourceKind("timeline-audio", DisplayName = "Timeline", Listed = false)]
 public class TimelineAudioSource : AudioSource
 {
     Timeline? _timeline;

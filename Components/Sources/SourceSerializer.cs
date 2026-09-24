@@ -31,7 +31,7 @@ namespace EditSharp.Components.Sources
     {
         public const string KindProperty = "$kind";
 
-        private static readonly IReadOnlyList<(string Id, Type Type)> Kinds = Discover(typeof(Source).Assembly);
+        internal static readonly IReadOnlyList<(string Id, Type Type)> Kinds = Discover(typeof(Source).Assembly);
 
         public static JsonSerializerOptions Options { get; } = CreateOptions();
 

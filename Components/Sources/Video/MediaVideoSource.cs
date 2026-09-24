@@ -21,7 +21,7 @@ namespace EditSharp.Components.Sources.Video;
 public class MediaVideoSource : VideoSource, IFileBackedSource
 {
     //the directory path to the file
-    string _path = null!;
+    string _path = "";
     [Editable("File", Editor = PropertyEditor.Path)]
     public required string Path { get => _path; set => Transaction.Set(this, ref _path, value, static (o, v) => o._path = v); }
 
@@ -84,6 +84,9 @@ public class MediaVideoSource : VideoSource, IFileBackedSource
 
     private static async Task<MediaInfo> ProbeAsync(string path, CancellationToken ct)
     {
+        if (string.IsNullOrEmpty(path))
+            throw new SourceUnavailableException(SourceUnavailableReason.MediaOffline, "No file is chosen.");
+
         try
         {
             return await MediaProbe.ProbeCachedAsync(path).WaitAsync(ct);

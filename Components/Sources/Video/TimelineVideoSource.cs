@@ -18,7 +18,8 @@ namespace EditSharp.Components.Sources.Video;
 /// context and surface pool, on its GPU thread, so they never cross GPU
 /// contexts and are never prefetched.
 /// </summary>
-[SourceKind("timeline-video", DisplayName = "Timeline")]
+//unlisted until the GUI has a timeline picker
+[SourceKind("timeline-video", DisplayName = "Timeline", Listed = false)]
 public class TimelineVideoSource : VideoSource
 {
     Timeline? _timeline;
