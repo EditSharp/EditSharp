@@ -41,27 +41,28 @@ namespace EditSharp.Components.Clips
         public static VideoClip CreateText(
             string content, TimeSpan start, TimeSpan duration,
             FontFace fontFace = FontFace.ComicSansMs, SKFontStyle? fontStyle = null,
-            SKTextAlign align = SKTextAlign.Center, int wordsPerLine = int.MaxValue) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new TextInputNode
+            SKTextAlign align = SKTextAlign.Center, int wordsPerLine = int.MaxValue) => CreateFromSource(new TextVideoSource
             {
                 Content = content,
                 FontFace = fontFace,
                 FontStyle = fontStyle ?? SKFontStyle.Normal,
                 Align = align,
                 WordsPerLine = wordsPerLine,
-            }))
-            { Start = start, Duration = duration });
+            }, start, duration);
  
-        public static VideoClip CreateColorGenerator(SKColor color, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new ColorGeneratorInputNode { Color = new(color) })) { Start = start, Duration = duration });
+        public static VideoClip CreateColorGenerator(SKColor color, TimeSpan start, TimeSpan duration) =>
+            CreateFromSource(Transaction.Suppressed(() => new ColorVideoSource { Color = new(color) }), start, duration);
  
-        public static VideoClip CreateNoise(TimeSpan start, TimeSpan duration, int? seed = null, float detail = 0.03f, float seetheRate = 0.03f) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new NoiseInputNode
+        public static VideoClip CreateNoise(TimeSpan start, TimeSpan duration, int? seed = null, float detail = 0.03f, float seetheRate = 0.03f) =>
+            CreateFromSource(Transaction.Suppressed(() => new NoiseVideoSource
             {
                 Seed = seed ?? Random.Shared.Next(),
                 Detail = detail,
                 SeetheRate = seetheRate,
-            }))
-            { Start = start, Duration = duration });
+            }), start, duration);
  
-        public static VideoClip CreateTimelineEmbed(TimelineReference reference, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new TimelineVideoInputNode { Reference = reference })) { Start = start, Duration = duration });
+        public static VideoClip CreateTimelineEmbed(TimelineReference reference, TimeSpan start, TimeSpan duration) =>
+            CreateFromSource(Transaction.Suppressed(() => new TimelineVideoSource { Timeline = reference.Timeline, Start = reference.Start, Duration = reference.Duration }), start, duration);
  
         /// <summary>
         /// Escape hatch for a fully custom graph — multiple InputNodes,

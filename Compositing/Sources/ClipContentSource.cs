@@ -13,7 +13,6 @@ using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Sources;
 using EditSharp.Components.Sources;
 using EditSharp.Components.Sources.Video;
-using EditSharp.Compositing.Generators;
 using EditSharp.Compositing.Gpu;
 using EditSharp.Compositing.Transforms;
 using EditSharp.History;
@@ -103,10 +102,9 @@ namespace EditSharp.Compositing.Sources
         private readonly ContentSourceOptions _options;
 
         private readonly Dictionary<Guid, MediaInput> _media = new();
-        private readonly Dictionary<Guid, SKImage> _staticContent = new();
-        private readonly Dictionary<Guid, string> _ownedTempFiles = new();
-        private readonly Dictionary<Guid, NestedTimelineRenderer> _nestedRenderers = new();
-        private readonly HashSet<Guid> _brokenStatic = new();
+
+        //compositor-bound sources a one-shot request prepared, waiting to be read inside the composite
+        private readonly Dictionary<Guid, IPreparedVideoSource> _oneShot = new();
 
         public ClipContentSource(ContentSourceOptions options) => _options = options;
 
@@ -170,7 +168,7 @@ namespace EditSharp.Compositing.Sources
                         live.Add(node.Id);
                         StartPreparing(input);
 
-                        if (_options.Buffered && input.Buffer is null && input.Failure is null && TryTakePrepared(input) is { } prepared)
+                        if (_options.Buffered && input.Buffer is null && input.Failure is null && TryTakePrepared(input) is { } prepared and not ICompositorBound)
                             OpenBuffer(input, prepared, video.Graph, EntryFrame(clip, reachEnd, frameIndex), reachEnd);
                     }
                 }
@@ -211,6 +209,7 @@ namespace EditSharp.Compositing.Sources
                     if (input.Buffer is null)
                     {
                         if (TryTakePrepared(input) is not { } prepared) continue; //failed: placeholder
+                        if (prepared is ICompositorBound) continue; //read inside the composite, never buffered
                         OpenBuffer(input, prepared, frameClip.Graph, state.FrameIndex, ReachEnd(null, clip));
                     }
 
@@ -250,23 +249,15 @@ namespace EditSharp.Compositing.Sources
                     continue;
                 }
 
-                result[node.Id] = node switch
+                if (_oneShot.Remove(node.Id, out IPreparedVideoSource? bound))
                 {
-                    VideoSourceNode media => ResolveMedia(clip, graph, media, clipSeconds, frameIndex, canvasWidth, canvasHeight),
+                    result[node.Id] = ReadOnce(bound, clip, clipSeconds, canvasWidth, canvasHeight, pool);
+                    continue;
+                }
 
-                    TextInputNode text => GetOrRasterizeText(text, frameIndex, canvasWidth, canvasHeight),
-
-                    ColorGeneratorInputNode color =>
-                        (ColorGenerator.Render(color, clipSeconds, canvasWidth, canvasHeight, pool), true),
-
-                    NoiseInputNode noise =>
-                        (NoiseGenerator.Render(noise, clipSeconds, canvasWidth, canvasHeight, pool), true),
-
-                    TimelineVideoInputNode embed =>
-                        (GetOrCreateNestedRenderer(embed).RenderFrame(clipSeconds, canvasWidth, canvasHeight), true),
-
-                    _ => throw new NotSupportedException($"ClipContentSource has no dispatch for {node.GetType().Name}."),
-                };
+                result[node.Id] = node is VideoSourceNode media
+                    ? ResolveMedia(clip, graph, media, clipSeconds, frameIndex, canvasWidth, canvasHeight, pool)
+                    : throw new NotSupportedException($"ClipContentSource has no dispatch for {node.GetType().Name}.");
             }
 
             return result;
@@ -277,7 +268,9 @@ namespace EditSharp.Compositing.Sources
         /// VideoSource.GetFrameAtAsync; nothing is kept open, so a caller
         /// touching many clips (thumbnails) holds no readers. Failures become
         /// placeholders; Complete is false if any was something still on its
-        /// way (Opening, ProxyPending, ProxyMissing). Hand the result to GetContent.
+        /// way (Opening, ProxyPending, ProxyMissing). Compositor-bound sources
+        /// are only prepared here and read by the following GetContent, on the
+        /// GPU thread. Hand the result to GetContent.
         /// </summary>
         public async Task<(IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> Media, bool Complete)> GetMediaFramesOnceAsync(
             Graph graph, double clipSeconds, int width, int height, CancellationToken ct = default)
@@ -289,21 +282,55 @@ namespace EditSharp.Compositing.Sources
             {
                 try
                 {
+                    IPreparedVideoSource prepared = await node.Source.PrepareAsync(new VideoPrepareContext(_options.HwAccel, _options.SourceMode), ct);
+                    if (prepared is ICompositorBound)
+                    {
+                        lock (_oneShot) _oneShot[node.Id] = prepared;
+                        return (Id: node.Id, Image: (SKImage?)null, Transient: false, Pending: false);
+                    }
+                    prepared.Dispose();
+
                     SKImage image = await node.Source.GetFrameAtAsync(content, _options.SourceMode, width, height, ct);
-                    return (Id: node.Id, Image: image, Transient: true, Pending: false);
+                    return (Id: node.Id, Image: (SKImage?)image, Transient: true, Pending: false);
                 }
                 catch (SourceUnavailableException ex)
                 {
                     bool pending = ex.Reason is SourceUnavailableReason.ProxyPending or SourceUnavailableReason.ProxyMissing or SourceUnavailableReason.Opening;
-                    return (Id: node.Id, Image: MediaPlaceholder.Get(width, height, ex.Reason), Transient: false, Pending: pending);
+                    return (Id: node.Id, Image: (SKImage?)MediaPlaceholder.Get(width, height, ex.Reason), Transient: false, Pending: pending);
                 }
             }));
 
-            var media = frames.ToDictionary(f => f.Id, f => (f.Image, f.Transient));
+            var media = frames.Where(f => f.Image is not null).ToDictionary(f => f.Id, f => (f.Image!, f.Transient));
             return (media, !frames.Any(f => f.Pending));
         }
 
-        private (SKImage, bool) ResolveMedia(VideoClip clip, Graph graph, VideoSourceNode node, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight)
+        //a compositor-bound source's frame, read and let go of in one go (see GetMediaFramesOnceAsync)
+        private (SKImage, bool) ReadOnce(IPreparedVideoSource prepared, VideoClip clip, double clipSeconds, int canvasWidth, int canvasHeight, SurfacePool pool)
+        {
+            TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
+
+            try
+            {
+                using IVideoFrameReader reader = prepared.OpenReader(new VideoReaderOptions(
+                    _options.ReadMode, content, _options.Fps, clip.Speed, CallerOwnsFrames: true,
+                    CanvasWidth: canvasWidth, CanvasHeight: canvasHeight, Compositor: new CompositorAccess(pool, _options)));
+
+                VideoFrame frame = reader.GetFrame(content);
+                return (frame.Image, frame.Transient);
+            }
+            catch (SourceUnavailableException ex)
+            {
+                if (ex.Reason is SourceUnavailableReason.Opening or SourceUnavailableReason.ProxyPending or SourceUnavailableReason.ProxyMissing)
+                    LastFrameIncomplete = true;
+                return (MediaPlaceholder.Get(canvasWidth, canvasHeight, ex.Reason), false);
+            }
+            finally
+            {
+                prepared.Dispose();
+            }
+        }
+
+        private (SKImage, bool) ResolveMedia(VideoClip clip, Graph graph, VideoSourceNode node, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool)
         {
             MediaInput input = Input(clip, node);
             TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
@@ -320,13 +347,24 @@ namespace EditSharp.Compositing.Sources
 
                 IPreparedVideoSource prepared = AwaitPrepared(input);
 
+                //drawn with the compositor's own GPU context: read here, on its thread, never buffered
+                if (prepared is ICompositorBound)
+                {
+                    input.Reader ??= prepared.OpenReader(
+                        ReaderOptions(input, prepared, graph, content, callerOwnsFrames: false, canvasWidth, canvasHeight) with
+                        {
+                            Compositor = new CompositorAccess(pool, _options),
+                        });
+                    return Owned(input.Reader.GetFrame(content));
+                }
+
                 if (_options.Buffered)
                 {
                     input.Buffer ??= OpenBuffer(input, prepared, graph, frameIndex, ReachEnd(null, clip));
                     return Owned(input.Buffer.Take(frameIndex, content));
                 }
 
-                input.Reader ??= prepared.OpenReader(ReaderOptions(input, prepared, graph, content, callerOwnsFrames: false));
+                input.Reader ??= prepared.OpenReader(ReaderOptions(input, prepared, graph, content, callerOwnsFrames: false, canvasWidth, canvasHeight));
                 return Owned(input.Reader.GetFrame(content));
             }
             catch (SourceUnavailableException ex)
@@ -451,7 +489,7 @@ namespace EditSharp.Compositing.Sources
             int firstClipFrame = (int)Math.Ceiling(clip.Start.TotalSeconds * _options.Fps - 1e-9);
             int endFrame = (int)Math.Ceiling(reachEnd.TotalSeconds * _options.Fps - 1e-9);
 
-            IVideoFrameReader reader = prepared.OpenReader(ReaderOptions(input, prepared, graph, content, callerOwnsFrames: true));
+            IVideoFrameReader reader = prepared.OpenReader(ReaderOptions(input, prepared, graph, content, callerOwnsFrames: true, _options.CanvasWidth, _options.CanvasHeight));
 
             return input.Buffer = new BufferedVideoReader(
                 reader, firstFrame, _options.Direction, EditSharpConfig.ReaderBufferFrames,
@@ -459,7 +497,8 @@ namespace EditSharp.Compositing.Sources
                 frame => frame >= firstClipFrame && frame < endFrame);
         }
 
-        private VideoReaderOptions ReaderOptions(MediaInput input, IPreparedVideoSource prepared, Graph graph, TimeSpan startAt, bool callerOwnsFrames)
+        private VideoReaderOptions ReaderOptions(
+            MediaInput input, IPreparedVideoSource prepared, Graph graph, TimeSpan startAt, bool callerOwnsFrames, int canvasWidth, int canvasHeight)
         {
             //decode only as large as the clip's own transform will ever show it
             (int nativeWidth, int nativeHeight) = prepared.NativeSize;
@@ -470,7 +509,7 @@ namespace EditSharp.Compositing.Sources
                 : (0, 0);
 
             return new VideoReaderOptions(
-                _options.ReadMode, startAt, _options.Fps, input.Clip.Speed, width, height, callerOwnsFrames);
+                _options.ReadMode, startAt, _options.Fps, input.Clip.Speed, width, height, callerOwnsFrames, canvasWidth, canvasHeight);
         }
 
         private void Release(MediaInput input)
@@ -538,66 +577,13 @@ namespace EditSharp.Compositing.Sources
             return source is IFileBackedSource file ? $"{kind}: {file.FilePath}" : kind;
         }
 
-        // ---------------------------------------------------------------
-        // Not-yet-sources: text and nested timelines
-        // ---------------------------------------------------------------
-
-        private (SKImage, bool) GetOrRasterizeText(TextInputNode text, int frameIndex, int canvasWidth, int canvasHeight)
-        {
-            if (_staticContent.TryGetValue(text.Id, out SKImage? cached)) return (cached, false);
-
-            if (_brokenStatic.Contains(text.Id))
-                return (MediaPlaceholder.Get(canvasWidth, canvasHeight, SourceUnavailableReason.DecodeError), false);
-
-            try
-            {
-                string path = TextRasterizer.Rasterize(text, canvasWidth, canvasHeight, out _, out _);
-                _ownedTempFiles[text.Id] = path;
-
-                using SKData data = SKData.Create(path) ?? throw new InvalidOperationException($"Could not read '{path}'.");
-                SKImage image = SKImage.FromEncodedData(data) ?? throw new InvalidOperationException($"Could not decode '{path}'.");
-
-                _staticContent[text.Id] = image;
-                return (image, false);
-            }
-            catch (Exception ex)
-            {
-                _brokenStatic.Add(text.Id);
-                EditSharpConfig.Logger.LogWarning($"A text node couldn't be rasterized, showing a placeholder: {ex.Message}");
-
-                _options.Report?.Record(text.Id, "text", SourceUnavailableReason.DecodeError, ex.Message,
-                    FrameStateResolver.TimeOfFrame(frameIndex, _options.Fps));
-
-                return (MediaPlaceholder.Get(canvasWidth, canvasHeight, SourceUnavailableReason.DecodeError), false);
-            }
-        }
-
-        private NestedTimelineRenderer GetOrCreateNestedRenderer(TimelineVideoInputNode embed)
-        {
-            if (_nestedRenderers.TryGetValue(embed.Id, out NestedTimelineRenderer? existing)) return existing;
-
-            //nested timelines read on demand, in the same mode and under the same failure policy as their parent
-            var renderer = new NestedTimelineRenderer(embed.Reference, _options with { Buffered = false, Direction = 1 });
-            _nestedRenderers[embed.Id] = renderer;
-            return renderer;
-        }
-
         public void Dispose()
         {
             foreach (MediaInput input in _media.Values) Release(input);
             _media.Clear();
 
-            foreach (SKImage image in _staticContent.Values) image.Dispose();
-            _staticContent.Clear();
-
-            foreach (NestedTimelineRenderer renderer in _nestedRenderers.Values) renderer.Dispose();
-            _nestedRenderers.Clear();
-
-            foreach (string path in _ownedTempFiles.Values)
-            {
-                try { System.IO.File.Delete(path); } catch { /* best-effort cleanup */ }
-            }
-            _ownedTempFiles.Clear();
+            foreach (IPreparedVideoSource prepared in _oneShot.Values) prepared.Dispose();
+            _oneShot.Clear();
         }
     }
 }

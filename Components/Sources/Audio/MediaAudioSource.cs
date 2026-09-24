@@ -13,7 +13,7 @@ namespace EditSharp.Components.Sources.Audio;
 /// soundtrack), streamed through ffmpeg. A file with no audio stream reads as
 /// silence for its length.
 /// </summary>
-[SourceKind("media-audio")]
+[SourceKind("media-audio", DisplayName = "Media")]
 public class MediaAudioSource : AudioSource, IFileBackedSource
 {
     //the directory path to the file

@@ -1,7 +1,5 @@
 using System;
 using SkiaSharp;
-using EditSharp.Components.Nodes.Sources;
-using EditSharp.Compositing.Gpu;
  
 namespace EditSharp.Compositing.Generators
 {
@@ -202,50 +200,37 @@ namespace EditSharp.Compositing.Generators
         {
             SKRuntimeEffect? effect = SKRuntimeEffect.CreateShader(ShaderSource, out string errors);
             if (effect == null)
-                throw new InvalidOperationException($"NoiseInputNode shader failed to compile: {errors}");
+                throw new InvalidOperationException($"The noise shader failed to compile: {errors}");
             return effect;
         }
  
-        public static SKImage Render(
-            NoiseInputNode node, double clipSeconds, int canvasWidth, int canvasHeight, SurfacePool pool)
+        /// <summary>
+        /// Draws the noise field for `seconds` of content time over a
+        /// width x height canvas. `detail` sets the cell size relative to the
+        /// canvas, `seethe` how fast it evolves; `seed` picks the pattern.
+        /// </summary>
+        public static void Draw(SKCanvas canvas, int seed, float detail, float seethe, double seconds, int width, int height)
         {
-            double xscale = Math.Max(node.Detail, 0f) * DetailCellsPerCanvas;
-            double yscale = xscale * canvasHeight / (double)canvasWidth;
-            double tscale = Math.Max(node.SeetheRate, 0f) * SeetheCellsPerSecond;
- 
-            var rng = new Random(node.Seed);
-            // 289 is the exact-integer hash's wrap period (see the shader):
-            // offsets beyond it add no new lattice variety, and a smaller
-            // magnitude leaves more mantissa for the sub-cell fraction.
+            double xscale = Math.Max(detail, 0f) * DetailCellsPerCanvas;
+            double yscale = xscale * height / (double)width;
+            double tscale = Math.Max(seethe, 0f) * SeetheCellsPerSecond;
+
+            //289 is the lattice hash's wrap period: larger offsets add nothing
+            var rng = new Random(seed);
             float seedOffsetX = (float)(rng.NextDouble() * 289.0);
             float seedOffsetY = (float)(rng.NextDouble() * 289.0);
             float seedOffsetZ = (float)(rng.NextDouble() * 289.0);
- 
-            float[] u0 = [canvasWidth, canvasHeight, (float)xscale, (float)yscale];
-            float[] u1 = [(float)tscale, (float)clipSeconds, seedOffsetX, seedOffsetY];
-            float[] u2 = [seedOffsetZ, 0f, 0f, 0f];
- 
+
             var uniforms = new SKRuntimeEffectUniforms(Effect)
             {
-                ["u0"] = u0,
-                ["u1"] = u1,
-                ["u2"] = u2,
+                ["u0"] = new float[] { width, height, (float)xscale, (float)yscale },
+                ["u1"] = new float[] { (float)tscale, (float)seconds, seedOffsetX, seedOffsetY },
+                ["u2"] = new float[] { seedOffsetZ, 0f, 0f, 0f },
             };
- 
+
             using SKShader shader = Effect.ToShader(uniforms);
             using var paint = new SKPaint { Shader = shader };
- 
-            SKSurface surface = pool.Rent(canvasWidth, canvasHeight);
-            try
-            {
-                surface.Canvas.Clear(SKColors.Transparent);
-                surface.Canvas.DrawRect(new SKRect(0, 0, canvasWidth, canvasHeight), paint);
-                return surface.Snapshot();
-            }
-            finally
-            {
-                pool.Return(surface, canvasWidth, canvasHeight);
-            }
+            canvas.DrawRect(new SKRect(0, 0, width, height), paint);
         }
     }
 }

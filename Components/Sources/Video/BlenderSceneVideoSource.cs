@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 namespace EditSharp.Components.Sources.Video;
 
 // EXAMPLE CODE: DOES NOTHING; the bare shape of a video kind
-[SourceKind("blender-scene")]
+[SourceKind("blender-scene", DisplayName = "Blender scene", Listed = false)]
 public class BlenderSceneVideoSource : VideoSource
 {
     public override BlenderSceneVideoSource Duplicate() => (BlenderSceneVideoSource)base.Duplicate();

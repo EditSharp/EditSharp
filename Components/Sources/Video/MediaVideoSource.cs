@@ -17,7 +17,7 @@ namespace EditSharp.Components.Sources.Video;
 /// reads its proxy (ProxyCache) or the original according to the session's
 /// SourceMode; random access always reads the proxy.
 /// </summary>
-[SourceKind("media-video")]
+[SourceKind("media-video", DisplayName = "Media")]
 public class MediaVideoSource : VideoSource, IFileBackedSource
 {
     //the directory path to the file
@@ -81,9 +81,6 @@ public class MediaVideoSource : VideoSource, IFileBackedSource
         base.AddFingerprint(ref hash);
         hash.Add(Path);
     }
-
-    /// <summary>Content time to file time, through the LIVE Start/Duration/Loop; see Source.ToSourceTime.</summary>
-    internal TimeSpan MapTime(TimeSpan contentTime, TimeSpan? naturalLength) => ToSourceTime(contentTime, naturalLength);
 
     private static async Task<MediaInfo> ProbeAsync(string path, CancellationToken ct)
     {

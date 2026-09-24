@@ -1,6 +1,6 @@
 using System;
 using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Nodes.Sources;
 using EditSharp.Editing;
 using EditSharp.History;
 using EditSharp.Components;

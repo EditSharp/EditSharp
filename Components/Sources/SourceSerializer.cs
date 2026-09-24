@@ -67,7 +67,7 @@ namespace EditSharp.Components.Sources
         {
             var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
             {
-                TypeInfoResolver = new DefaultJsonTypeInfoResolver { Modifiers = { AddKinds } },
+                TypeInfoResolver = new DefaultJsonTypeInfoResolver { Modifiers = { AddKinds, SkipAnimatablesList } },
                 Converters =
                 {
                     new JsonStringEnumConverter(),
@@ -80,6 +80,15 @@ namespace EditSharp.Components.Sources
 
             options.MakeReadOnly();
             return options;
+        }
+
+        //Animatables only lists values the kind's own properties already save; overrides don't inherit [JsonIgnore]
+        private static void SkipAnimatablesList(JsonTypeInfo info)
+        {
+            if (!typeof(Source).IsAssignableFrom(info.Type) || info.Kind != JsonTypeInfoKind.Object) return;
+
+            for (int i = info.Properties.Count - 1; i >= 0; i--)
+                if (info.Properties[i].Name == "animatables") info.Properties.RemoveAt(i);
         }
 
         private static void AddKinds(JsonTypeInfo info)

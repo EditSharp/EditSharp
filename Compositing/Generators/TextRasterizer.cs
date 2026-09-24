@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using SkiaSharp;
-using EditSharp.Components.Nodes.Sources;
 using EditSharp.Components;
 using EditSharp.Video;
 
@@ -52,79 +51,50 @@ namespace EditSharp.Compositing.Generators
         /// </summary>
         private const float MeasurementSize = 100f;
  
-        public static string Rasterize(
-            TextInputNode node, int canvasWidth, int canvasHeight,
-            out int width, out int height)
+        /// <summary>
+        /// Records a block of text as a picture: white, wrapped every
+        /// `wordsPerLine` words and at hard line breaks, aligned within the
+        /// block, and sized so the block fits the canvas at up to
+        /// MaxRasterScale. Null when there's nothing to draw.
+        /// </summary>
+        public static (SKPicture Picture, int Width, int Height)? Record(
+            string content, FontFace fontFace, SKFontStyle fontStyle, SKTextAlign align, int wordsPerLine,
+            int canvasWidth, int canvasHeight)
         {
-            List<string> lines = WrapLines(node.Content, node.WordsPerLine);
- 
-            if (lines.Count == 0)
-                throw new InvalidOperationException("TextInputNode.Content has no renderable text.");
- 
-            using SKTypeface typeface = node.FontFace.ToTypeface(node.FontStyle);
+            List<string> lines = WrapLines(content, wordsPerLine);
+            if (lines.Count == 0) return null;
+
+            using SKTypeface typeface = fontFace.ToTypeface(fontStyle);
             using var measuringFont = new SKFont(typeface, MeasurementSize);
- 
-            var (measuredWidth, measuredHeight, lineHeight, ascent) =
-                MeasureBlock(lines, measuringFont);
- 
-            //scale the whole block so it just fits the canvas, then allow it to go
-            //further only up to the raster cap
-            float fit = Math.Min(
-                canvasWidth / measuredWidth,
-                canvasHeight / measuredHeight);
- 
-            float target = fit * MaxRasterScale;
-            float fontSize = MeasurementSize * target;
- 
-            using var font = new SKFont(typeface, fontSize);
-            var (blockWidth, blockHeight, scaledLineHeight, scaledAscent) =
-                MeasureBlock(lines, font);
- 
-            width = Math.Max(2, (int)Math.Ceiling(blockWidth));
-            height = Math.Max(2, (int)Math.Ceiling(blockHeight));
- 
-            var info = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Premul);
-            using SKSurface surface = SKSurface.Create(info);
-            SKCanvas canvas = surface.Canvas;
-            canvas.Clear(SKColors.Transparent);
- 
-            using var paint = new SKPaint
-            {
-                Color = SKColors.White,
-                IsAntialias = true,
-                Style = SKPaintStyle.Fill,
-            };
- 
+            var (measuredWidth, measuredHeight, _, _) = MeasureBlock(lines, measuringFont);
+
+            //scale the block to just fit the canvas, then up to the raster cap
+            float fit = Math.Min(canvasWidth / measuredWidth, canvasHeight / measuredHeight);
+            using var font = new SKFont(typeface, MeasurementSize * fit * MaxRasterScale);
+            var (blockWidth, blockHeight, lineHeight, ascent) = MeasureBlock(lines, font);
+
+            int width = Math.Max(2, (int)Math.Ceiling(blockWidth));
+            int height = Math.Max(2, (int)Math.Ceiling(blockHeight));
+
+            using var recorder = new SKPictureRecorder();
+            SKCanvas canvas = recorder.BeginRecording(new SKRect(0, 0, width, height));
+            using var paint = new SKPaint { Color = SKColors.White, IsAntialias = true, Style = SKPaintStyle.Fill };
+
             for (int i = 0; i < lines.Count; i++)
             {
                 float lineWidth = font.MeasureText(lines[i]);
- 
-                float x = node.Align switch
+                float x = align switch
                 {
                     SKTextAlign.Left => 0,
                     SKTextAlign.Right => width - lineWidth,
                     _ => (width - lineWidth) / 2f,
                 };
- 
-                //DrawText positions by baseline, so step down by the ascent to get
-                //the line's top edge where it belongs
-                float baseline = (i * scaledLineHeight) - scaledAscent;
- 
-                canvas.DrawText(lines[i], x, baseline, SKTextAlign.Left, font, paint);
+
+                //DrawText positions by baseline: step down by the ascent to reach the line's top
+                canvas.DrawText(lines[i], x, i * lineHeight - ascent, SKTextAlign.Left, font, paint);
             }
- 
-            canvas.Flush();
- 
-            string path = TempPaths.GetImageTempFilePath($"text_{Guid.NewGuid():N}.png");
- 
-            using (SKImage image = surface.Snapshot())
-            using (SKData data = image.Encode(SKEncodedImageFormat.Png, 100))
-            using (FileStream stream = File.OpenWrite(path))
-            {
-                data.SaveTo(stream);
-            }
- 
-            return path;
+
+            return (recorder.EndRecording(), width, height);
         }
  
         /// <summary>

@@ -1,5 +1,7 @@
 using System;
 using SkiaSharp;
+using EditSharp.Compositing.Gpu;
+using EditSharp.Compositing.Sources;
 using EditSharp.Video;
 
 namespace EditSharp.Components.Sources.Video
@@ -38,7 +40,8 @@ namespace EditSharp.Components.Sources.Video
     /// Speed is only a hint for kinds that retime their own decode; the times
     /// passed to GetFrame are already content time. MaxWidth/MaxHeight is the
     /// largest size compositing can use (0 = native); kinds clamp it to their
-    /// native size and may ignore it.
+    /// native size and may ignore it. CanvasWidth/CanvasHeight is the output
+    /// canvas, for kinds that draw at canvas size (generators).
     ///
     /// CallerOwnsFrames asks the reader to hand over every frame it decodes
     /// (Transient) instead of keeping its current one; for a caller that
@@ -53,7 +56,24 @@ namespace EditSharp.Components.Sources.Video
         double Speed = 1d,
         int MaxWidth = 0,
         int MaxHeight = 0,
-        bool CallerOwnsFrames = false);
+        bool CallerOwnsFrames = false,
+        int CanvasWidth = 0,
+        int CanvasHeight = 0,
+        CompositorAccess? Compositor = null);
+
+    /// <summary>
+    /// What a compositor-bound reader (see ICompositorBound) may use: the
+    /// compositor's surface pool, on its GPU thread, and the session's content
+    /// options for anything it composites itself (a nested timeline).
+    /// </summary>
+    internal sealed record CompositorAccess(SurfacePool Pool, ContentSourceOptions Options);
+
+    /// <summary>
+    /// A prepared source whose readers draw with the compositor's own GPU
+    /// context. Compositing never buffers them: they're opened and read inside
+    /// the frame's composite, on the GPU thread, with CompositorAccess set.
+    /// </summary>
+    internal interface ICompositorBound { }
 
     /// <summary>A source readied for one session; opens readers on demand and owns whatever they share.</summary>
     internal interface IPreparedVideoSource : IDisposable

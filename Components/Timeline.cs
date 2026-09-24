@@ -4,6 +4,7 @@ using System.Linq;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Sources.Video;
 using EditSharp.History;
 
 namespace EditSharp.Components
@@ -363,8 +364,9 @@ namespace EditSharp.Components
 
         private static IEnumerable<Timeline> EmbeddedTimelinesOf(Clip clip)
         {
-            foreach (TimelineVideoInputNode node in clip.Graph.AllNodes.OfType<TimelineVideoInputNode>())
-                yield return node.Reference.Timeline;
+            foreach (VideoSourceNode node in clip.Graph.AllNodes.OfType<VideoSourceNode>())
+                if (node.Source is TimelineVideoSource { Timeline: { } embedded })
+                    yield return embedded;
 
             foreach (TimelineAudioInputNode node in clip.Graph.AllNodes.OfType<TimelineAudioInputNode>())
                 yield return node.Reference.Timeline;

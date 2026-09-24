@@ -19,6 +19,9 @@ namespace EditSharp.Components.Sources.Video
 
         public override VideoSource Duplicate() => (VideoSource)base.Duplicate();
 
+        /// <summary>Content time to source time, through the live Start/Duration/Loop; see Source.ToSourceTime.</summary>
+        internal TimeSpan MapTime(TimeSpan contentTime, TimeSpan? naturalLength) => ToSourceTime(contentTime, naturalLength);
+
         /// <summary>
         /// One frame at `contentTime`, for callers that just need a single
         /// picture (thumbnails); nothing stays open afterwards. The caller owns
