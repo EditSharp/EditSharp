@@ -964,7 +964,11 @@ namespace EditSharp.Playback
                 bool audioFollows = PlaybackMode is PlaybackMode.EveryFrame or PlaybackMode.FrameDropping;
                 bool audioDropsLate = PlaybackMode == PlaybackMode.FrameDropping;
 
-                var startGate = new PlaybackStartGate(2, onReleased: () => OnPlaybackStarted(EventArgs.Empty));
+                var startGate = new PlaybackStartGate(2, onReleased: () =>
+                {
+                    referenceClock.Begin();
+                    OnPlaybackStarted(EventArgs.Empty);
+                });
 
                 // See class remarks, SUPERSEDED SESSIONS ARE ABANDONED, NOT
                 // AWAITED — queue behind whatever session came before, off

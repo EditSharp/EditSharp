@@ -60,11 +60,21 @@ namespace EditSharp.Playback
         private TimeSpan _reportedPosition;
         private TimeSpan _reportedAt;
  
+        //the clock holds its position until Begin, so nothing moves while playback is still waiting on its sources
+        private bool _begun;
+        private bool _paused;
+
         /// <summary>`rate` is timeline time per second of wall time: the playback speed, negative in reverse.</summary>
-        public PlaybackReferenceClock(double rate = 1)
+        public PlaybackReferenceClock(double rate = 1) => Rate = rate;
+
+        /// <summary>Starts the clock: playback has really started.</summary>
+        public void Begin()
         {
-            Rate = rate;
-            _wallClock.Start();
+            lock (_lock)
+            {
+                _begun = true;
+                if (!_paused) _wallClock.Start();
+            }
         }
 
         public double Rate { get; }
@@ -93,8 +103,23 @@ namespace EditSharp.Playback
             }
         }
  
-        public void PauseWallClock() => _wallClock.Stop();
-        public void ResumeWallClock() => _wallClock.Start();
+        public void PauseWallClock()
+        {
+            lock (_lock)
+            {
+                _paused = true;
+                _wallClock.Stop();
+            }
+        }
+
+        public void ResumeWallClock()
+        {
+            lock (_lock)
+            {
+                _paused = false;
+                if (_begun) _wallClock.Start();
+            }
+        }
     }
 }
  
