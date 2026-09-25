@@ -4,9 +4,9 @@ using System.Threading.Tasks;
 
 namespace EditSharp.Components.Sources.Audio;
 
-// EXAMPLE CODE: DOES NOTHING; the bare shape of an audio kind
+//an example that does nothing: the bare shape of an audio kind
 [SourceKind("vst-instrument", DisplayName = "VST instrument", Listed = false)]
-public class VSTInstrumentSource : AudioSource
+internal class VSTInstrumentSource : AudioSource
 {
     public override VSTInstrumentSource Duplicate() => (VSTInstrumentSource)base.Duplicate();
 

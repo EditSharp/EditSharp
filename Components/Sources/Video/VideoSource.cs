@@ -6,30 +6,36 @@ using EditSharp.Video;
 
 namespace EditSharp.Components.Sources.Video
 {
-    /// <summary>
-    /// A source of frames. Reading is two-phase: PrepareAsync does the slow,
-    /// once-per-session work (probing, choosing which file/decoder to use) and
-    /// hands back a prepared handle; the handle then opens cheap, synchronous
-    /// readers whenever compositing needs one. The handle and its readers hold
-    /// all state; the source itself stays plain data.
-    /// </summary>
+    /// <summary>A source of frames.</summary>
+    /// <remarks>
+    /// Reading has two steps. PrepareAsync does the slow work once per session
+    /// (probing, choosing a file and decoder) and returns a prepared handle; the
+    /// handle opens cheap, synchronous readers whenever compositing needs one. The
+    /// handle and its readers hold all the state, so the source stays plain data.
+    /// </remarks>
     public abstract class VideoSource : Source
     {
+        /// <summary>Readies the source for one session.</summary>
+        /// <param name="context">What the session needs from every source it prepares.</param>
+        /// <param name="ct">Cancels preparing.</param>
+        /// <returns>The prepared source; the caller disposes it.</returns>
+        /// <exception cref="SourceUnavailableException">The source can't provide content.</exception>
         internal abstract Task<IPreparedVideoSource> PrepareAsync(VideoPrepareContext context, CancellationToken ct = default);
 
+        /// <inheritdoc/>
         public override VideoSource Duplicate() => (VideoSource)base.Duplicate();
 
-        /// <summary>Content time to source time, through the live Start/Duration/Loop; see Source.ToSourceTime.</summary>
+        //content time to source time through the live Start/Duration/Loop; see Source.ToSourceTime
         internal TimeSpan MapTime(TimeSpan contentTime, TimeSpan? naturalLength) => ToSourceTime(contentTime, naturalLength);
 
-        /// <summary>
-        /// One frame at `contentTime`, for callers that just need a single
-        /// picture (thumbnails); nothing stays open afterwards. The caller owns
-        /// the result. `mode` picks proxy or original like a session would
-        /// (ProxiesOnly throws ProxyPending or ProxyMissing where there's no proxy frame);
-        /// `maxWidth`/`maxHeight` cap the size (0 = native). Kinds with a
-        /// cheaper route (a still image) override it.
-        /// </summary>
+        /// <summary>One frame, for callers that need a single picture, such as thumbnails; nothing stays open afterwards.</summary>
+        /// <param name="contentTime">Time since the in-point, at 1x.</param>
+        /// <param name="mode">Whether to read the proxy or the original, as a session would.</param>
+        /// <param name="maxWidth">The largest width wanted; 0 for the native width.</param>
+        /// <param name="maxHeight">The largest height wanted; 0 for the native height.</param>
+        /// <param name="ct">Cancels reading the frame.</param>
+        /// <returns>The frame; the caller disposes it.</returns>
+        /// <exception cref="SourceUnavailableException">The frame can't be read; with <see cref="SourceMode.ProxiesOnly"/>, a frame with no proxy is <see cref="SourceUnavailableReason.ProxyPending"/> or <see cref="SourceUnavailableReason.ProxyMissing"/>.</exception>
         public virtual Task<SKImage> GetFrameAtAsync(
             TimeSpan contentTime, SourceMode mode = SourceMode.SourceOnly, int maxWidth = 0, int maxHeight = 0,
             CancellationToken ct = default) => Task.Run(async () =>

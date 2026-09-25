@@ -1,12 +1,7 @@
 namespace EditSharp.Components.Sources
 {
-    /// <summary>
-    /// Whether proxy-capable sources read their proxy or their original.
-    /// Kinds with no notion of a proxy (a still image, a 3D scene) ignore
-    /// this and always render from source. Random access (scrubbing, reverse)
-    /// always needs a proxy regardless of mode; decoding an original at an
-    /// arbitrary position per frame isn't viable.
-    /// </summary>
+    /// <summary>Whether sources that have proxies read the proxy or the original.</summary>
+    /// <remarks>Kinds with no proxy (a still image, a generator) ignore this. Random access (scrubbing, reverse) always reads the proxy whatever the mode, since decoding an original at an arbitrary position every frame is too slow.</remarks>
     public enum SourceMode
     {
         /// <summary>Only proxies; a frame without one is ProxyPending while a build is under way, ProxyMissing otherwise.</summary>

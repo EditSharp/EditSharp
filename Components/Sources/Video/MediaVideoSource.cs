@@ -10,26 +10,28 @@ using EditSharp.Video;
 
 namespace EditSharp.Components.Sources.Video;
 
-/// <summary>
-/// A video file or a still image on disk; which one is decided by probing
-/// when prepared, never stored. A still has no natural length (Duration or
-/// the clip decides), has no proxy and is decoded once per session. A video
-/// reads its proxy (ProxyCache) or the original according to the session's
-/// SourceMode; random access always reads the proxy.
-/// </summary>
+/// <summary>A video file or a still image on disk.</summary>
+/// <remarks>
+/// Which one it is comes from probing the file, and isn't saved. A still has no
+/// natural length and no proxy, and is decoded once per session. A video reads
+/// its proxy or the original according to the session's <see cref="SourceMode"/>;
+/// random access always reads the proxy.
+/// </remarks>
 [SourceKind("media-video", DisplayName = "Media")]
 public class MediaVideoSource : VideoSource, IFileBackedSource
 {
-    //the directory path to the file
     string _path = "";
+    /// <summary>The full path of the file.</summary>
     [Editable("File", Editor = PropertyEditor.Path)]
     public required string Path { get => _path; set { Transaction.Set(this, ref _path, value, static (o, v) => o._path = v); EndMayHaveMoved(); } }
 
     string IFileBackedSource.FilePath => Path;
 
+    /// <inheritdoc/>
     public override MediaVideoSource Duplicate() => (MediaVideoSource)base.Duplicate();
 
-    //from the probe cache; a file not probed yet starts its probe and reads as unknown
+    /// <inheritdoc/>
+    /// <remarks>Answers from the probe cache; a file not probed yet starts its probe in the background.</remarks>
     public override bool TryGetNaturalLength(out TimeSpan? length)
     {
         length = null;
@@ -45,6 +47,10 @@ public class MediaVideoSource : VideoSource, IFileBackedSource
         return length is not null;
     }
 
+    /// <summary>How long the video is, from probing the file.</summary>
+    /// <param name="ct">Cancels waiting for the probe.</param>
+    /// <returns>The video's length; null for a still image.</returns>
+    /// <exception cref="SourceUnavailableException"><see cref="SourceUnavailableReason.MediaOffline"/> when no file is chosen or it's missing; <see cref="SourceUnavailableReason.DecodeError"/> when it can't be probed or has no duration.</exception>
     public override async Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default)
     {
         MediaInfo info = await ProbeAsync(Path, ct);
@@ -79,6 +85,8 @@ public class MediaVideoSource : VideoSource, IFileBackedSource
         return new PreparedMediaVideo(this, path, info, plan, context.Mode, proxy);
     }
 
+    /// <inheritdoc/>
+    /// <remarks>A still image is read directly in every mode, since it has no proxy.</remarks>
     public override async Task<SKImage> GetFrameAtAsync(
         TimeSpan contentTime, SourceMode mode = SourceMode.SourceOnly, int maxWidth = 0, int maxHeight = 0,
         CancellationToken ct = default)

@@ -17,13 +17,19 @@ namespace EditSharp.Components.Sources.Video;
 public class ColorVideoSource : VideoSource
 {
     Animatable<SKColor> _color = new(SKColors.Black);
+    /// <summary>The colour; black by default.</summary>
     [Editable("Color")]
     public Animatable<SKColor> Color { get => _color; set => Transaction.Set(this, ref _color, value, static (o, v) => o._color = v); }
 
+    /// <inheritdoc/>
     public override IEnumerable<IAnimatable> Animatables => [Color];
 
+    /// <inheritdoc/>
     public override ColorVideoSource Duplicate() => (ColorVideoSource)base.Duplicate();
 
+    /// <summary>Always null: a colour has no end of its own.</summary>
+    /// <param name="ct">Unused.</param>
+    /// <returns>Null.</returns>
     public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult<TimeSpan?>(null);
 
     internal override Task<IPreparedVideoSource> PrepareAsync(VideoPrepareContext context, CancellationToken ct = default) =>
@@ -34,24 +40,31 @@ public class ColorVideoSource : VideoSource
         }));
 }
 
-/// <summary>An evolving noise field filling the canvas.</summary>
+/// <summary>A field of gradient noise filling the canvas, changing over time.</summary>
 [SourceKind("noise", DisplayName = "Noise")]
 public class NoiseVideoSource : VideoSource
 {
     int _seed = Random.Shared.Next();
+    /// <summary>Picks the pattern; the same seed draws the same noise. Random by default.</summary>
     [Editable("Seed")]
     public int Seed { get => _seed; set => Transaction.Set(this, ref _seed, value, static (o, v) => o._seed = v); }
 
     float _detail = 0.03f;
+    /// <summary>How fine the noise is, from 0 to 1; higher packs more cells across the canvas.</summary>
     [Editable("Detail", Min = 0, Max = 1, Step = 0.001)]
     public float Detail { get => _detail; set => Transaction.Set(this, ref _detail, value, static (o, v) => o._detail = v); }
 
     float _seetheRate = 0.03f;
+    /// <summary>How fast the noise changes over time, from 0 (still) to 1.</summary>
     [Editable("Seethe rate", Min = 0, Max = 1, Step = 0.001)]
     public float SeetheRate { get => _seetheRate; set => Transaction.Set(this, ref _seetheRate, value, static (o, v) => o._seetheRate = v); }
 
+    /// <inheritdoc/>
     public override NoiseVideoSource Duplicate() => (NoiseVideoSource)base.Duplicate();
 
+    /// <summary>Always null: noise has no end of its own.</summary>
+    /// <param name="ct">Unused.</param>
+    /// <returns>Null.</returns>
     public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult<TimeSpan?>(null);
 
     internal override Task<IPreparedVideoSource> PrepareAsync(VideoPrepareContext context, CancellationToken ct = default) =>
@@ -68,27 +81,61 @@ public class NoiseVideoSource : VideoSource
     }
 }
 
-public enum TextWrap { Off, WrapWords, WrapCharacters }
+/// <summary>Where text breaks onto a new line when it reaches the width of its box.</summary>
+public enum TextWrap
+{
+    /// <summary>Lines break only at line breaks in the text.</summary>
+    Off,
 
-/// <summary>Justify stretches every wrapped line to the box's width; a paragraph's last line stays left.</summary>
-public enum HorizontalTextAlignment { Left, Center, Right, Justify }
+    /// <summary>Lines break between words; a word wider than the box breaks between characters.</summary>
+    WrapWords,
 
-public enum VerticalTextAlignment { Top, Center, Bottom }
+    /// <summary>Lines break between any two characters.</summary>
+    WrapCharacters,
+}
 
-/// <summary>
-/// A block of white text at a fixed size, centred in a frame-sized image, so
-/// a transform places it and editing the words never resizes them.
-/// </summary>
+/// <summary>How lines of text line up across their box.</summary>
+public enum HorizontalTextAlignment
+{
+    /// <summary>Lines start at the box's left edge.</summary>
+    Left,
+
+    /// <summary>Lines are centred in the box.</summary>
+    Center,
+
+    /// <summary>Lines end at the box's right edge.</summary>
+    Right,
+
+    /// <summary>Wrapped lines stretch to the box's full width; a paragraph's last line stays left.</summary>
+    Justify,
+}
+
+/// <summary>Where a block of text sits in its box, top to bottom.</summary>
+public enum VerticalTextAlignment
+{
+    /// <summary>The text starts at the top of the box.</summary>
+    Top,
+
+    /// <summary>The text is centred in the box.</summary>
+    Center,
+
+    /// <summary>The text ends at the bottom of the box.</summary>
+    Bottom,
+}
+
+/// <summary>A block of white text on a transparent, frame-sized image.</summary>
+/// <remarks>The text is sized against the frame, not fitted to its box, so editing the words never resizes them; a transform places it.</remarks>
 [SourceKind("text", DisplayName = "Text")]
 public class TextVideoSource : VideoSource, IChoiceProvider
 {
     string _content = "Text";
+    /// <summary>The text; line breaks start new paragraphs.</summary>
     [Editable("Text", Editor = PropertyEditor.Multiline)]
     public string Content { get => _content; set => Transaction.Set(this, ref _content, value, static (o, v) => o._content = v); }
 
-    //an installed family's name; one that isn't installed draws with the default font
-    //changing it moves Weight to the nearest weight the new font has
     string _font = "Arial";
+    /// <summary>The name of an installed font family; one that isn't installed draws with the default font.</summary>
+    /// <remarks>Changing it moves <see cref="Weight"/> to the nearest weight the new font has.</remarks>
     [Editable("Font")]
     public string Font
     {
@@ -101,39 +148,45 @@ public class TextVideoSource : VideoSource, IChoiceProvider
         }
     }
 
-    //100 (thin) to 900 (black); the dropdown offers the weights the font has
     int _weight = 400;
+    /// <summary>How heavy the letters are, from 100 (thin) to 900 (black); 400 is regular.</summary>
     [Editable("Weight")]
     public int Weight { get => _weight; set => Transaction.Set(this, ref _weight, value, static (o, v) => o._weight = v); }
 
-    //the font's italic, or the upright slanted when it has none
     bool _italic;
+    /// <summary>Whether to use the font's italic; a font with none is slanted instead.</summary>
     [Editable("Italic")]
     public bool Italic { get => _italic; set => Transaction.Set(this, ref _italic, value, static (o, v) => o._italic = v); }
 
-    //the font's em size, a fraction of the frame width
     float _size = 0.05f;
+    /// <summary>The font's em size, as a fraction of the frame's width.</summary>
     [Editable("Size", Min = 0.001, Max = 1, Step = 0.001, Frame = FrameMeasure.Width)]
     public float Size { get => _size; set => Transaction.Set(this, ref _size, value, static (o, v) => o._size = v); }
 
-    //the area the text is laid out in, centred in the frame: x of the frame width, y of its height
     Vector2 _box = new(0.9f, 0.9f);
+    /// <summary>The size of the area the text is laid out in, centred in the frame: X as a fraction of the frame's width, Y of its height.</summary>
     [Editable("Box", Min = 0.01, Max = 1, Step = 0.01, Frame = FrameMeasure.Frame)]
     public Vector2 Box { get => _box; set => Transaction.Set(this, ref _box, value, static (o, v) => o._box = v); }
 
-    //where lines break when they reach the box's width
     TextWrap _wrap = TextWrap.WrapWords;
+    /// <summary>Where lines break when they reach the box's width.</summary>
     [Editable("Wrap")]
     public TextWrap Wrap { get => _wrap; set => Transaction.Set(this, ref _wrap, value, static (o, v) => o._wrap = v); }
 
     HorizontalTextAlignment _horizontalAlignment = HorizontalTextAlignment.Center;
+    /// <summary>How lines line up across the box.</summary>
     [Editable("Horizontal alignment")]
     public HorizontalTextAlignment HorizontalAlignment { get => _horizontalAlignment; set => Transaction.Set(this, ref _horizontalAlignment, value, static (o, v) => o._horizontalAlignment = v); }
 
     VerticalTextAlignment _verticalAlignment = VerticalTextAlignment.Center;
+    /// <summary>Where the text sits in the box, top to bottom.</summary>
     [Editable("Vertical alignment")]
     public VerticalTextAlignment VerticalAlignment { get => _verticalAlignment; set => Transaction.Set(this, ref _verticalAlignment, value, static (o, v) => o._verticalAlignment = v); }
 
+    /// <summary>The choices for <see cref="Font"/> (the installed families) and <see cref="Weight"/> (the weights the font has).</summary>
+    /// <remarks>A font that isn't installed, or a weight the font doesn't have, is offered too, so the current value always shows.</remarks>
+    /// <param name="property">The property's name.</param>
+    /// <returns>The choices; null for any other property.</returns>
     public IReadOnlyList<Choice>? ChoicesFor(string property)
     {
         if (property == nameof(Weight))
@@ -154,8 +207,12 @@ public class TextVideoSource : VideoSource, IChoiceProvider
         return choices;
     }
 
+    /// <inheritdoc/>
     public override TextVideoSource Duplicate() => (TextVideoSource)base.Duplicate();
 
+    /// <summary>Always null: text has no end of its own.</summary>
+    /// <param name="ct">Unused.</param>
+    /// <returns>Null.</returns>
     public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult<TimeSpan?>(null);
 
     internal override Task<IPreparedVideoSource> PrepareAsync(VideoPrepareContext context, CancellationToken ct = default) =>
@@ -220,11 +277,8 @@ public class TextVideoSource : VideoSource, IChoiceProvider
     }
 }
 
-/// <summary>
-/// A generator: each frame is drawn at the canvas size into a recorded
-/// picture, which the compositor rasterizes on the GPU when it draws it.
-/// Nothing is prepared; the only thing that ends it is its Duration.
-/// </summary>
+/// <summary>A generator: each frame is drawn at canvas size into a recorded picture, which the compositor rasterizes on the GPU.</summary>
+/// <remarks>Nothing is prepared, and only the source's Duration ends it.</remarks>
 internal sealed class PreparedGenerator(VideoSource source, Func<TimeSpan, SKSizeI, SKImage> render) : IPreparedVideoSource
 {
     public (int Width, int Height) NativeSize => (0, 0);

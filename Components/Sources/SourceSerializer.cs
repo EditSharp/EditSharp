@@ -9,41 +9,52 @@ using EditSharp.History;
 
 namespace EditSharp.Components.Sources
 {
-    /// <summary>
-    /// Saves and loads sources as JSON. Every abstract Source type (Source,
-    /// VideoSource, AudioSource, ...) is polymorphic, discriminated by "$kind"
-    /// with the id from each concrete kind's [SourceKind]; no central list to
-    /// edit when a kind is added. Property names are camelCase and TimeSpans
-    /// are "c"-format strings (JsonSerializerDefaults.Web). Enums are names,
-    /// keyframed values carry their whole track, colours are "#AARRGGBB", and
-    /// a nested Timeline is saved as its Id (see Deserialize).
-    ///
-    /// Consumers embedding sources in their own JSON use Options directly (or
-    /// chain its TypeInfoResolver into theirs); Serialize/Deserialize are the
-    /// standalone shortcut. Loading always runs with history suppressed, so a
-    /// deserialized source arrives with no undo entries of its own.
-    ///
-    /// Only kinds in this assembly are discovered for now (source kinds are
-    /// internal to EditSharp); registering external assemblies belongs with
-    /// opening the source contract up.
-    /// </summary>
+    /// <summary>Saves and loads sources as JSON.</summary>
+    /// <remarks>
+    /// Every abstract source type (<see cref="Source"/>, <see cref="Video.VideoSource"/>,
+    /// <see cref="Audio.AudioSource"/>) is polymorphic, told apart by "$kind" holding
+    /// the id from each kind's <see cref="SourceKindAttribute"/>; there's no central
+    /// list to edit when a kind is added. Only kinds in the EditSharp assembly are found.
+    /// <para>
+    /// Property names are camelCase and TimeSpans are "c"-format strings
+    /// (JsonSerializerDefaults.Web). Enums are saved as names, keyframed values
+    /// carry their whole track, colours are "#AARRGGBB", and a nested Timeline is
+    /// saved as its Id.
+    /// </para>
+    /// <para>
+    /// Loading always runs with history suppressed, so a loaded source has no
+    /// undo entries of its own.
+    /// </para>
+    /// </remarks>
     public static class SourceSerializer
     {
+        /// <summary>The JSON property that holds a source's kind id.</summary>
         public const string KindProperty = "$kind";
 
         internal static readonly IReadOnlyList<(string Id, Type Type)> Kinds = Discover(typeof(Source).Assembly);
 
+        /// <summary>The options sources are saved and loaded with, read-only.</summary>
+        /// <remarks>Use them directly, or chain their TypeInfoResolver into your own, to embed sources in other JSON. A nested Timeline can only be loaded through <see cref="Deserialize{T}"/>, which supplies the timelines.</remarks>
         public static JsonSerializerOptions Options { get; } = CreateOptions();
 
+        /// <summary>Saves a source.</summary>
+        /// <param name="source">The source to save.</param>
+        /// <returns>The source as JSON.</returns>
         public static string Serialize(Source source) => JsonSerializer.Serialize(source, Options);
 
-        /// <summary>
-        /// Loads a source. Sources that refer to a nested timeline store only its
-        /// Id; `timelines` finds the Timeline for an id (typically from the
-        /// project being loaded).
-        /// </summary>
+        /// <summary>Loads a source of any kind.</summary>
+        /// <param name="json">The saved source.</param>
+        /// <param name="timelines">Finds a nested timeline by its Id, typically in the project being loaded; needed only when a source refers to one.</param>
+        /// <returns>The source.</returns>
+        /// <exception cref="JsonException">The JSON isn't a source, or refers to a timeline <paramref name="timelines"/> doesn't find.</exception>
         public static Source Deserialize(string json, Func<Guid, Timeline?>? timelines = null) => Deserialize<Source>(json, timelines);
 
+        /// <summary>Loads a source of a given type.</summary>
+        /// <typeparam name="T">The type the source must be.</typeparam>
+        /// <param name="json">The saved source.</param>
+        /// <param name="timelines">Finds a nested timeline by its Id, typically in the project being loaded; needed only when a source refers to one.</param>
+        /// <returns>The source.</returns>
+        /// <exception cref="JsonException">The JSON isn't a <typeparamref name="T"/>, or refers to a timeline <paramref name="timelines"/> doesn't find.</exception>
         public static T Deserialize<T>(string json, Func<Guid, Timeline?>? timelines = null) where T : Source
         {
             Func<Guid, Timeline?>? previous = TimelineReferenceJsonConverter.Resolver;

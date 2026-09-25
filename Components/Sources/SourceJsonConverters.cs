@@ -22,6 +22,7 @@ namespace EditSharp.Components.Sources
             (JsonConverter)Activator.CreateInstance(typeof(AnimatableJsonConverter<>).MakeGenericType(typeToConvert.GetGenericArguments()[0]))!;
     }
 
+    //see AnimatableJsonConverterFactory
     internal sealed class AnimatableJsonConverter<T> : JsonConverter<Animatable<T>>
     {
         public override void Write(Utf8JsonWriter writer, Animatable<T> value, JsonSerializerOptions options)
@@ -132,11 +133,8 @@ namespace EditSharp.Components.Sources
         }
     }
 
-    /// <summary>
-    /// A Timeline saved as its Id only. Loading hands the id to the resolver
-    /// passed to SourceSerializer.Deserialize; a timeline it can't find fails
-    /// the load rather than inventing an empty one.
-    /// </summary>
+    /// <summary>A Timeline saved as its Id; loading finds it through the resolver passed to SourceSerializer.Deserialize.</summary>
+    /// <remarks>A timeline the resolver can't find fails the load rather than being replaced by an empty one.</remarks>
     internal sealed class TimelineReferenceJsonConverter : JsonConverter<Timeline>
     {
         [ThreadStatic] internal static Func<Guid, Timeline?>? Resolver;

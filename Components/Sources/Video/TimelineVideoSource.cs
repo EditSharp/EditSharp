@@ -9,25 +9,23 @@ using EditSharp.History;
 
 namespace EditSharp.Components.Sources.Video;
 
-/// <summary>
-/// Another timeline's picture, composited frame by frame. Start/Duration/Loop
-/// trim it like any source; its natural length is the timeline's duration.
-/// Saved as the timeline's Id (see SourceSerializer.Deserialize).
-///
-/// Compositor-bound: frames are composited with the parent's own GPU
-/// context and surface pool, on its GPU thread, so they never cross GPU
-/// contexts and are never prefetched.
-/// </summary>
+/// <summary>Another timeline's picture, composited frame by frame.</summary>
+/// <remarks>Frames are composited with the parent's own GPU context and surface pool, on its GPU thread, so they never cross GPU contexts and are never prefetched. It's saved as the timeline's Id; see <see cref="SourceSerializer.Deserialize"/>.</remarks>
 //unlisted until the GUI has a timeline picker
 [SourceKind("timeline-video", DisplayName = "Timeline", Listed = false)]
 public class TimelineVideoSource : VideoSource
 {
     Timeline? _timeline;
+    /// <summary>The timeline to show; null shows nothing and reports the source offline.</summary>
     [Editable("Timeline")]
     public Timeline? Timeline { get => _timeline; set { Transaction.Set(this, ref _timeline, value, static (o, v) => o._timeline = v); EndMayHaveMoved(); } }
 
+    /// <inheritdoc/>
     public override TimelineVideoSource Duplicate() => (TimelineVideoSource)base.Duplicate();
 
+    /// <summary>The timeline's duration.</summary>
+    /// <param name="ct">Unused.</param>
+    /// <returns>The duration; null when no timeline is chosen.</returns>
     public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult(Timeline?.Duration);
 
     internal override Task<IPreparedVideoSource> PrepareAsync(VideoPrepareContext context, CancellationToken ct = default) =>
@@ -54,11 +52,8 @@ public class TimelineVideoSource : VideoSource
         public void Dispose() { }
     }
 
-    /// <summary>
-    /// Composites the nested timeline's frame at the mapped time with its own
-    /// unbuffered content source (same read mode and failure policy as the
-    /// parent) on the parent's surface pool.
-    /// </summary>
+    //composites the nested timeline at the mapped time with its own unbuffered content source (the parent's
+    //read mode and failure policy) on the parent's surface pool
     private sealed class Reader(TimelineVideoSource source, VideoReaderOptions options, CompositorAccess compositor) : IVideoFrameReader
     {
         private ClipContentSource? _content;

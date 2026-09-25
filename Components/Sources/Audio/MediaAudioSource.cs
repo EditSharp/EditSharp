@@ -8,24 +8,23 @@ using EditSharp.Video;
 
 namespace EditSharp.Components.Sources.Audio;
 
-/// <summary>
-/// The audio stream of a media file on disk (an audio file, or a video file's
-/// soundtrack), streamed through ffmpeg. A file with no audio stream reads as
-/// silence for its length.
-/// </summary>
+/// <summary>The audio of a media file on disk: an audio file, or a video file's soundtrack.</summary>
+/// <remarks>It's streamed through ffmpeg. A file with no audio stream plays silence for its length.</remarks>
 [SourceKind("media-audio", DisplayName = "Media")]
 public class MediaAudioSource : AudioSource, IFileBackedSource
 {
-    //the directory path to the file
     string _path = "";
+    /// <summary>The full path of the file.</summary>
     [Editable("File", Editor = PropertyEditor.Path)]
     public required string Path { get => _path; set { Transaction.Set(this, ref _path, value, static (o, v) => o._path = v); EndMayHaveMoved(); } }
 
     string IFileBackedSource.FilePath => Path;
 
+    /// <inheritdoc/>
     public override MediaAudioSource Duplicate() => (MediaAudioSource)base.Duplicate();
 
-    //from the probe cache; a file not probed yet starts its probe and reads as unknown
+    /// <inheritdoc/>
+    /// <remarks>Answers from the probe cache; a file not probed yet starts its probe in the background.</remarks>
     public override bool TryGetNaturalLength(out TimeSpan? length)
     {
         length = null;
@@ -40,6 +39,10 @@ public class MediaAudioSource : AudioSource, IFileBackedSource
         return true;
     }
 
+    /// <summary>How long the file is, from probing it.</summary>
+    /// <param name="ct">Cancels waiting for the probe.</param>
+    /// <returns>The file's length; null if it has none.</returns>
+    /// <exception cref="SourceUnavailableException"><see cref="SourceUnavailableReason.MediaOffline"/> when no file is chosen or it's missing; <see cref="SourceUnavailableReason.DecodeError"/> when it can't be probed.</exception>
     public override async Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) =>
         (await ProbeAsync(Path, ct)).Duration;
 
@@ -56,7 +59,7 @@ public class MediaAudioSource : AudioSource, IFileBackedSource
         hash.Add(Path);
     }
 
-    /// <summary>The trimmed window in file time, through the live Start/Duration; see Source.ResolveWindow.</summary>
+    //the trimmed window in file time, through the live Start/Duration; see Source.ResolveWindow
     internal (TimeSpan Start, TimeSpan? Length) Window(TimeSpan? naturalLength) => ResolveWindow(naturalLength);
 
     private static async Task<MediaInfo> ProbeAsync(string path, CancellationToken ct)
