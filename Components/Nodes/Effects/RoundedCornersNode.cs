@@ -15,7 +15,6 @@ namespace EditSharp.Components.Nodes.Effects
         private static readonly NodePort[] StaticPorts =
         [
             new("Image", PortType.Image, PortDirection.Input),
-            new("Mask", PortType.Mask, PortDirection.Input, optional: true),
             new("Image", PortType.Image, PortDirection.Output),
         ];
 

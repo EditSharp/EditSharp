@@ -132,7 +132,7 @@ namespace EditSharp.Compositing.Graphs
                         //tracked before masking: the mask can replace `blurred`, and it must still be disposed
                         SKImage blurred = ApplyBlur(upstream, sigma, pool);
                         owned.Add(blurred);
-                        SKImage result2 = mask != null ? ApplyMask(blurred, mask, pool, owned) : blurred;
+                        SKImage result2 = mask != null ? ApplyMask(upstream, blurred, mask, pool, owned) : blurred;
                         images[(node.Id, "Image")] = result2;
                         break;
                     }
@@ -148,7 +148,7 @@ namespace EditSharp.Compositing.Graphs
                         //tracked before masking, as for Blur
                         SKImage shadowed = ApplyDropShadow(shadow, upstream, clipRelativeTime, context, pool);
                         owned.Add(shadowed);
-                        SKImage result2 = mask != null ? ApplyMask(shadowed, mask, pool, owned) : shadowed;
+                        SKImage result2 = mask != null ? ApplyMask(upstream, shadowed, mask, pool, owned) : shadowed;
                         images[(node.Id, "Image")] = result2;
                         break;
                     }
@@ -169,6 +169,9 @@ namespace EditSharp.Compositing.Graphs
                     case MergeNode merge:
                     {
                         SKImage a = RequireImage(graph, node, "A", images);
+
+                        if (!merge.Enabled) { images[(node.Id, "Result")] = a; break; }
+
                         SKImage b = RequireImage(graph, node, "B", images);
 
                         float baseMix = Math.Clamp(merge.Mix.Evaluate(clipRelativeTime), 0f, 1f);
@@ -187,6 +190,9 @@ namespace EditSharp.Compositing.Graphs
 
                     case ShapeMaskNode shape:
                     {
+                        //a disabled mask node outputs no mask, so whatever it fed is unmasked
+                        if (!shape.Enabled) break;
+
                         SKImage mask = RenderShapeMask(shape, clipRelativeTime, context, pool);
                         owned.Add(mask);
                         masks[(node.Id, "Mask")] = mask;
@@ -195,6 +201,8 @@ namespace EditSharp.Compositing.Graphs
 
                     case ImageToMaskNode toMask:
                     {
+                        if (!toMask.Enabled) break;
+
                         SKImage upstream = RequireImage(graph, node, "Image", images);
                         SKImage mask = ExtractMask(upstream, toMask.Channel, pool);
                         owned.Add(mask);
@@ -204,6 +212,12 @@ namespace EditSharp.Compositing.Graphs
 
                     case MaskCombineNode combine:
                     {
+                        if (!combine.Enabled)
+                        {
+                            if (ResolveMaskRaw(graph, node, "A", masks) is { } passA) masks[(node.Id, "Result")] = passA;
+                            break;
+                        }
+
                         SKImage a = RequireMask(graph, node, "A", masks);
                         SKImage b = RequireMask(graph, node, "B", masks);
                         SKImage result2 = CombineMasks(a, b, combine.Mode, pool);
@@ -391,17 +405,27 @@ namespace EditSharp.Compositing.Graphs
             }
         }
 
-        private static SKImage ApplyMask(SKImage input, SKImage mask, SurfacePool pool, List<SKImage> owned)
+        //the effect where the mask is, the original where it isn't: original * (1 - mask) + filtered * mask
+        private static SKImage ApplyMask(SKImage original, SKImage filtered, SKImage mask, SurfacePool pool, List<SKImage> owned)
         {
-            SKSurface surface = pool.Rent(input.Width, input.Height);
+            SKSurface surface = pool.Rent(original.Width, original.Height);
             try
             {
                 SKCanvas canvas = surface.Canvas;
                 canvas.Clear(SKColors.Transparent);
-                canvas.DrawImage(input, 0, 0);
+                canvas.DrawImage(original, 0, 0);
 
-                using var paint = new SKPaint { BlendMode = SKBlendMode.DstIn };
-                canvas.DrawImage(mask, 0, 0, paint);
+                using (var outside = new SKPaint { BlendMode = SKBlendMode.DstOut })
+                    canvas.DrawImage(mask, 0, 0, outside);
+
+                using (var add = new SKPaint { BlendMode = SKBlendMode.Plus })
+                {
+                    canvas.SaveLayer(add);
+                    canvas.DrawImage(filtered, 0, 0);
+                    using var inside = new SKPaint { BlendMode = SKBlendMode.DstIn };
+                    canvas.DrawImage(mask, 0, 0, inside);
+                    canvas.Restore();
+                }
 
                 SKImage result = surface.Snapshot();
                 owned.Add(result);
@@ -409,7 +433,7 @@ namespace EditSharp.Compositing.Graphs
             }
             finally
             {
-                pool.Return(surface, input.Width, input.Height);
+                pool.Return(surface, original.Width, original.Height);
             }
         }
 

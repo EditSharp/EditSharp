@@ -61,7 +61,8 @@ namespace EditSharp.Audio.Engine
                 {
                     foreach (float[] output in ports.Outputs) Array.Clear(output, 0, tick.Samples);
                 }
-                else if (!node.Enabled && ports.Inputs.Length == 1 && ports.Outputs.Length == 1)
+                //a disabled effect passes its first input through
+                else if (!node.Enabled && ports.Inputs.Length >= 1 && ports.Outputs.Length == 1)
                 {
                     Array.Copy(ports.Inputs[0], ports.Outputs[0], tick.Samples);
                 }

@@ -10,15 +10,16 @@ namespace EditSharp.Compositing.Graphs
     //Video evaluates it once per frame, audio once per automation step
     internal static class ValueGraphEvaluator
     {
-        //null when nothing is connected, so the caller uses the node's own value unmodulated
+        //null when nothing enabled is connected, so the caller uses the node's own value unmodulated
         public static float? TryEvaluateConnectedInput(
             Graph graph, Node node, string inputPortName, TimeSpan time)
         {
             Connection? c = graph.Connections.FirstOrDefault(x => x.ToNodeId == node.Id && x.ToPort == inputPortName);
             if (c == null) return null;
 
+            //a disabled Value node feeds nothing
             Node? source = graph.Nodes.FirstOrDefault(n => n.Id == c.FromNodeId);
-            if (source == null) return null;
+            if (source == null || !source.Enabled) return null;
 
             return Evaluate(graph, source, c.FromPort, time);
         }

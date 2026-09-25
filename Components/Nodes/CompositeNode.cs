@@ -101,9 +101,6 @@ namespace EditSharp.Components.Nodes
         internal NodePort? InnerPort(ExposedPort exposed)
             => InnerNode(exposed.Node)?.Ports.FirstOrDefault(p => p.Name == exposed.Port && p.Direction == PortDirection.Input);
 
-        /// <summary>What feeds the inner OutputNode — the composite's output when flattened. Null when nothing does.</summary>
-        internal Connection? OutputFeed => Inner.Connections.FirstOrDefault(c => c.ToNodeId == Inner.OutputNode.Id);
-
         // ---------------------------------------------------------------
         // Exposing
         // ---------------------------------------------------------------
