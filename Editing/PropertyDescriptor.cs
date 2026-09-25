@@ -15,60 +15,84 @@ using SkiaSharp;
 
 namespace EditSharp.Editing
 {
-    /// <summary>
-    /// Everything an editor needs to know to show and change one property
-    /// on one object: what to call it, what control to use, what it
-    /// accepts, whether it can be keyframed, when it applies, and how to
-    /// read and write it. Resolved once per type from the EditableAttribute
-    /// and the property's own type (see Inspect), so a new node or clip
-    /// property becomes editable by carrying the attribute and nothing
-    /// else.
-    ///
-    /// Writes go through the property's own setter, so they are recorded
-    /// for undo like any other write. List edits are recorded here, since
-    /// a list's own Add/Remove are not.
-    ///
-    /// A descriptor can be redirected (Through) so that a composite node
-    /// can present an inner node's property as its own, under its own
-    /// name: the descriptor reads and writes the inner node while the
-    /// inspector only ever hands it the composite.
-    /// </summary>
+    /// <summary>Everything an editor needs to show and change one editable property: its label, control, limits, and how to read and write it.</summary>
+    /// <remarks>
+    /// Built once per type from <see cref="EditableAttribute"/> and the property's
+    /// own type (see <see cref="Inspect"/>). Writes go through the property's
+    /// setter, so they are recorded for undo; list edits are recorded here. A
+    /// descriptor made with <see cref="Through"/> reads and writes a property on
+    /// another object, which is how a composite node shows an inner node's
+    /// property as its own.
+    /// </remarks>
     public sealed class PropertyDescriptor
     {
         private readonly PropertyInfo _property;
         private readonly Func<object, object>? _through;
 
+        /// <summary>The property's name in code.</summary>
         public string Name => _property.Name;
+
+        /// <summary>The label editors show.</summary>
         public string DisplayName { get; }
+
+        /// <summary>The heading the property is shown under, if any.</summary>
         public string? Group { get; }
+
+        /// <summary>Where the property is listed: lower first.</summary>
         public int Order { get; }
+
+        /// <summary>Text shown when hovering the property.</summary>
         public string? Tooltip { get; }
+
+        /// <summary>Text shown after the value, such as "dB".</summary>
         public string? Unit { get; }
+
+        /// <summary>How the value measures against the frame, for editors that can show it in pixels.</summary>
         public FrameMeasure Frame { get; }
+
+        /// <summary>The lowest value a numeric editor allows; null for no limit.</summary>
         public double? Min { get; }
+
+        /// <summary>The highest value a numeric editor allows; null for no limit.</summary>
         public double? Max { get; }
+
+        /// <summary>How far one step moves a numeric editor; null for the editor's default.</summary>
         public double? Step { get; }
+
+        /// <summary>The control to use, resolved from the attribute and the value's type.</summary>
         public PropertyEditor Editor { get; }
+
+        /// <summary>Whether the property can be shown but not changed.</summary>
         public bool IsReadOnly { get; }
 
-        /// <summary>The type an editor works with: Animatable&lt;T&gt; and T? both read as T.</summary>
+        /// <summary>The type an editor works with: <c>Animatable&lt;T&gt;</c> and <c>T?</c> both read as <c>T</c>.</summary>
         public Type ValueType { get; }
 
-        /// <summary>The declared property type, before any unwrapping.</summary>
+        /// <summary>The property's declared type.</summary>
         public Type PropertyType => _property.PropertyType;
 
-        /// <summary>True for an Animatable&lt;T&gt; — the value can carry keyframes. See GetAnimatable.</summary>
+        /// <summary>Whether the property is an <c>Animatable&lt;T&gt;</c> and can carry keyframes.</summary>
         public bool IsAnimatable { get; }
 
+        /// <summary>Whether the property is a nullable value type, so null is a valid value.</summary>
         public bool IsNullable { get; }
 
-        /// <summary>True for a List&lt;T&gt;. ItemType/ItemEditor say what the items are; see GetList/AddItem/RemoveItem.</summary>
+        /// <summary>Whether the property is a <c>List&lt;T&gt;</c>.</summary>
         public bool IsCollection { get; }
+
+        /// <summary>A list's item type as declared; null when not a list.</summary>
         public Type? ItemType { get; }
+
+        /// <summary>The type an editor works with for each item; null when not a list.</summary>
         public Type? ItemValueType { get; }
+
+        /// <summary>Whether each item is an <c>Animatable&lt;T&gt;</c>.</summary>
         public bool ItemIsAnimatable { get; }
+
+        /// <summary>The control used for each item.</summary>
         public PropertyEditor ItemEditor { get; }
 
+        /// <summary>The conditions that must all hold for the property to show.</summary>
         public IReadOnlyList<VisibleWhenAttribute> Conditions { get; }
 
         internal PropertyDescriptor(PropertyInfo property, EditableAttribute attribute, IReadOnlyList<VisibleWhenAttribute> conditions)
@@ -107,7 +131,11 @@ namespace EditSharp.Editing
 
         internal EditableAttribute Attribute { get; }
 
-        /// <summary>The same property, reached on another object: `resolve` turns the target an editor holds into the object that actually carries the property.</summary>
+        /// <summary>The same property, reached through another object.</summary>
+        /// <param name="resolve">Turns the object an editor holds into the object that carries the property.</param>
+        /// <param name="alias">The label to show instead; null keeps this one's.</param>
+        /// <param name="group">The heading to show it under instead; null keeps this one's.</param>
+        /// <returns>A descriptor that reads and writes through <paramref name="resolve"/>.</returns>
         public PropertyDescriptor Through(Func<object, object> resolve, string? alias = null, string? group = null)
         {
             Func<object, object> inner = _through;
@@ -118,11 +146,11 @@ namespace EditSharp.Editing
 
         private object Holder(object target) => _through is null ? target : _through(target);
 
-        // ---------------------------------------------------------------
-        // Values
-        // ---------------------------------------------------------------
+        // ---- values ----
 
-        /// <summary>The value an editor shows: an Animatable's static value, otherwise the property itself.</summary>
+        /// <summary>The value an editor shows.</summary>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <returns>An animatable property's static value, otherwise the property's value.</returns>
         public object? GetValue(object target)
         {
             object? raw = _property.GetValue(Holder(target));
@@ -130,7 +158,10 @@ namespace EditSharp.Editing
             return IsAnimatable && raw is IAnimatable animatable ? animatable.GetStaticValue() : raw;
         }
 
-        /// <summary>Writes the value, coercing numbers and enums from whatever an editor hands over. Recorded for undo by the setter it goes through.</summary>
+        /// <summary>Writes a value, converting numbers and enum names to the property's type. Recorded for undo.</summary>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <param name="value">The new value.</param>
+        /// <exception cref="InvalidOperationException">The property is read-only, or an animatable property has no Animatable behind it.</exception>
         public void SetValue(object target, object? value)
         {
             if (IsReadOnly) throw new InvalidOperationException($"{DisplayName} is read-only.");
@@ -150,21 +181,19 @@ namespace EditSharp.Editing
             _property.SetValue(holder, coerced);
         }
 
-        /// <summary>The Animatable behind an animatable property, for keyframe editors. Null for anything else.</summary>
+        /// <summary>The Animatable behind an animatable property, for keyframe editing.</summary>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <returns>The Animatable, or null when the property isn't animatable.</returns>
         public IAnimatable? GetAnimatable(object target)
             => IsAnimatable ? _property.GetValue(Holder(target)) as IAnimatable : null;
 
-        // ---------------------------------------------------------------
-        // Defaults
-        // ---------------------------------------------------------------
+        // ---- defaults ----
 
-        /// <summary>
-        /// The value a reset returns this property to on this object, if
-        /// there is one: the attribute's Default, else the value the same
-        /// property has on a freshly constructed object of the holder's
-        /// type. False when neither exists - an abstract holder with no
-        /// attribute default, say.
-        /// </summary>
+        /// <summary>The value a reset returns the property to on <paramref name="target"/>.</summary>
+        /// <remarks>The attribute's Default when it has one, otherwise the value the property has on a newly constructed object of the same type.</remarks>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <param name="value">The default, when there is one.</param>
+        /// <returns>False when there is no default, such as for an abstract type with no attribute default.</returns>
         public bool TryGetDefault(object target, out object? value)
         {
             if (Attribute.Default is not null)
@@ -187,15 +216,13 @@ namespace EditSharp.Editing
             return true;
         }
 
-        /// <summary>True when the property holds its default on this object.</summary>
+        /// <summary>Whether the property holds its default on <paramref name="target"/>.</summary>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <returns>False when it differs, or there is no default.</returns>
         public bool IsDefault(object target)
             => TryGetDefault(target, out object? expected) && Equals(GetValue(target), expected);
 
-        /// <summary>
-        /// One untouched instance per type, made once and never edited,
-        /// for reading the values a type starts with. Null for types that
-        /// cannot be made bare.
-        /// </summary>
+        //one untouched instance per type, for reading the values a type starts with; null for types that can't be made bare
         private static class Prototype
         {
             private static readonly ConcurrentDictionary<Type, object?> _cache = new();
@@ -218,7 +245,9 @@ namespace EditSharp.Editing
             }
         }
 
-        /// <summary>Whether the property applies right now, per its VisibleWhen conditions.</summary>
+        /// <summary>Whether the property applies right now, per its <see cref="Conditions"/>.</summary>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <returns>True when every condition holds.</returns>
         public bool IsVisible(object target)
         {
             if (Conditions.Count == 0) return true;
@@ -240,13 +269,16 @@ namespace EditSharp.Editing
             return true;
         }
 
-        // ---------------------------------------------------------------
-        // Collections
-        // ---------------------------------------------------------------
+        // ---- lists ----
 
+        /// <summary>The list behind a list property.</summary>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <returns>The list, or null when the property isn't a list.</returns>
         public IList? GetList(object target) => IsCollection ? _property.GetValue(Holder(target)) as IList : null;
 
-        /// <summary>A fresh item of the list's item type, ready to add.</summary>
+        /// <summary>A new item of the list's item type, ready to add.</summary>
+        /// <returns>The item; an animatable item starts at its type's default value.</returns>
+        /// <exception cref="InvalidOperationException">The property isn't a list.</exception>
         public object CreateItem()
         {
             if (ItemType is null) throw new InvalidOperationException($"{DisplayName} is not a list.");
@@ -261,8 +293,17 @@ namespace EditSharp.Editing
             return Activator.CreateInstance(ItemType)!;
         }
 
+        /// <summary>Adds an item to the end of the list. Recorded for undo.</summary>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <param name="item">The item to add.</param>
+        /// <exception cref="InvalidOperationException">The property isn't a list.</exception>
         public void AddItem(object target, object item) => InsertItem(target, GetList(target)?.Count ?? 0, item);
 
+        /// <summary>Inserts an item into the list. Recorded for undo.</summary>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <param name="index">Where to insert; clamped to the list's bounds.</param>
+        /// <param name="item">The item to insert.</param>
+        /// <exception cref="InvalidOperationException">The property isn't a list.</exception>
         public void InsertItem(object target, int index, object item)
         {
             IList list = GetList(target) ?? throw new InvalidOperationException($"{DisplayName} is not a list.");
@@ -274,6 +315,10 @@ namespace EditSharp.Editing
                 $"add {DisplayName} item");
         }
 
+        /// <summary>Removes an item from the list. Recorded for undo.</summary>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <param name="index">The item's position; nothing happens when it's out of range.</param>
+        /// <exception cref="InvalidOperationException">The property isn't a list.</exception>
         public void RemoveItem(object target, int index)
         {
             IList list = GetList(target) ?? throw new InvalidOperationException($"{DisplayName} is not a list.");
@@ -287,9 +332,7 @@ namespace EditSharp.Editing
                 $"remove {DisplayName} item");
         }
 
-        // ---------------------------------------------------------------
-        // Helpers
-        // ---------------------------------------------------------------
+        // ---- helpers ----
 
         private static (Type valueType, bool animatable, bool nullable, bool collection, Type? itemType) Unwrap(Type type)
         {
@@ -317,7 +360,7 @@ namespace EditSharp.Editing
             return value;
         }
 
-        // "SeetheRate" -> "Seethe rate"
+        //"SeetheRate" -> "Seethe rate"
         private static string Humanize(string name)
         {
             StringBuilder text = new(name.Length + 4);
@@ -338,20 +381,27 @@ namespace EditSharp.Editing
         }
     }
 
-    /// <summary>
-    /// Where editors ask what a thing has to edit. Of(Type) reflects the
-    /// EditableAttributes once and caches the descriptors; Of(object)
-    /// lets an IInspectable answer for itself instead.
-    /// </summary>
+    /// <summary>Finds what an object or type has to edit.</summary>
+    /// <remarks>Descriptors for a type are read from its <see cref="EditableAttribute"/>s once and cached; an <see cref="IInspectable"/> object lists its own instead.</remarks>
     public static class Inspect
     {
         private static readonly ConcurrentDictionary<Type, IReadOnlyList<PropertyDescriptor>> _cache = new();
 
+        /// <summary>The editable properties of an object.</summary>
+        /// <param name="target">The object.</param>
+        /// <returns>Its descriptors, ordered by Order then declaration.</returns>
         public static IReadOnlyList<PropertyDescriptor> Of(object target)
             => target is IInspectable inspectable ? inspectable.Properties : Of(target.GetType());
 
+        /// <summary>The editable properties a type declares or inherits.</summary>
+        /// <param name="type">The type.</param>
+        /// <returns>Its descriptors, ordered by Order then declaration.</returns>
         public static IReadOnlyList<PropertyDescriptor> Of(Type type) => _cache.GetOrAdd(type, Build);
 
+        /// <summary>One editable property of an object, by name.</summary>
+        /// <param name="target">The object.</param>
+        /// <param name="name">The property's name in code.</param>
+        /// <returns>The descriptor, or null when the object has no editable property by that name.</returns>
         public static PropertyDescriptor? Find(object target, string name) => Of(target).FirstOrDefault(d => d.Name == name);
 
         private static IReadOnlyList<PropertyDescriptor> Build(Type type)
@@ -368,12 +418,12 @@ namespace EditSharp.Editing
                 found.Add((new PropertyDescriptor(property, editable, conditions), property.MetadataToken));
             }
 
-            // by order, then as declared. inherited properties carry their own
-            // declaring type's tokens, which is why Order exists at all
+            //by order, then as declared. inherited properties carry their own
+            //declaring type's tokens, which is why Order exists at all
             return [.. found.OrderBy(f => f.descriptor.Order).ThenBy(f => f.token).Select(f => f.descriptor)];
         }
 
-        /// <summary>The editor a value type gets when the attribute does not say — see PropertyEditor.</summary>
+        //the editor a value type gets when the attribute doesn't say
         internal static PropertyEditor Infer(Type valueType, EditableAttribute attribute, bool collection)
         {
             if (attribute.Editor != PropertyEditor.Auto && !collection) return attribute.Editor;
@@ -389,10 +439,10 @@ namespace EditSharp.Editing
             if (valueType == typeof(SKColor)) return PropertyEditor.Color;
             if (valueType == typeof(Vector2)) return PropertyEditor.Vector;
             if (valueType == typeof(TimeSpan)) return PropertyEditor.Time;
-            if (typeof(Source).IsAssignableFrom(valueType)) return PropertyEditor.Media;
+            if (typeof(Source).IsAssignableFrom(valueType)) return PropertyEditor.Source;
             if (valueType == typeof(Timeline)) return PropertyEditor.Timeline;
 
-            // an object with editable properties of its own opens up in place
+            //an object with editable properties of its own opens up in place
             if (Of(valueType).Count > 0) return PropertyEditor.Object;
 
             return PropertyEditor.Text;

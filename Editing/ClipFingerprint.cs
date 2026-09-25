@@ -9,28 +9,25 @@ using EditSharp.Components.Nodes;
 
 namespace EditSharp.Editing
 {
-    /// <summary>
-    /// A number that changes when, and only when, a clip would render
-    /// differently: its speed, the shape of its graph, and every value in it.
-    /// </summary>
+    /// <summary>A number that changes when, and only when, a clip would render differently.</summary>
     /// <remarks>
-    /// What it leaves out is where the clip sits on the timeline, and the
-    /// head in-point of its media. A head trim moves the in-point and slides
-    /// every keyframe by the same amount, and the pictures along the content
-    /// are the same pictures under a different clip-relative time - so
-    /// keyframe times are hashed against <see cref="Anchor"/>, where they
-    /// stay put. A thumbnail cache keys its frames by anchored time for the
-    /// same reason, and compares this after every history entry to learn
-    /// which clips to drop.
-    ///
-    /// Values are found through the <see cref="Editable"/> metadata, plus
-    /// every <see cref="Node.Animatables"/> whether attributed or not; a
-    /// nested timeline hashes as its reference, not its contents.
+    /// It covers the clip's speed, the shape of its graph and every value in it,
+    /// found through <see cref="EditableAttribute"/> metadata plus every node's
+    /// keyframed values. It leaves out where the clip sits on the timeline and
+    /// its head in-point: a head trim moves the in-point and slides every
+    /// keyframe by the same amount, so keyframe times are hashed against
+    /// <see cref="Anchor"/>, where they stay put. A nested timeline hashes as its
+    /// reference, not its contents. Thumbnail caches compare fingerprints to
+    /// find out which clips changed.
     /// </remarks>
     public static class ClipFingerprint
     {
         private const int MaxDepth = 6;
 
+        /// <summary>The clip's fingerprint.</summary>
+        /// <param name="clip">The clip.</param>
+        /// <returns>A hash that changes whenever the clip's rendered content would.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="clip"/> is null.</exception>
         public static int Of(Clip clip)
         {
             ArgumentNullException.ThrowIfNull(clip);
@@ -44,11 +41,9 @@ namespace EditSharp.Editing
             return hash.ToHashCode();
         }
 
-        /// <summary>
-        /// The head in-point the clip's content is anchored to: the first
-        /// trimmable input's, since every trimmable input in a graph shifts
-        /// together. A generator clip has none and anchors at zero.
-        /// </summary>
+        /// <summary>The head in-point the clip's content is anchored to.</summary>
+        /// <param name="clip">The clip.</param>
+        /// <returns>The first trimmable input's in-point (they all shift together), or zero when the clip has none.</returns>
         public static TimeSpan Anchor(Clip clip)
             => clip.Graph.AllNodes.OfType<ITrimmableInput>().FirstOrDefault()?.InPoint ?? TimeSpan.Zero;
 
