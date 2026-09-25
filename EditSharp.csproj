@@ -18,8 +18,8 @@
     <Version>0.1.0</Version>
     <Description>C#/ffmpeg timeline video (and, eventually, image) editing pipeline.</Description>
     <Authors>CoolBeansStudio</Authors>
-    <RepositoryUrl>https://github.com/CoolBeansStudioOfficial/EditSharp</RepositoryUrl>
-    <PackageProjectUrl>https://coolbeansstudioofficial.github.io/EditSharp/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/EditSharp/EditSharp</RepositoryUrl>
+    <PackageProjectUrl>https://editsharp.github.io/</PackageProjectUrl>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>

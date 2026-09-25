@@ -1,4 +1,6 @@
-# Builds the API reference with DocFX and publishes it to this repo's GitHub Pages.
+# Builds the API reference with DocFX and pushes it to EditSharp/editsharp.github.io,
+# which GitHub Pages serves at https://editsharp.github.io.
+# DOCS_DEPLOY_KEY is the private half of an SSH key added as a write deploy key on that repo.
 name: Docs
 
 on:
@@ -8,15 +10,13 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: docs
   cancel-in-progress: true
 
 jobs:
-  build:
+  publish:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,16 +25,11 @@ jobs:
           dotnet-version: 9.0.x
       - run: dotnet tool install -g docfx
       - run: docfx docs/docfx.json
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs/_site
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          deploy_key: ${{ secrets.DOCS_DEPLOY_KEY }}
+          external_repository: EditSharp/editsharp.github.io
+          publish_branch: main
+          publish_dir: docs/_site
+          commit_message: Docs for ${{ github.sha }}
