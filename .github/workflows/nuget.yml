@@ -43,4 +43,11 @@ jobs:
         with:
           user: CoolBean64
 
-      - run: dotnet nuget push "out/*.nupkg" --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+      # the push command doesn't expand a wildcard path on Windows, so each package is passed by name
+      - name: Push
+        shell: pwsh
+        run: |
+          Get-ChildItem out -Filter *.nupkg | ForEach-Object {
+            dotnet nuget push $_.FullName --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
