@@ -5,34 +5,10 @@ using EditSharp.Compositing.Gpu;
 
 namespace EditSharp.Compositing
 {
-    /// <summary>
-    /// Item 8, final architecture: with Transition now an abstract class
-    /// hierarchy (FadeTransition/FadeToColorTransition/SlideTransition),
-    /// dispatch is a direct pattern-match switch on the model type — same
-    /// shape as ClipEffectsSk.ApplyStage's switch on BlurEffect/
-    /// DropShadowEffect/RoundedCornersEffect. The earlier ISkTransition
-    /// strategy-interface layer is REMOVED, not kept alongside this: once
-    /// the model itself discriminates by real type, a parallel interface
-    /// doing the same discrimination was redundant, and this stays
-    /// consistent with how every other polymorphic model type in this
-    /// codebase (Effect, and Clip's own subtypes) is already handled here.
-    ///
-    /// Extensibility for a future procedural/shader-backed transition isn't
-    /// lost by dropping the interface — a new switch case can call into a
-    /// SKRuntimeEffect-backed static method exactly as easily as a plain
-    /// canvas-ops one; ClipEffectsSk already demonstrates this same pattern
-    /// (Blur/DropShadow use SKImageFilter, RoundedCorners uses a clip path,
-    /// same switch, no interface needed to keep them uniform).
-    /// </summary>
+    //draws the two clips of a transition in progress, dispatching on the transition's type
     internal static class TransitionCompositor
     {
-        /// <summary>
-        /// Composites `outgoing` and `incoming` at the given progress into a
-        /// fresh canvas-sized image — the direct replacement for
-        /// FrameFilterChain.ComposeChannel's two-clip case. `transition ==
-        /// null` falls back to a plain crossfade, matching the old code's
-        /// own "fade" default when no transition is set.
-        /// </summary>
+        //the two clips at `progress` into a new frame-sized image; no transition set means a crossfade
         public static SKImage Compose(
             SKImage outgoing, SKImage incoming, Transition? transition,
             double progress, int canvasWidth, int canvasHeight, SurfacePool pool)
@@ -63,9 +39,7 @@ namespace EditSharp.Compositing
                     default:
                         throw new NotSupportedException(
                             $"Transition type {transition.GetType().Name} has no Skia " +
-                            "implementation. The ~44 old ffmpeg xfade names (WipeLeft, " +
-                            "CircleOpen, Dissolve, etc.) have no Transition subclass at " +
-                            "all yet — see Transition.cs and the migration manifest.");
+                            "implementation.");
                 }
 
                 return surface.Snapshot();
@@ -76,17 +50,14 @@ namespace EditSharp.Compositing
             }
         }
 
-        /// <summary>Direct alpha crossfade — outgoing fades out as incoming fades in.</summary>
+        //outgoing fades out as incoming fades in
         private static void DrawFade(SKCanvas canvas, SKImage outgoing, SKImage incoming, float progress)
         {
             DrawWithAlpha(canvas, outgoing, 1f - progress);
             DrawWithAlpha(canvas, incoming, progress);
         }
 
-        /// <summary>
-        /// Fades OUT to `colour` over [0, 0.5], then fades IN from it over
-        /// [0.5, 1].
-        /// </summary>
+        //fades out to `colour` over the first half, then in from it over the second
         private static void DrawFadeToColor(
             SKCanvas canvas, SKImage outgoing, SKImage incoming,
             float progress, int canvasWidth, int canvasHeight, SKColor colour)
@@ -106,27 +77,15 @@ namespace EditSharp.Compositing
             }
         }
 
-        /// <summary>
-        /// Both images translate together across the canvas at `angleDegrees`
-        /// — outgoing exits in that direction while incoming enters from
-        /// directly opposite, at the same rate. Angle convention matches
-        /// Position/DropShadowEffect.Offset elsewhere: Y-up, 0 = motion
-        /// toward +X (right), 90 = motion toward the top of the screen. X
-        /// and Y travel distance are each normalized against their own
-        /// canvas dimension independently (same convention Position/Offset
-        /// already use), not a true Euclidean distance — matches how every
-        /// other normalized value in this codebase already behaves.
-        ///
-        /// Algebraically verified to reduce exactly to the old SlideLeft/
-        /// Right/Up/Down pixel math at 0/180/90/270 degrees.
-        /// </summary>
+        //both images move together at `angleDegrees` (y up, 0 is right, 90 is up): outgoing leaves that way,
+        //incoming enters from the opposite side. x and y travel are each fractions of their own frame dimension
         private static void DrawSlide(
             SKCanvas canvas, SKImage outgoing, SKImage incoming,
             float progress, int canvasWidth, int canvasHeight, float angleDegrees)
         {
             double radians = angleDegrees * Math.PI / 180.0;
 
-            // Y-up math convention -> screen (Y-down) draw convention.
+            //y up in the maths, y down on screen
             float dx = (float)Math.Cos(radians);
             float dy = (float)-Math.Sin(radians);
 

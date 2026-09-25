@@ -6,42 +6,11 @@ using EditSharp.Components.Channels;
 
 namespace EditSharp.Compositing
 {
-    /// <summary>
-    /// Item 7: replaces FrameFilterChain.Draw and the whole EditSharp.Components
-    /// `BlendMode` enum. `BlendMode` existed only because ffmpeg's `blend`
-    /// filter ignores alpha entirely (it blends the whole frame, opaque or
-    /// not) and had a narrower mode set than Skia's — both reasons are gone
-    /// once compositing is native Skia:
-    ///
-    ///   - Skia's SKBlendMode operators are alpha-aware Porter-Duff/CSS
-    ///     compositing formulas by construction. A channel's own transparency
-    ///     is respected automatically as blend coverage — there is nothing
-    ///     equivalent needed to the old split/alphaextract/blend/alphamerge/
-    ///     overlay dance that manually re-masked `blend`'s alpha-ignorant
-    ///     output back down to the channel's real alpha.
-    ///   - `Channel.BlendMode` (VideoChannel.BlendMode, post schema rewrite)
-    ///     is typed as `ChannelBlendMode` — a superset wrapper around
-    ///     SKBlendMode (see ChannelBlendMode.cs) rather than SKBlendMode
-    ///     directly, so the four modes with no native Skia equivalent have
-    ///     a stable slot to be implemented into later via a custom SkSL
-    ///     shader, without another breaking enum swap.
-    ///
-    /// TASK 7 ADDITION: ToNativeForMerge exposes the same mapping to
-    /// ImageGraphEvaluator's MergeNode dispatch (Components/Effects/
-    /// VideoEffectNodes.cs) — MergeNode composites two IMAGE streams the
-    /// exact same way a channel composites onto the ones beneath it, so it
-    /// should speak the identical blend-mode vocabulary rather than
-    /// maintaining a second copy of this table.
-    /// </summary>
+    /// <summary>Draws finished channels onto the frame with their blend modes, through Skia's alpha-aware blend modes.</summary>
+    /// <remarks>ChannelBlendMode wraps SKBlendMode and adds four arithmetic modes Skia lacks, reserved for custom shaders; they throw until then. MergeNode uses the same mapping.</remarks>
     internal static class ChannelCompositor
     {
-        /// <summary>
-        /// Explicit mapping rather than relying on the two enums happening
-        /// to share ordinal values — ChannelBlendMode's declaration order
-        /// mirrors SKBlendMode's today, but an explicit table doesn't
-        /// silently break if either enum is ever reordered or Skia adds a
-        /// new mode in between.
-        /// </summary>
+        //a table, not a cast, so reordering either enum can't silently change a mode
         private static readonly Dictionary<ChannelBlendMode, SKBlendMode> NativeModes = new()
         {
             [ChannelBlendMode.Clear] = SKBlendMode.Clear,
@@ -74,34 +43,17 @@ namespace EditSharp.Compositing
             [ChannelBlendMode.Color] = SKBlendMode.Color,
             [ChannelBlendMode.Luminosity] = SKBlendMode.Luminosity,
 
-            // Average, Negation, Divide, Subtract deliberately absent —
-            // see ToNative's throw below.
+            //Average, Negation, Divide and Subtract have no Skia equivalent; see ToNativeForMerge
         };
 
-        /// <summary>
-        /// Draws a finished channel onto the accumulator canvas with the
-        /// given blend mode. No `enable`/`setpts` gating needed here, same
-        /// as the old Draw's own comment — a clip is only present at all if
-        /// it's visible on this frame, gated in C# already.
-        /// </summary>
+        //draws a finished channel onto the frame with its blend mode
         public static void Draw(SKCanvas canvas, SKImage channel, ChannelBlendMode blendMode)
         {
             using var paint = new SKPaint { BlendMode = ToNativeForMerge(blendMode) };
             canvas.DrawImage(channel, 0, 0, paint);
         }
 
-        /// <summary>
-        /// Throws for the four reserved arithmetic modes rather than
-        /// silently falling back to SrcOver or no-oping — a clip configured
-        /// with one of these should get a clear, immediate error, not a
-        /// quietly-wrong render. Swap in a real case here (an SKRuntimeEffect
-        /// shader) if/when one of these is actually needed; until then this
-        /// stays a deliberate gap, not an oversight.
-        ///
-        /// Internal (not private) — also called directly by
-        /// ImageGraphEvaluator for MergeNode, which needs the exact same
-        /// ChannelBlendMode -> SKBlendMode mapping this class already owns.
-        /// </summary>
+        //the Skia mode for a ChannelBlendMode; the four reserved arithmetic modes throw rather than render wrongly
         internal static SKBlendMode ToNativeForMerge(ChannelBlendMode mode)
         {
             if (NativeModes.TryGetValue(mode, out SKBlendMode native))
@@ -110,7 +62,7 @@ namespace EditSharp.Compositing
             throw new NotSupportedException(
                 $"ChannelBlendMode.{mode} has no native SKBlendMode implementation. " +
                 "This mode is reserved for a future SKRuntimeEffect (SkSL) shader " +
-                "and has not been built — see ChannelBlendMode.cs.");
+                "and hasn't been built yet.");
         }
     }
 }

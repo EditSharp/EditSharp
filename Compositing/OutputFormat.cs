@@ -1,9 +1,6 @@
 namespace EditSharp.Compositing
 {
-    /// <summary>
-    /// The pixel format the accumulator and the final ffmpeg mux/encode step
-    /// both agree on. 8-bit RGBA for the whole Skia compositor.
-    /// </summary>
+    //the pixel format frames are composited in and handed to ffmpeg: 8-bit RGBA
     internal static class OutputFormat
     {
         public const string FfmpegPixelFormat = "rgba";

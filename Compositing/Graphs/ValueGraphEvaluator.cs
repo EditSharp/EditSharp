@@ -5,26 +5,12 @@ using EditSharp.Components.Nodes.Math;
 
 namespace EditSharp.Compositing.Graphs
 {
-    /// <summary>
-    /// Resolves one Value-typed input port at a single instant, by walking
-    /// BACKWARD from it through the graph's Connections — ValueConstantNode
-    /// leaves evaluate their own Animatable&lt;float&gt;, MathNode recurses
-    /// into both its own inputs and applies its Operation.
-    ///
-    /// Shared between the video evaluator (ImageGraphEvaluator, which
-    /// needs one instant per rendered frame) and the audio evaluator
-    /// (AudioGraphEvaluator, which needs one instant per automation
-    /// block — see its own RenderAutomation) since a Value chain has no
-    /// notion of "clip content" at all, only of time — exactly the
-    /// "universally applicable" property the user asked a math node have.
-    /// </summary>
+    //resolves a Value input at one instant by walking back through its connections: a ValueConstantNode
+    //evaluates its keyframed value, a MathNode evaluates its inputs and applies its operation.
+    //Video evaluates it once per frame, audio once per automation step
     internal static class ValueGraphEvaluator
     {
-        /// <summary>
-        /// Null if `inputPortName` on `node` has nothing connected — the
-        /// common case, meaning the caller should fall back to that node's
-        /// own keyframed value with no modulation applied.
-        /// </summary>
+        //null when nothing is connected, so the caller uses the node's own value unmodulated
         public static float? TryEvaluateConnectedInput(
             Graph graph, Node node, string inputPortName, TimeSpan time)
         {

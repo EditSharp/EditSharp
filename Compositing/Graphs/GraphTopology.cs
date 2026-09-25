@@ -5,16 +5,7 @@ using EditSharp.Components.Nodes;
 
 namespace EditSharp.Compositing.Graphs
 {
-    /// <summary>
-    /// The Kahn's-algorithm topological ordering shared by BOTH real graph
-    /// evaluators — ImageGraphEvaluator (Image/Mask domain) and
-    /// AudioGraphEvaluator (Audio domain). Extracted out of
-    /// ImageGraphEvaluator (which used to have its own private copy) so
-    /// the walking algorithm itself has exactly one implementation shared
-    /// across both domains, rather than two copies that could drift apart —
-    /// the two evaluators differ only in what they DO with each node once
-    /// visited, never in how the visit order is computed.
-    /// </summary>
+    //the evaluation order graph evaluators share (Kahn's algorithm)
     internal static class GraphTopology
     {
         /// <summary>

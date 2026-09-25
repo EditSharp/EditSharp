@@ -9,45 +9,11 @@ using EditSharp.Compositing.Sources;
 
 namespace EditSharp.Compositing
 {
-    /// <summary>
-    /// Composites ONE output frame directly against an in-process SKCanvas.
-    /// Per-clip compositing itself (resolve inputs -> graph evaluation ->
-    /// warp) is NOT reimplemented here — that's ClipCompositor.Composite
-    /// (-> ImageGraphEvaluator), called once per clip below. This file's own
-    /// job is everything above a single clip: fetching that clip's pixel
-    /// content for this frame (IClipContentSource), handling a two-clip
-    /// transition (TransitionCompositor), blending a channel onto the
-    /// accumulator (ChannelCompositor), and flattening onto black at the end.
-    ///
-    /// CONTENT SOURCE IS AN INTERFACE (IClipContentSource), NOT A CONCRETE
-    /// TYPE: this file composites identically regardless of whether frames
-    /// come from ClipContentSource's persistent forward-only decode
-    /// (Render, forward Playback) or ScrubFrameSource's one-shot arbitrary-
-    /// position I-frame decode (Playback.ScrubToAsync, reverse playback) —
-    /// see IClipContentSource's own remarks. This file never needed to know
-    /// which one it's talking to.
-    ///
-    /// "CLIPS ARE GRAPHS" REWRITE:
-    ///   - FrameClip no longer carries Transform/NativeWidth/NativeHeight (see
-    ///     FrameFilterChain.cs's own remarks) — DrawClip fetches a dictionary
-    ///     of per-InputNode content from the content source keyed by node Id
-    ///     and hands the WHOLE dictionary to ClipCompositor.Composite,
-    ///     rather than a single pre-resolved image.
-    ///   - The single top-level RenderFrame (raw RGBA8888 bytes, for the
-    ///     render accumulator) is now built on top of a new, more general
-    ///     ComposeFrameImage (an SKImage, flattened onto opaque black) — the
-    ///     same building block NestedTimelineRenderer uses to embed one
-    ///     Timeline's rendered picture as another clip's TimelineVideoInputNode
-    ///     content, recursively.
-    /// </summary>
+    /// <summary>Composites one frame: each channel's clips (through ClipCompositor), transitions, channel blending, then onto black.</summary>
+    /// <remarks>It works the same whichever <see cref="Sources.IClipContentSource"/> supplies the clips' content.</remarks>
     internal static class FrameCompositor
     {
-        /// <summary>
-        /// Renders one output frame and returns its raw pixel bytes in a
-        /// buffer RENTED from ArrayPool&lt;byte&gt;.Shared. The caller MUST
-        /// call ArrayPool&lt;byte&gt;.Shared.Return(buffer) once done with
-        /// it, on every path including error.
-        /// </summary>
+        //one frame as RGBA8888 bytes in a buffer rented from ArrayPool<byte>.Shared; the caller returns it
         public static (byte[] Buffer, int Length) RenderFrame(
             FrameState frame, IClipContentSource contentSource,
             int canvasWidth, int canvasHeight, int fps, SurfacePool pool)
@@ -56,14 +22,7 @@ namespace EditSharp.Compositing
             return ReadRgba8888(flattened, canvasWidth, canvasHeight);
         }
 
-        /// <summary>
-        /// Renders one output frame and returns it as an opaque (flattened
-        /// onto black), canvas-sized SKImage — the OWNER is the caller, who
-        /// must dispose it. Shared by RenderFrame (which reads it back to raw
-        /// bytes for the accumulator) and NestedTimelineRenderer (which
-        /// embeds it directly as another clip's resolved InputNode content,
-        /// with no intermediate byte round-trip).
-        /// </summary>
+        //one frame as an opaque, frame-sized image the caller disposes; nested timelines use it directly
         public static SKImage ComposeFrameImage(
             FrameState frame, IClipContentSource contentSource,
             int canvasWidth, int canvasHeight, int fps, SurfacePool pool)
@@ -90,10 +49,7 @@ namespace EditSharp.Compositing
                 pool.Return(accumulator, canvasWidth, canvasHeight);
             }
 
-            //drop the composite onto opaque black — deliberately the very
-            //last step, so every blend mode and every transition above sees
-            //real transparency to work with rather than a channel that was
-            //already dropped onto black
+            //onto black last, so every blend mode and transition above works with real transparency
             SKSurface flattened = pool.Rent(canvasWidth, canvasHeight);
             try
             {
@@ -110,13 +66,8 @@ namespace EditSharp.Compositing
             }
         }
 
-        /// <summary>
-        /// One channel's clips for this frame, transitioned together if a
-        /// transition is mid-flight. Each clip is drawn onto its OWN
-        /// canvas-sized transparent surface first (transitions composite two
-        /// whole rendered clips, not two unrendered ones) rather than straight
-        /// onto the accumulator.
-        /// </summary>
+        //one channel's clips this frame; each is drawn onto its own transparent surface first, since a
+        //transition combines two finished clips
         private static SKImage? ComposeChannel(
             FrameChannel channel, int frameIndex, IClipContentSource contentSource,
             int canvasWidth, int canvasHeight, int fps, SurfacePool pool)
@@ -152,22 +103,13 @@ namespace EditSharp.Compositing
             }
         }
 
-        /// <summary>
-        /// Fetches this clip's content for this frame — one resolved image
-        /// per InputNode in its graph (IClipContentSource.GetContent) — and
-        /// hands the whole graph off to ClipCompositor.Composite for
-        /// evaluation, then disposes whichever of those resolved images were
-        /// transient (see IClipContentSource's own Transient contract).
-        ///
-        /// FrameClip.Clip is guaranteed to be a VideoClip — only VideoChannels
-        /// (and therefore only VideoClip) are ever resolved into a
-        /// FrameChannel — see FrameStateResolver.
-        /// </summary>
+        //gets the clip's content for this frame, evaluates its graph through ClipCompositor, then
+        //disposes whatever content was handed over as transient
         private static void DrawClip(
             SKCanvas canvas, FrameClip frameClip, int frameIndex, IClipContentSource contentSource,
             int canvasWidth, int canvasHeight, int fps, SurfacePool pool)
         {
-            if (frameClip.Clip is not VideoClip clip) return; //defensive — see class remarks
+            if (frameClip.Clip is not VideoClip clip) return; //only video channels are resolved into frames
 
             IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> resolved =
                 contentSource.GetContent(clip, frameClip.Graph, frameClip.ClipSeconds, frameIndex, canvasWidth, canvasHeight, pool);
@@ -178,7 +120,7 @@ namespace EditSharp.Compositing
 
             try
             {
-                var context = new SkClipChainContext(canvasWidth, canvasHeight, fps, 1.0 / fps);
+                var context = new SkClipChainContext(canvasWidth, canvasHeight, fps);
 
                 ClipCompositor.Composite(
                     canvas, frameClip.Graph, plain, frameClip.ClipSeconds, context, pool);
@@ -192,12 +134,7 @@ namespace EditSharp.Compositing
             }
         }
 
-        /// <summary>
-        /// Copies `surface`'s pixels out as tightly-packed RGBA8888 bytes (no
-        /// row padding), matching exactly what ffmpeg's rawvideo demuxer
-        /// expects for `-pix_fmt rgba` — see OutputFormat and
-        /// Renderer.FinalizeOutputAsync's matching input args.
-        /// </summary>
+        //the surface's pixels as tightly packed RGBA8888, which ffmpeg's rawvideo input expects for rgba
         private static (byte[] Buffer, int Length) ReadRgba8888(
             SKImage image, int width, int height)
         {

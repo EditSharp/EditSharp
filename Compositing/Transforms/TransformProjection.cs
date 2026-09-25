@@ -6,29 +6,8 @@ using EditSharp.Components;
 
 namespace EditSharp.Compositing.Transforms
 {
-    /// <summary>
-    /// Turns a ClipTransform (and its per-field keyframe animation, if any)
-    /// into the eight destination corner values the Skia-native warp needs
-    /// (see TransformMatrix.BuildLiteralMatrix).
-    ///
-    /// PROJECTION CONVENTIONS — unchanged from before this rewrite:
-    ///   - Position moves the clip's CENTRE, normalized to half the canvas.
-    ///   - Scale multiplies the base fit. Y is up. Yaw -> Pitch -> Rotation
-    ///     order. 90 degree horizontal field of view.
-    ///
-    /// "CLIPS ARE GRAPHS" REWRITE: ComputeContentSize/MaxScale used to take
-    /// the owning VisualClip and read its `.Transform` property directly.
-    /// VisualClip is gone — Transform now lives ON TransformNode itself
-    /// (there can be more than one TransformNode in a complex multi-branch
-    /// graph), so both methods now take a ClipTransform directly instead of
-    /// a clip. The caller (ImageGraphEvaluator's TransformNode dispatch)
-    /// passes that node's own Transform, computed against whatever image is
-    /// ACTUALLY upstream of it at that point in the graph — content size is
-    /// therefore resolved per-TransformNode-visit rather than once per clip
-    /// up front, which is a more accurate model of "native size" for a
-    /// graph that can have more than one input feeding more than one
-    /// TransformNode.
-    /// </summary>
+    /// <summary>Turns a ClipTransform into the four corners its content lands on.</summary>
+    /// <remarks>Position moves the content's centre, in half-frames. Scale multiplies the fit to the frame. y is up. Rotations apply yaw, then pitch, then roll, seen with a 90 degree horizontal field of view.</remarks>
     internal static class TransformProjection
     {
         public const double FieldOfViewDegrees = 90.0;
@@ -36,13 +15,7 @@ namespace EditSharp.Compositing.Transforms
 
         public readonly record struct ContentPlacement(int Width, int Height, int X, int Y);
 
-        /// <summary>
-        /// Sizes the content to roughly the number of pixels it will actually
-        /// occupy on screen, rather than blowing it up to canvas size and
-        /// letting the warp shrink it. Taken at the transform's LARGEST scale
-        /// across its whole keyframe range, so a zoom stays sharp at its
-        /// biggest rather than being sized for the opening frame.
-        /// </summary>
+        //about the pixels the content covers on screen at its largest keyframed scale, so a zoom stays sharp
         public static (int Width, int Height) ComputeContentSize(
             ClipTransform transform, int nativeWidth, int nativeHeight, int canvasWidth, int canvasHeight)
         {
@@ -58,16 +31,7 @@ namespace EditSharp.Compositing.Transforms
                     EvenAtLeast2((int)Math.Round(desiredH * fit)));
         }
 
-        public static ContentPlacement PlaceInFrame(
-            int contentWidth, int contentHeight, int frameWidth, int frameHeight) =>
-            new(contentWidth, contentHeight,
-                (frameWidth - contentWidth) / 2, (frameHeight - contentHeight) / 2);
-
-        /// <summary>
-        /// The largest scale a ClipTransform.Scale ever reaches, per axis,
-        /// across its whole keyframe range (or just its StaticValue if
-        /// unanimated).
-        /// </summary>
+        //the largest Scale reaches per axis across its keyframes
         public static (double X, double Y) MaxScale(ClipTransform transform)
         {
             Animatable<Vector2> scale = transform.Scale;

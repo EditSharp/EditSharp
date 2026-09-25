@@ -527,7 +527,7 @@ namespace EditSharp.Playback
 
                     try
                     {
-                        var context = new SkClipChainContext(width, height, fps, 1.0 / fps);
+                        var context = new SkClipChainContext(width, height, fps);
                         SKSurface surface = pool.Rent(width, height);
 
                         try

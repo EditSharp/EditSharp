@@ -49,39 +49,31 @@ namespace EditSharp.Compositing.Sources
         int Direction = 1,
         RenderReportBuilder? Report = null);
 
-    /// <summary>
-    /// Resolves this frame's image for every InputNode of a VideoClip's graph.
-    /// Media inputs (VideoSourceNode) go through their VideoSource; prepared,
-    /// read and failed entirely on the source's terms, so this class never
-    /// knows what kind of source it's reading. Generators, text and nested
-    /// timelines are still resolved here until they become sources too.
-    ///
-    /// ONE CLASS FOR EVERY CONTEXT: playback, export, scrubbing, reverse and
-    /// thumbnails differ only in their ContentSourceOptions; read mode,
-    /// whether reads are buffered and in which direction, and what a failure
-    /// turns into.
-    ///
-    /// AHEAD OF TIME (buffered sessions): Anticipate, called once per frame
-    /// before the frame is composed, prepares the sources of every clip that
-    /// will be on screen within EditSharpConfig.SourceLookahead, opens a
-    /// BufferedVideoReader for each as soon as it's prepared (so its first
-    /// frames are decoded before it appears), and releases inputs whose clip
-    /// the playhead has left. WaitReady then lets the caller decide what to do
-    /// about a frame that isn't ready in time (see Playback's late-frame
-    /// handling).
-    ///
-    /// FAILURES: a source's SourceUnavailableException becomes a
-    /// MediaPlaceholder for its reason (EndOfSource: transparent). Opening and
-    /// ProxyPending/ProxyMissing also mark the frame incomplete (LastFrameIncomplete).
-    /// MediaOffline and DecodeError are remembered per input; a Preview
-    /// session tries again after EditSharpConfig.SourceRetryInterval, an
-    /// Export session records every affected frame in its RenderReport.
-    ///
-    /// NOT THREAD-SAFE: Anticipate, WaitReady, PrepareAsync's caller and
-    /// GetContent must be driven from one logical sequence (they are, by every
-    /// session loop). Only preparation and each buffer's producer run in the
-    /// background, and they touch nothing shared.
-    /// </summary>
+    /// <summary>Resolves a video clip's source nodes to this frame's images, through their VideoSources.</summary>
+    /// <remarks>
+    /// Sources are prepared, read and failed on their own terms, so this never
+    /// knows what kind of source it's reading. Playback, export, scrubbing,
+    /// reverse and thumbnails differ only in their ContentSourceOptions.
+    /// <para>
+    /// In a buffered session, Anticipate (called before each frame) prepares the
+    /// sources of every clip on screen within <see cref="EditSharpConfig.SourceLookahead"/>,
+    /// opens a BufferedVideoReader for each as soon as it's prepared, and releases
+    /// clips the playhead has left. WaitReady lets the caller decide what to do
+    /// about a frame that isn't ready in time.
+    /// </para>
+    /// <para>
+    /// A SourceUnavailableException becomes the placeholder for its reason
+    /// (EndOfSource is transparent). Opening, ProxyPending and ProxyMissing also
+    /// mark the frame incomplete. MediaOffline and DecodeError are remembered: a
+    /// preview retries after <see cref="EditSharpConfig.SourceRetryInterval"/>, an
+    /// export records every affected frame in its report.
+    /// </para>
+    /// <para>
+    /// Not thread-safe: Anticipate, WaitReady, preparation and GetContent are driven
+    /// in sequence by the session loop. Only preparation and each buffer's producer
+    /// run in the background, and they share nothing.
+    /// </para>
+    /// </remarks>
     internal sealed class ClipContentSource : IClipContentSource, IDisposable
     {
         private sealed class MediaInput(VideoClip clip, VideoSourceNode node, VideoSource source)
@@ -111,9 +103,7 @@ namespace EditSharp.Compositing.Sources
         /// <summary>Whether the last GetContent substituted anything that can still arrive (Opening, ProxyPending, ProxyMissing).</summary>
         public bool LastFrameIncomplete { get; private set; }
 
-        // ---------------------------------------------------------------
-        // Ahead of time
-        // ---------------------------------------------------------------
+        // ---- ahead of time ----
 
         /// <summary>Prepares every media input visible in `state`, waiting for all of them. Failures are recorded, not thrown.</summary>
         public Task PrepareAsync(FrameState state, CancellationToken ct = default) => PrepareAsync(
@@ -221,9 +211,7 @@ namespace EditSharp.Compositing.Sources
             return true;
         }
 
-        // ---------------------------------------------------------------
-        // Per frame
-        // ---------------------------------------------------------------
+        // ---- per frame ----
 
         public IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> GetContent(
             VideoClip clip, Graph graph, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool) =>
@@ -421,9 +409,7 @@ namespace EditSharp.Compositing.Sources
             input.Failure!.Reason is SourceUnavailableReason.MediaOffline or SourceUnavailableReason.DecodeError &&
             Environment.TickCount64 - input.FailedAt >= EditSharpConfig.SourceRetryInterval.TotalMilliseconds;
 
-        // ---------------------------------------------------------------
-        // Inputs
-        // ---------------------------------------------------------------
+        // ---- inputs ----
 
         //the node's current source; swapping it mid-session drops everything held for the old one
         private MediaInput Input(VideoClip clip, VideoSourceNode node)
@@ -536,9 +522,7 @@ namespace EditSharp.Compositing.Sources
             }
         }
 
-        // ---------------------------------------------------------------
-        // Timeline arithmetic
-        // ---------------------------------------------------------------
+        // ---- timeline arithmetic ----
 
         private TimeSpan ContentTimeOf(Clip clip, int frame) =>
             TimeSpan.FromSeconds(FrameStateResolver.ClipSecondsAt(clip, FrameStateResolver.TimeOfFrame(frame, _options.Fps)));

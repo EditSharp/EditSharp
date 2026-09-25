@@ -6,63 +6,24 @@ using EditSharp.Components.Clips;
 
 namespace EditSharp.Compositing.Transforms
 {
-    /// <summary>
-    /// The SkiaSharp compositor's transform math. ProjectCorner/ComputeQuad
-    /// (in TransformProjection.cs) produce eight destination-corner numbers;
-    /// this file turns those into a real SKMatrix.
-    ///
-    /// "CLIPS ARE GRAPHS" REWRITE: BuildLiteralMatrix/RectToQuad/
-    /// UnitSquareToQuad are pure geometry and entirely unchanged. What
-    /// changed substantially is ClipCompositor.Composite: resize/
-    /// tint/warp are no longer a fixed external sequence this method drives
-    /// — they're each their own node dispatch INSIDE ImageGraphEvaluator
-    /// now (TintNode, TransformNode — see SkClipEffects.cs), since a graph
-    /// can have more than one InputNode/TransformNode and there is no
-    /// longer a single "the content" this method could resize/tint once up
-    /// front before handing off. Composite's job shrinks to: hand the
-    /// clip's whole graph (with every InputNode's own resolved content) to
-    /// the evaluator, and draw whatever comes out the other end.
-    ///
-    /// SAMPLING — MIPMAP MODE, and why the two call sites below differ.
-    ///
-    /// Resize() is the minification path: it is where a large source is
-    /// scaled down to its on-canvas content size, and it is the only place
-    /// mipmapping does real work. Heavy minification without a mip chain
-    /// aliases and shimmers on motion, which is a genuine quality loss in a
-    /// video compositor, so Resize keeps SKMipmapMode.Linear.
-    ///
-    /// DrawWarped() runs AFTER Resize, on content that has already been
-    /// rasterized at its target size, so its matrix is close to 1:1 and a
-    /// mip chain buys nothing — while still costing a full chain generation
-    /// per image per frame. It uses SKMipmapMode.None deliberately.
-    ///
-    /// ONE CAVEAT WORTH KNOWING: a freshly created SKImage has no mip chain,
-    /// so requesting mipmapped sampling makes Skia generate one on the fly,
-    /// and on the D3D12 backend that generation path emits real validation
-    /// errors (ResourceBarrierBeforeAfterMismatch / InvalidSubresourceState
-    /// against Skia's internal "_Skia_CopyBaseMipMapToView" scratch
-    /// resource). Those errors were investigated at length and are NOT the
-    /// cause of the block-corruption bug that was chased through this file's
-    /// history — that was a precision hazard in NoiseGenerator's shader. They
-    /// are, however, real, and if unexplained corruption ever shows up on
-    /// heavily-downscaled content specifically, switching Resize to
-    /// SKMipmapMode.None is the first thing to try: it trades minification
-    /// quality for avoiding that path entirely.
-    /// </summary>
+    /// <summary>Turns TransformProjection's corner positions into an SKMatrix, and draws and resizes with it.</summary>
+    /// <remarks>
+    /// Resize is where a large source shrinks to its on-screen size, so it samples
+    /// with mipmaps: heavy minification without them shimmers in motion. DrawWarped
+    /// works on content already at its target size, so it samples without them. On
+    /// the D3D12 backend, generating mipmaps on the fly logs validation errors; if
+    /// heavily shrunk content ever shows corruption, try Resize without mipmaps first.
+    /// </remarks>
     internal static class TransformMatrix
     {
-        /// <summary>
-        /// Maps content (already rasterized at contentWidth x contentHeight —
-        /// see TransformProjection.ComputeContentSize) directly onto the
-        /// canvas-space Quad the resolved transform projects to.
-        /// </summary>
+        //maps content, already rasterized at its content size, onto the quad its transform projects to
         public static SKMatrix BuildLiteralMatrix(
             ResolvedTransform transform,
             int nativeWidth, int nativeHeight,
             int canvasWidth, int canvasHeight,
             int contentWidth, int contentHeight)
         {
-            // frame == content here (1:1 outset ratio) — see ComputeQuad's own remarks.
+            //the frame is the content here, with no margin
             var placement = new TransformProjection.ContentPlacement(
                 contentWidth, contentHeight, 0, 0);
 
@@ -131,11 +92,7 @@ namespace EditSharp.Compositing.Transforms
             };
         }
 
-        /// <summary>
-        /// Draws `content` warped by `matrix` onto `canvas`. Bilinear, not
-        /// mipmapped: `content` is already at its target size by this point,
-        /// so a mip chain would be pure cost. See the SAMPLING remarks.
-        /// </summary>
+        //bilinear, no mipmaps: the content is already at its target size
         public static void DrawWarped(SKCanvas canvas, SKImage content, SKMatrix matrix)
         {
             canvas.Save();
@@ -148,10 +105,7 @@ namespace EditSharp.Compositing.Transforms
             canvas.Restore();
         }
 
-        /// <summary>
-        /// Resizes `source` to width x height, with mipmapped sampling —
-        /// this is the minification path. See the SAMPLING remarks.
-        /// </summary>
+        //mipmapped: this is where large sources shrink
         public static SKImage Resize(SKImage source, int width, int height, SurfacePool pool)
         {
             if (source.Width == width && source.Height == height) return source;

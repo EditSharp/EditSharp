@@ -7,79 +7,17 @@ using Vortice.DXGI;
 
 namespace EditSharp.Compositing.Gpu
 {
-    /// <summary>
-    /// Owns the GRContext the Skia compositor's surfaces are backed by for
-    /// one render session (see Renderer.RenderCoreAsync, which creates
-    /// exactly one of these and one SurfacePool on top of it, both scoped
-    /// to that single render).
-    ///
-    /// PRIORITY: D3D12 first (fastest, and headless device creation needs no
-    /// window/HWND at all — a clean fit for this fully-headless render
-    /// process), then software. The ANGLE/GL middle tier is deliberately not
-    /// implemented: headless EGL creation is raw P/Invoke against libEGL.dll
-    /// with real risk of getting an attribute list wrong, and D3D12 already
-    /// covers the Windows target. Revisit only if a machine turns up where
-    /// D3D12 device creation itself fails but GL would have worked.
-    ///
-    /// ADAPTER SELECTION IS EXPLICIT AND LOGGED, not incidental. Every
-    /// enumerated adapter is listed at startup, and RenderSettings.
-    /// GpuAdapterIndex chooses one (null = first non-software, the historical
-    /// behaviour). This matters more than it looks: on a hybrid machine the
-    /// first non-software adapter can be the integrated GPU or the discrete
-    /// one depending on enumeration order, power settings and BIOS mode, so
-    /// an unchanged build can execute the entire compositor on a different
-    /// vendor's shader compiler from one boot to the next. A block-corruption
-    /// bug was once chased for a long time before anyone asked which GPU was
-    /// actually running the shader — the answer turned out to be the whole
-    /// question. Making the choice explicit, and printing the roster, is why
-    /// that is now a one-run experiment instead of an investigation.
-    ///
-    /// ENVIRONMENT FINGERPRINT: the adapter identity, its user-mode driver
-    /// version, the actually-loaded SkiaSharp assembly and the OS build are
-    /// logged once per GPU session. These are the things that can change
-    /// underneath a build that has not changed, and having them in the log
-    /// makes "nothing changed" verifiable instead of assumed.
-    ///
-    /// ADAPTER LIFETIME: SkiaSharp's D3D12 backend does not take its own
-    /// reference on the raw native pointers handed to it via
-    /// GRD3DBackendContext — it borrows them and keeps using the adapter for
-    /// the GRContext's entire life. So the adapter backing a live GRContext
-    /// is owned by this class and disposed only in Dispose(); every other
-    /// enumerated adapter is released immediately. (An earlier version
-    /// disposed all of them, including the live one, which is a
-    /// use-after-free; and the version before that disposed none of them,
-    /// which is a leak. Both are fixed here.)
-    ///
-    /// DISPOSE WAITS FOR THE GPU TO IDLE BEFORE TEARING DOWN THE DEVICE:
-    /// added while chasing a real scrub-lockup investigation (a candidate
-    /// theory at the time — see git/project history and Playback's own
-    /// remarks — was that recreating a D3D12 device shortly after disposing
-    /// the previous one could race that previous device's own driver-side
-    /// teardown). Real-hardware testing after this fix showed the reported
-    /// freeze was UNCHANGED — so this specific race is NOT confirmed as (or
-    /// ruled out as) a real contributor to that bug; the actual cause turned
-    /// out to be something else entirely (cross-thread GRContext usage — see
-    /// Playback's class remarks, GPU WORK MUST STAY ON ONE THREAD, and
-    /// GpuThreadDispatcher). Kept anyway on its own independent merits: it
-    /// is real, cheap (a one-time cost at session teardown, not a hot path),
-    /// and closes a genuine gap — the previous Dispose() gave no guarantee
-    /// the GPU had actually finished outstanding work before the device/
-    /// queue/adapter/factory backing it were destroyed. Deliberately NOT the
-    /// same mistake as the per-Return sync SurfacePool's own remarks warn
-    /// against reintroducing (that was a hot per-frame path that serialized
-    /// CPU against GPU on every single surface return and bought nothing;
-    /// this runs once per GpuContext teardown).
-    ///
-    /// UNVERIFIED SURFACE, flagged honestly: GRD3DBackendContext's shape and
-    /// the Vortice call signatures below are written from familiarity with
-    /// those libraries, not compile-tested here. Failures fall through the
-    /// try/catch to software with a logged reason rather than producing a
-    /// broken context. The same honesty flag applies to GRContext.Submit's
-    /// exact signature/behavior in the currently-referenced SkiaSharp
-    /// version — wrapped in its own try/catch below so a signature mismatch
-    /// or an unexpected throw there degrades to a logged warning rather than
-    /// blocking teardown outright.
-    /// </summary>
+    /// <summary>The GRContext the compositor draws with: D3D12 when available, otherwise software.</summary>
+    /// <remarks>
+    /// Every adapter is logged at startup and <see cref="Rendering.RenderSettings.GpuAdapterIndex"/>
+    /// picks one; on a hybrid machine the first hardware adapter can change between
+    /// boots. The adapter's identity, driver version, SkiaSharp version and OS build
+    /// are logged once per session, so a change under an unchanged build shows. The
+    /// adapter in use is kept until Dispose, because Skia's D3D12 backend borrows it
+    /// without a reference of its own; the others are released at once. Dispose waits
+    /// for the GPU to finish submitted work before destroying the device. Any failure
+    /// setting up D3D12 falls back to software with the reason logged.
+    /// </remarks>
     internal sealed class GpuContext : IDisposable
     {
         public GRContext? GRContext { get; }
@@ -100,11 +38,7 @@ namespace EditSharp.Compositing.Gpu
             _queue = queue;
         }
 
-        /// <summary>
-        /// Creates the compositor's GPU context. `adapterIndex` is
-        /// RenderSettings.GpuAdapterIndex: null selects the first
-        /// non-software adapter, an explicit index selects that adapter.
-        /// </summary>
+        //the compositor's GPU context; `adapterIndex` null picks the first hardware adapter
         public static GpuContext Create(HardwareAccelerator hwAccel, int? adapterIndex = null)
         {
             if (hwAccel != HardwareAccelerator.GPU)
@@ -122,7 +56,7 @@ namespace EditSharp.Compositing.Gpu
                 (adapterIndex.HasValue
                     ? $" for RenderSettings.GpuAdapterIndex={adapterIndex.Value}"
                     : "") +
-                " — the composite stage is running software raster. Decode and encode " +
+                "; the composite stage is running software raster. Decode and encode " +
                 "hardware acceleration are unaffected by this.");
 
             return new GpuContext(null, null, null, null, null);
@@ -148,9 +82,7 @@ namespace EditSharp.Compositing.Gpu
                         AdapterDescription1 desc = adapter.Description1;
                         bool software = (desc.Flags & AdapterFlags.Software) != 0;
 
-                        // Roster line for every adapter, so a valid
-                        // GpuAdapterIndex can be read off the log rather
-                        // than guessed at.
+                        //one line per adapter, so a valid GpuAdapterIndex can be read off the log
                         EditSharpConfig.Logger.Log(
                             $"Composite: adapter[{i}] '{desc.Description}' " +
                             $"vendor=0x{desc.VendorId:X4} device=0x{desc.DeviceId:X4} " +
@@ -207,10 +139,7 @@ namespace EditSharp.Compositing.Gpu
             }
         }
 
-        /// <summary>
-        /// Records everything about the runtime graphics environment that
-        /// can change underneath an unchanged build — see the class remarks.
-        /// </summary>
+        //logs what can change underneath an unchanged build: adapter, driver, SkiaSharp, OS
         private static void LogEnvironmentFingerprint(IDXGIAdapter1 adapter, uint index)
         {
             try
@@ -220,9 +149,7 @@ namespace EditSharp.Compositing.Gpu
                 string driver = "unavailable";
                 try
                 {
-                    // User-mode driver version. NVIDIA's user-facing number
-                    // (e.g. 576.90) lives in the low half, so both the raw
-                    // and decoded forms are recorded.
+                    //the user-mode driver version; NVIDIA's familiar number (such as 576.90) is in the low half, so both forms are logged
                     if (adapter.CheckInterfaceSupport(typeof(IDXGIDevice).GUID, out long umd).Success)
                     {
                         long sub = (umd >> 16) & 0xFFFF;
@@ -266,10 +193,7 @@ namespace EditSharp.Compositing.Gpu
 
         public void Dispose()
         {
-            // See class remarks, DISPOSE WAITS FOR THE GPU TO IDLE BEFORE
-            // TEARING DOWN THE DEVICE. Force everything already submitted to
-            // actually finish on the GPU before the device/queue/adapter/
-            // factory it ran on are destroyed.
+            //let everything submitted finish before the device it runs on is destroyed
             if (GRContext != null)
             {
                 try
@@ -279,10 +203,7 @@ namespace EditSharp.Compositing.Gpu
                 }
                 catch (Exception ex)
                 {
-                    // Never let a flush/submit failure block teardown
-                    // outright — worst case here is falling back to the old
-                    // (unsynchronized) behavior for this one Dispose, not a
-                    // new hang.
+                    //a failed flush mustn't block teardown
                     EditSharpConfig.Logger.LogVerbose(
                         $"GpuContext.Dispose: GPU flush/submit before teardown threw: {ex.Message}");
                 }

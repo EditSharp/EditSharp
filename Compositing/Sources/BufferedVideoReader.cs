@@ -17,7 +17,7 @@ namespace EditSharp.Compositing.Sources
     /// ever touched by the producer thread. Taken frames are held (and handed
     /// out again for a repeated request) until the next Take, then disposed.
     ///
-    /// SELF-CORRECTING: a request that isn't next in line (a seek, a loop in
+    /// A request that isn't next in line (a seek, a loop in
     /// the timeline, an edit that changed the clip's timing so a queued
     /// frame's content time no longer matches) drops the queue and restarts
     /// production at the requested frame. Production stops at the edge of
@@ -70,17 +70,6 @@ namespace EditSharp.Compositing.Sources
 
             _worker = new Thread(Produce) { IsBackground = true, Name = "EditSharp-FrameBuffer" };
             _worker.Start();
-        }
-
-        /// <summary>Whether `frame` can be taken right now without waiting.</summary>
-        public bool IsReady(int frame, TimeSpan time)
-        {
-            lock (_lock)
-            {
-                if (Matches(_held, frame, time)) return true;
-                Align(frame, time);
-                return Matches(_queue.First?.Value, frame, time);
-            }
         }
 
         /// <summary>Waits up to `timeout` (infinite: Timeout.InfiniteTimeSpan) for `frame` to be ready.</summary>

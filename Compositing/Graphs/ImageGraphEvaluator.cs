@@ -14,58 +14,18 @@ using EditSharp.Compositing.Transforms;
 
 namespace EditSharp.Compositing.Graphs
 {
-    /// <summary>
-    /// A REAL topological-order graph evaluator (Kahn's algorithm, via the
-    /// shared GraphTopology.Order) for the Image/Mask domain — the
-    /// video-side counterpart to AudioGraphEvaluator.
-    ///
-    /// "CLIPS ARE GRAPHS" REWRITE — this is the file most reshaped by that
-    /// change:
-    ///   - There is no longer a single fixed ImageSourceNode anchor seeded
-    ///     with one externally-decoded `content` image. A graph can have
-    ///     ANY NUMBER of InputNodes (VideoSourceNode/TextInputNode/
-    ///     ColorGeneratorInputNode/NoiseInputNode/TimelineVideoInputNode),
-    ///     each already resolved to a raw SKImage by the caller
-    ///     (ClipContentSource — see its own remarks on per-InputNode-type
-    ///     dispatch) and handed in here as `resolvedInputs`, keyed by each
-    ///     InputNode's own Id. This evaluator seeds the (NodeId,"Image")
-    ///     cache from that dictionary for every InputNode encountered in
-    ///     topological order, then walks the rest of the graph exactly as
-    ///     before.
-    ///   - Resize/Tint/Warp are no longer driven externally by
-    ///     ClipCompositor as a fixed pre-graph sequence — TintNode
-    ///     (what replaced the old flat Modulate property) and TransformNode
-    ///     (which now carries its OWN ClipTransform data, since there's no
-    ///     more VisualClip to hold it) are ordinary dispatch cases in this
-    ///     evaluator's own switch, exactly like Blur/DropShadow/etc always
-    ///     were. TransformNode in particular now computes its own content
-    ///     size (TransformProjection.ComputeContentSize) from whatever
-    ///     image is ACTUALLY upstream of it at that point in the graph,
-    ///     rather than a single precomputed per-clip content size — the
-    ///     correct generalization once a graph can have more than one
-    ///     TransformNode (e.g. one per branch before a MergeNode).
-    ///   - ValueConstantNode/MathNode (see EditSharp.Components.Nodes.Math)
-    ///     are visited in topological order like any other node but
-    ///     contribute nothing to the Image cache directly — they're resolved
-    ///     ON DEMAND by ValueGraphEvaluator, walking backward from whichever
-    ///     node's optional Value input (MergeNode's "MixModulation") is
-    ///     actually connected, at the moment that node is dispatched. This
-    ///     evaluator just needs to not choke on visiting them.
-    ///
-    /// MASKS: unchanged — alpha-only convention, see ApplyMask/
-    /// RenderShapeMask/ExtractMask/CombineMasks below.
-    /// </summary>
+    /// <summary>Evaluates a clip's image graph for one instant, visiting nodes in order (GraphTopology).</summary>
+    /// <remarks>
+    /// Every source node's image comes in already resolved, keyed by node Id; the
+    /// rest of the graph (tint, transform, filters, masks, merges) runs here. A
+    /// TransformNode sizes its content from the image actually upstream of it.
+    /// Value nodes add nothing to the image cache: a node with a connected Value
+    /// input reads it through ValueGraphEvaluator when it runs. Masks are alpha-only.
+    /// </remarks>
     internal static class ImageGraphEvaluator
     {
-        /// <summary>
-        /// Runs the whole graph for one clip at one instant. `resolvedInputs`
-        /// must contain one entry per InputNode in `graph.Nodes` (keyed by
-        /// that node's own Id) — see ClipContentSource.GetContent. Returns
-        /// the ImageOutputNode's resolved input image; the caller keeps
-        /// ownership of every image in `resolvedInputs`, every OTHER
-        /// intermediate image created along the way is disposed before
-        /// returning, except the one actually returned.
-        /// </summary>
+        //runs the graph at one instant. `resolvedInputs` has an image per source node, by Id, and stays the
+        //caller's; every intermediate image is disposed except the one returned, which the caller disposes
         public static SKImage Evaluate(
             Graph graph,
             IReadOnlyDictionary<Guid, SKImage> resolvedInputs,
@@ -169,14 +129,7 @@ namespace EditSharp.Compositing.Graphs
                         float sigma = (float)Math.Clamp(
                             blur.Radius.Evaluate(clipRelativeTime) * context.CanvasWidth, 0.1, 1024.0);
 
-                        // NOTE: the pre-mask filtered image is tracked in
-                        // `owned` immediately, separately from the (possibly
-                        // different) post-mask image — previously the bare
-                        // filtered image was silently dropped when a Mask
-                        // was connected (ApplyMask's return value overwrote
-                        // the only reference to it before it was ever added
-                        // to `owned`), leaking one SKImage per frame for
-                        // every Blur node with a connected Mask input.
+                        //tracked before masking: the mask can replace `blurred`, and it must still be disposed
                         SKImage blurred = ApplyBlur(upstream, sigma, pool);
                         owned.Add(blurred);
                         SKImage result2 = mask != null ? ApplyMask(blurred, mask, pool, owned) : blurred;
@@ -192,10 +145,7 @@ namespace EditSharp.Compositing.Graphs
 
                         SKImage? mask = ResolveMask(graph, node, "Mask", masks, upstream, pool, owned);
 
-                        // Same leak/fix as BlurNode above: track the
-                        // pre-mask shadowed image in `owned` right away
-                        // instead of only tracking whichever image happens
-                        // to survive the (possible) mask reassignment.
+                        //tracked before masking, as for Blur
                         SKImage shadowed = ApplyDropShadow(shadow, upstream, clipRelativeTime, context, pool);
                         owned.Add(shadowed);
                         SKImage result2 = mask != null ? ApplyMask(shadowed, mask, pool, owned) : shadowed;
@@ -223,9 +173,7 @@ namespace EditSharp.Compositing.Graphs
 
                         float baseMix = Math.Clamp(merge.Mix.Evaluate(clipRelativeTime), 0f, 1f);
 
-                        //optional Value modulation — see MergeNode's own
-                        //remarks: multiplies against Mix's own keyframed
-                        //value rather than replacing it, when connected
+                        //a connected Value input multiplies Mix's own value rather than replacing it
                         float? modulation = ValueGraphEvaluator.TryEvaluateConnectedInput(
                             graph, merge, "MixModulation", clipRelativeTime);
 
@@ -264,11 +212,7 @@ namespace EditSharp.Compositing.Graphs
                         break;
                     }
 
-                    //Value-domain nodes (ValueConstantNode/MathNode) carry no
-                    //Image output at all — they're resolved on demand by
-                    //ValueGraphEvaluator wherever a consuming node's optional
-                    //Value input is actually connected (see MergeNode above),
-                    //not through this cache. Nothing to do here but move on.
+                    //Value nodes have no image; they're read on demand where a Value input is connected
                     case ValueConstantNode:
                     case MathNode:
                         break;
@@ -304,9 +248,7 @@ namespace EditSharp.Compositing.Graphs
         private static bool IsOpaqueWhite(SKColor colour) =>
             colour.Red == 255 && colour.Green == 255 && colour.Blue == 255 && colour.Alpha == 255;
 
-        // -----------------------------------------------------------
-        // Port resolution
-        // -----------------------------------------------------------
+        // ---- port resolution ----
 
         private static SKImage? ResolveImage(
             Graph graph, Node node, string portName, Dictionary<(Guid, string), SKImage> cache)
@@ -371,9 +313,7 @@ namespace EditSharp.Compositing.Graphs
             return resized;
         }
 
-        // -----------------------------------------------------------
-        // Tint (formerly the externally-applied Modulate step)
-        // -----------------------------------------------------------
+        // ---- tint ----
 
         private static SKImage ApplyTint(SKImage source, SKColor colour, SurfacePool pool)
         {
@@ -401,9 +341,7 @@ namespace EditSharp.Compositing.Graphs
             }
         }
 
-        // -----------------------------------------------------------
-        // Image filter nodes
-        // -----------------------------------------------------------
+        // ---- image filter nodes ----
 
         private static SKImage ApplyBlur(SKImage input, float sigma, SurfacePool pool)
         {
@@ -503,9 +441,7 @@ namespace EditSharp.Compositing.Graphs
             }
         }
 
-        // -----------------------------------------------------------
-        // Mask-producing nodes
-        // -----------------------------------------------------------
+        // ---- mask-producing nodes ----
 
         private static SKImage RenderShapeMask(ShapeMaskNode shape, TimeSpan time, SkClipChainContext context, SurfacePool pool)
         {
@@ -635,9 +571,7 @@ namespace EditSharp.Compositing.Graphs
             }
         }
 
-        // -----------------------------------------------------------
-        // Shared helpers
-        // -----------------------------------------------------------
+        // ---- shared helpers ----
 
         private static SKImage DrawFiltered(SKImage input, SKPaint paint, int width, int height, SurfacePool pool)
         {
