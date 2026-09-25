@@ -7,14 +7,13 @@ using EditSharp.Editing;
 
 namespace EditSharp.Components.Nodes.Sources
 {
-    /// <summary>
-    /// Feeds a VideoSource's frames into the graph; a media file, a still
-    /// image, or any other video kind; the node neither knows nor cares
-    /// which. Replaces the old VideoClip.Source property directly.
-    /// </summary>
+    /// <summary>Feeds a <see cref="VideoSource"/>'s frames into the graph, whatever kind of source it is.</summary>
+    /// <remarks>Output: Image.</remarks>
     public sealed class VideoSourceNode : InputNode, ITrimmableInput
     {
         VideoSource _source = null!;
+        /// <summary>Where the frames come from.</summary>
+        /// <remarks>Setting it trims the clip if the new source ends sooner.</remarks>
         [Editable("Source")]
         public required VideoSource Source
         {
@@ -28,18 +27,24 @@ namespace EditSharp.Components.Nodes.Sources
         }
 
         private static readonly NodePort[] StaticPorts = [new("Image", PortType.Image, PortDirection.Output)];
+        /// <inheritdoc/>
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
+        /// <inheritdoc/>
         public override IEnumerable<IAnimatable> Animatables => Source.Animatables;
+        /// <inheritdoc/>
         public override Node Duplicate() => Transaction.Suppressed(() => new VideoSourceNode { Enabled = Enabled, Source = Source.Duplicate() });
 
+        /// <summary>The source's <see cref="Components.Sources.Source.Start"/>, zero when unset.</summary>
         public TimeSpan InPoint
         {
             get => Source.Start ?? TimeSpan.Zero;
             set => Source.Start = value;
         }
 
+        /// <summary>How far the in-point can move earlier: back to the start of the source.</summary>
         public TimeSpan MaxHeadroom => Source.Start ?? TimeSpan.Zero;
 
+        /// <summary>The source's usable length; null when it loops, has no end, or isn't known yet.</summary>
         public TimeSpan? ContentLength => !Source.Loop && Source.TryGetUsableLength(out TimeSpan? length) ? length : null;
     }
 }

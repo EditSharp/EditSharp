@@ -2,31 +2,17 @@ using System;
 
 namespace EditSharp.Components.Nodes
 {
-    /// <summary>
-    /// A node whose own in-point should shift in lockstep with every OTHER
-    /// trimmable input when the owning Clip's head is trimmed/extended —
-    /// see Clip.OnHeadInPointShift/MaxHeadExtend, and the schema doc's
-    /// multi-input-trim rule ("shift them all together, clamped by whichever
-    /// one has the least room left").
-    ///
-    /// Implemented by VideoSourceNode/AudioSourceNode (wrapping
-    /// Source.Start) and TimelineVideoInputNode/TimelineAudioInputNode
-    /// (wrapping TimelineReference.Start). Generator/procedural/text input
-    /// nodes (ColorGeneratorInputNode, NoiseInputNode, TextInputNode,
-    /// ToneGeneratorInputNode) do NOT implement this — they have no
-    /// "in-point" concept, matching the old TextClip/GeneratorClip/
-    /// NoiseClip's inherited no-op/unbounded Clip defaults from before this
-    /// rewrite.
-    /// </summary>
+    /// <summary>An input with an in-point that moves when its clip's head is trimmed.</summary>
+    /// <remarks>Trimming a clip's head moves every trimmable input in its graph by the same amount, limited by whichever has the least room.</remarks>
     public interface ITrimmableInput
     {
-        /// <summary>The node's own in-point. Setting this is what OnHeadInPointShift actually does, per node.</summary>
+        /// <summary>How far into the content the clip starts.</summary>
         TimeSpan InPoint { get; set; }
 
-        /// <summary>How far InPoint could move EARLIER (an extend) — TimeSpan.MaxValue if unconstrained.</summary>
+        /// <summary>How far <see cref="InPoint"/> can move earlier; <see cref="TimeSpan.MaxValue"/> if there's no limit.</summary>
         TimeSpan MaxHeadroom { get; }
 
-        /// <summary>How much content follows the in-point when there's a known hard end; null when unbounded, looping, or not known yet.</summary>
+        /// <summary>How much content follows the in-point; null when there's no end, it loops, or it isn't known yet.</summary>
         TimeSpan? ContentLength { get; }
     }
 }

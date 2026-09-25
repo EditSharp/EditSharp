@@ -6,14 +6,17 @@ using EditSharp.Editing;
 
 namespace EditSharp.Components.Nodes
 {
+    /// <summary>One step in a clip's <see cref="Graph"/>: a source, an effect, a mask or a value.</summary>
+    /// <remarks>A node's ports are fixed by its type. Its settings are its [Editable] properties.</remarks>
     public abstract class Node
     {
+        /// <summary>Identifies the node within its graph; connections refer to nodes by it.</summary>
         public Guid Id { get; } = Guid.NewGuid();
 
         //the graph this node was added to; set by Graph, never by a snapshot
         internal Graph? Graph { get; set; }
 
-        /// <summary>The clip this node is in, through any composites around it.</summary>
+        //the clip this node is in, through any composites around it
         internal Clips.Clip? OwnerClip
         {
             get
@@ -24,33 +27,25 @@ namespace EditSharp.Components.Nodes
             }
         }
 
-        //fixed set, declared by the concrete node type
+        /// <summary>The node's ports, fixed by its type.</summary>
         public abstract IReadOnlyList<NodePort> Ports { get; }
 
-        //bypass — see Graph's class remarks
         bool _enabled = true;
+        /// <summary>Whether the node runs.</summary>
+        /// <remarks>A disabled source outputs nothing (transparent, or silence). A disabled effect passes its first input through. A disabled mask node outputs no mask, so whatever it fed is unmasked, and a disabled Value node feeds nothing, so the node it fed uses its own value.</remarks>
         [Editable("Enabled", Order = -100)]
         public bool Enabled { get => _enabled; set => Transaction.Set(this, ref _enabled, value, static (o, v) => o._enabled = v); }
 
-        /// <summary>
-        /// Deep copy with a FRESH Id — a duplicated clip's graph must not
-        /// share node identity with the original, or a Connection recorded
-        /// against one graph could be mistaken for referencing a node in
-        /// the other.
-        /// </summary>
+        /// <summary>A deep copy with a new <see cref="Id"/>, so connections in the two graphs can't be confused.</summary>
+        /// <remarks>History is suppressed: the copy has nothing to undo.</remarks>
+        /// <returns>The copy.</returns>
         public abstract Node Duplicate();
 
-        /// <summary>
-        /// Every keyframeable property this node owns, so a clip can reach
-        /// all of its tracks at once — a head trim/extend shifts every
-        /// keyframe in the graph (see Clip.OnHeadInPointShift). Empty by
-        /// default; a node with Animatable properties overrides it and lists
-        /// each one. An animated property left out here simply stops
-        /// following the content when the clip's head moves.
-        /// </summary>
+        /// <summary>Every keyframeable value the node owns.</summary>
+        /// <remarks>Trimming a clip's head shifts every keyframe these hold, so the animation stays with the content. A node with Animatable properties lists every one of them here.</remarks>
         public virtual IEnumerable<IAnimatable> Animatables => [];
 
-        /// <summary>This node's audio DSP for a playback or export session; null for nodes that don't process audio.</summary>
+        //this node's audio processing for one session; null for nodes that don't process audio
         internal virtual IAudioProcessor? CreateAudioProcessor(AudioSession session) => null;
     }
 }

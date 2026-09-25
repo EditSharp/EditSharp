@@ -8,16 +8,12 @@ using EditSharp.Editing;
 
 namespace EditSharp.Components.Nodes.Effects
 {
-    /// <summary>
-    /// Auto-created and wired in by default (see Graph.CreateAudioGraph)
-    /// — this is what replaces the old flat AudioClip.Volume field. A
-    /// normal, removable node beyond that default: an artist can delete it,
-    /// add several gain stages at different points in a chain, or route
-    /// around it entirely.
-    /// </summary>
+    /// <summary>Changes the volume.</summary>
+    /// <remarks>Input: Audio, plus an optional Value input, Modulation, that multiplies <see cref="Gain"/>. Output: Audio. A new audio clip's graph has one.</remarks>
     public sealed class GainNode : Node
     {
         Animatable<float> _gain = new(1f);
+        /// <summary>The volume as a multiplier: 0 is silent, 1 unchanged, 2 twice as loud.</summary>
         [Editable("Gain", Min = 0, Max = 4, Step = 0.01)]
         public Animatable<float> Gain { get => _gain; set => Transaction.Set(this, ref _gain, value, static (o, v) => o._gain = v); }
 
@@ -25,19 +21,18 @@ namespace EditSharp.Components.Nodes.Effects
         [
             new("Audio", PortType.Audio, PortDirection.Input),
 
-            //optional Value modulation input (see
-            //EditSharp.Components.Nodes.Math's own remarks) — when
-            //connected, MULTIPLIES against Gain's own keyframed value
-            //rather than replacing it
             new("Modulation", PortType.Value, PortDirection.Input, optional: true),
 
             new("Audio", PortType.Audio, PortDirection.Output),
         ];
 
+        /// <inheritdoc/>
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
+        /// <inheritdoc/>
         public override IEnumerable<IAnimatable> Animatables => [Gain];
         internal override IAudioProcessor CreateAudioProcessor(AudioSession session) => new GainProcessor(this);
 
+        /// <inheritdoc/>
         public override Node Duplicate() => Transaction.Suppressed(() => new GainNode { Enabled = Enabled, Gain = Gain.Duplicate() });
     }
 }

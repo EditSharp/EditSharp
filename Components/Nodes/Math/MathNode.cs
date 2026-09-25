@@ -5,29 +5,40 @@ using EditSharp.Editing;
 
 namespace EditSharp.Components.Nodes.Math
 {
-    public enum MathOperation { Add, Subtract, Multiply, Divide, Min, Max }
+    /// <summary>What a <see cref="MathNode"/> does with its two inputs.</summary>
+    public enum MathOperation
+    {
+        /// <summary>A + B.</summary>
+        Add,
 
-    /// <summary>
-    /// The "base node type for math functions that are universally
-    /// applicable" — combines two Value inputs with a plain arithmetic
-    /// operation. Domain-universal for the same reason ValueConstantNode
-    /// is (only Value ports), so the SAME MathNode class places into either
-    /// an Image-domain or an Audio-domain graph.
-    ///
-    /// On its own this only produces a number — it has no effect on any
-    /// signal until it's wired into one of the small set of nodes that
-    /// expose an optional Value modulation input (GainNode's "Modulation",
-    /// AudioMixNode's "MixAModulation"/"MixBModulation", MergeNode's
-    /// "MixModulation" — see each node's own remarks). Wire a
-    /// ValueConstantNode (or a whole MathNode chain) into one of those, and
-    /// it multiplies against that node's own keyframed value every time
-    /// it's evaluated, rather than replacing it outright — so the node's
-    /// own curve and a procedurally-computed modulation compose, instead of
-    /// one silently overriding the other.
-    /// </summary>
+        /// <summary>A - B.</summary>
+        Subtract,
+
+        /// <summary>A × B.</summary>
+        Multiply,
+
+        /// <summary>A ÷ B; 0 when B is 0.</summary>
+        Divide,
+
+        /// <summary>The smaller of A and B.</summary>
+        Min,
+
+        /// <summary>The larger of A and B.</summary>
+        Max,
+    }
+
+    /// <summary>Combines two numbers.</summary>
+    /// <remarks>
+    /// Inputs: A and B, each 0 when unconnected. Output: Result. It has only Value
+    /// ports, so it goes in video and audio graphs alike. A number only affects a
+    /// signal once it's wired into a modulation input (GainNode's Modulation,
+    /// AudioMixNode's MixAModulation and MixBModulation, MergeNode's
+    /// MixModulation), which multiplies the node's own value by it.
+    /// </remarks>
     public sealed class MathNode : Node
     {
         MathOperation _operation = MathOperation.Add;
+        /// <summary>What to do with A and B.</summary>
         [Editable("Operation")]
         public MathOperation Operation { get => _operation; set => Transaction.Set(this, ref _operation, value, static (o, v) => o._operation = v); }
 
@@ -38,7 +49,9 @@ namespace EditSharp.Components.Nodes.Math
             new("Result", PortType.Value, PortDirection.Output),
         ];
 
+        /// <inheritdoc/>
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
+        /// <inheritdoc/>
         public override Node Duplicate() => Transaction.Suppressed(() => new MathNode { Enabled = Enabled, Operation = Operation });
     }
 }

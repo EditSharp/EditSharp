@@ -5,22 +5,52 @@ using EditSharp.History;
 
 namespace EditSharp.Components.Nodes
 {
-    public enum PortType { Image, Mask, Audio, Value }
-    public enum PortDirection { Input, Output }
+    /// <summary>What a port carries; only ports of the same type connect.</summary>
+    public enum PortType
+    {
+        /// <summary>An image.</summary>
+        Image,
 
-    /// <summary>A fixed port declared by a concrete Node type.</summary>
+        /// <summary>A mask: an image whose alpha says how strongly an effect applies.</summary>
+        Mask,
+
+        /// <summary>Audio samples.</summary>
+        Audio,
+
+        /// <summary>A single number, evaluated at each moment.</summary>
+        Value,
+    }
+
+    /// <summary>Whether a port takes a connection in or sends one out.</summary>
+    public enum PortDirection
+    {
+        /// <summary>Takes at most one connection in.</summary>
+        Input,
+
+        /// <summary>Sends to any number of inputs.</summary>
+        Output,
+    }
+
+    /// <summary>A port a node's type declares.</summary>
     public sealed class NodePort
     {
+        /// <summary>The port's name, unique among the node's ports of the same direction; <see cref="Graph.Connect"/> takes it.</summary>
         public string Name { get; }
+
+        /// <summary>What the port carries.</summary>
         public PortType Type { get; }
+
+        /// <summary>Whether it's an input or an output.</summary>
         public PortDirection Direction { get; }
 
-        //true for a port that's allowed to sit unconnected at render time
-        //(e.g. a filter node's "Mask" input, or a node's optional Value
-        //modulation input) — see Graph.Connect and the bypass/inert-
-        //input rules in the schema doc
+        /// <summary>Whether the node does its job with this input unconnected, such as a mask or a modulation input.</summary>
         public bool Optional { get; }
 
+        /// <summary>Declares a port.</summary>
+        /// <param name="name">The port's name.</param>
+        /// <param name="type">What it carries.</param>
+        /// <param name="direction">Whether it's an input or an output.</param>
+        /// <param name="optional">Whether the node works with it unconnected.</param>
         public NodePort(string name, PortType type, PortDirection direction, bool optional = false)
         {
             Name = name;
@@ -30,11 +60,19 @@ namespace EditSharp.Components.Nodes
         }
     }
 
+    /// <summary>A wire from one node's output port to another's input port.</summary>
     public sealed class Connection
     {
+        /// <summary>The <see cref="Node.Id"/> of the node the wire comes from.</summary>
         public Guid FromNodeId { get; }
+
+        /// <summary>The output port it comes from.</summary>
         public string FromPort { get; }
+
+        /// <summary>The <see cref="Node.Id"/> of the node the wire goes to.</summary>
         public Guid ToNodeId { get; }
+
+        /// <summary>The input port it goes to.</summary>
         public string ToPort { get; }
 
         internal Connection(Guid fromNodeId, string fromPort, Guid toNodeId, string toPort)
@@ -46,41 +84,28 @@ namespace EditSharp.Components.Nodes
         }
     }
 
-    /// <summary>Which domain a graph's ports may use — see Graph.AddNode.</summary>
-    public enum NodeDomain { Image, Audio }
+    /// <summary>Which kind of signal a graph carries; a node with ports of the other kind can't be added.</summary>
+    public enum NodeDomain
+    {
+        /// <summary>A video clip's graph: Image, Mask and Value ports.</summary>
+        Image,
 
-    /// <summary>
-    /// A directed graph of nodes — see the schema doc's "Effects:
-    /// Node-Based Compositing Graph" section for the full design. The same
-    /// primitives here power both the Image/Mask domain (VideoClip) and the
-    /// Audio domain (AudioClip); NodeDomain is what keeps the two from
-    /// ever being wired together, EXCEPT for domain-universal nodes (see
-    /// InferDomain below), which is exactly how the "base node type for
-    /// math functions that are universally applicable" the user asked for
-    /// is implemented: ValueConstantNode/MathNode (see
-    /// EditSharp.Components.Nodes.Math) declare only PortType.Value ports,
-    /// which InferDomain treats as belonging to NEITHER domain specifically,
-    /// and therefore addable to either.
-    ///
-    /// FUNDAMENTAL REWRITE ("clips are graphs"): there is no longer a
-    /// second fixed anchor alongside OutputNode. The old ImageSourceNode/
-    /// AudioSourceNode were each a single, mandatory, non-removable "the
-    /// clip's content enters here" anchor — every clip's graph had EXACTLY
-    /// one. That model assumed a clip was "media with a graph of effects
-    /// bolted on". The corrected model is that a clip IS its graph, and a
-    /// graph can have as many InputNodes as an author wants (a minimum of
-    /// one for the graph to produce anything, enforced the same way it
-    /// always effectively was — OutputNode must have SOME path reaching it
-    /// at render time). See InputNode's own remarks.
-    ///
-    /// Encapsulation principle applies: Nodes/Connections are read-only
-    /// externally, all mutation goes through AddNode/RemoveNode/Connect/
-    /// Disconnect — which is what makes "no dangling references, no cycles,
-    /// no type mismatches" an actual invariant rather than a convention a
-    /// caller could violate by touching a public list directly.
-    /// </summary>
+        /// <summary>An audio clip's graph: Audio and Value ports.</summary>
+        Audio,
+    }
+
+    /// <summary>A clip's content and effects: nodes, wired from inputs through effects to one output node.</summary>
+    /// <remarks>
+    /// Nodes and connections can only be changed through <see cref="AddNode"/>,
+    /// <see cref="RemoveNode"/>, <see cref="Connect"/> and <see cref="Disconnect"/>,
+    /// so a graph never has a wire to a missing node, a cycle, or mismatched port
+    /// types. Each change is recorded in the current History transaction. An input
+    /// left unconnected is allowed while editing: an unconnected image input is
+    /// transparent, and an unconnected audio input is silent.
+    /// </remarks>
     public sealed class Graph
     {
+        /// <summary>Which kind of signal the graph carries.</summary>
         public NodeDomain Domain { get; }
 
         //what holds this graph: a clip, or a composite node around it
@@ -90,38 +115,28 @@ namespace EditSharp.Components.Nodes
         private readonly List<Node> _nodes = [];
         private readonly List<Connection> _connections = [];
 
+        /// <summary>The nodes directly in this graph, the output node included; a composite's inner nodes aren't listed.</summary>
         public IReadOnlyList<Node> Nodes => _nodes;
 
-        /// <summary>Every keyframe track on every node — see Node.Animatables.</summary>
+        /// <summary>Every keyframeable value on every node; see <see cref="Node.Animatables"/>.</summary>
         public IEnumerable<IAnimatable> Animatables => _nodes.SelectMany(n => n.Animatables);
+
+        /// <summary>The wires between this graph's nodes.</summary>
         public IReadOnlyList<Connection> Connections => _connections;
 
-        /// <summary>
-        /// Every node, reaching inside composites — for anything that has
-        /// to find all the sources, trimmable inputs or embeds a clip
-        /// really contains. Inner OutputNodes are left out; they are
-        /// plumbing, not content. Just Nodes when nothing is composite.
-        /// </summary>
+        /// <summary>Every node, including those inside composites, except the composites' own output nodes.</summary>
+        /// <remarks>Use it to find everything a clip really contains, such as its sources.</remarks>
         public IEnumerable<Node> AllNodes
             => _nodes.Any(n => n is CompositeNode)
                 ? _nodes.SelectMany(n => n is CompositeNode c ? c.Inner.AllNodes.Where(x => x is not global::EditSharp.Components.Nodes.OutputNode) : Enumerable.Repeat(n, 1))
                 : _nodes;
 
-        /// <summary>
-        /// The graph as an evaluator should see it: every CompositeNode
-        /// replaced by the nodes inside it, its connections rewired to the
-        /// inner ports they were really aimed at. The inner nodes are the
-        /// same objects, so content keyed by their ids still matches. This
-        /// graph itself when there is nothing to flatten, so the ordinary
-        /// case costs nothing.
-        /// </summary>
+        /// <summary>The graph with every <see cref="CompositeNode"/> replaced by the nodes inside it, rewired to the inner ports its wires really go to.</summary>
+        /// <remarks>The inner nodes are the same objects, not copies. A graph with no composites returns itself.</remarks>
         public Graph Flattened => _nodes.Any(n => n is CompositeNode) ? Flatten() : this;
 
-        /// <summary>
-        /// The flattened structure copied out: its own node and connection
-        /// lists (the nodes themselves are shared), so it can be walked while
-        /// the live graph is edited. Take it under ModelLock's read side.
-        /// </summary>
+        //the flattened structure with its own node and connection lists (the nodes are shared), so it can be
+        //walked while the live graph is edited; take it under ModelLock's read side
         internal Graph Snapshot()
         {
             Graph flat = Flattened;
@@ -205,16 +220,10 @@ namespace EditSharp.Components.Nodes
             return new Graph(Domain, OutputNode, nodes, connections);
         }
 
-        //the ONLY fixed anchor left — mandatory, not removable. Every INPUT
-        //is now an ordinary node (see InputNode) instead of a second fixed
-        //anchor the way it used to be.
+        /// <summary>Where the graph's result leaves it; it can't be removed.</summary>
         public OutputNode OutputNode { get; }
 
-        /// <summary>
-        /// Convenience access to every InputNode currently in this graph,
-        /// without the caller having to filter Nodes by hand — see
-        /// InputNode's own remarks.
-        /// </summary>
+        /// <summary>The input nodes directly in this graph, as a new list.</summary>
         public IReadOnlyList<InputNode> InputNodes => _nodes.OfType<InputNode>().ToList();
 
         private Graph(NodeDomain domain, OutputNode outputNode)
@@ -234,21 +243,12 @@ namespace EditSharp.Components.Nodes
             _connections = connections;
         }
 
-        /// <summary>
-        /// A "normal/default" video clip: a single InputNode you supply
-        /// (a VideoSourceNode wrapping a Source, in the common case, but
-        /// any InputNode works — see VideoClip's own static factories),
-        /// wired through the two nodes every visual clip gets by default:
-        /// TintNode (what replaced the old flat Modulate/tint-and-opacity
-        /// property) and TransformNode (what replaced the old flat
-        /// ClipTransform property — its data now lives ON the node itself,
-        /// not on the owning clip). Both are ordinary, removable,
-        /// reorderable nodes beyond this default, exactly like GainNode
-        /// always has been on the audio side.
-        /// </summary>
+        /// <summary>A video graph with the usual chain: the input, then a <see cref="Effects.TintNode"/>, then a <see cref="Effects.TransformNode"/>, then the output.</summary>
+        /// <remarks>Nothing is recorded in history.</remarks>
+        /// <param name="input">The node the content comes from.</param>
+        /// <returns>The graph.</returns>
         public static Graph CreateVideoGraph(InputNode input)
         {
-            //building, not editing - see Transaction's remarks, SUPPRESSED
             using var _ = Transaction.Suppress();
 
             var graph = new Graph(NodeDomain.Image, new ImageOutputNode());
@@ -264,13 +264,10 @@ namespace EditSharp.Components.Nodes
             return graph;
         }
 
-        /// <summary>
-        /// A "normal/default" audio clip: a single InputNode you supply
-        /// (a AudioSourceNode wrapping a Source, in the common case —
-        /// see AudioClip's own static factories), wired through GainNode —
-        /// what replaced the old flat AudioClip.Volume field, unchanged
-        /// from before this rewrite.
-        /// </summary>
+        /// <summary>An audio graph with the usual chain: the input, then a <see cref="Effects.GainNode"/>, then the output.</summary>
+        /// <remarks>Nothing is recorded in history.</remarks>
+        /// <param name="input">The node the content comes from.</param>
+        /// <returns>The graph.</returns>
         public static Graph CreateAudioGraph(InputNode input)
         {
             using var _ = Transaction.Suppress();
@@ -286,20 +283,20 @@ namespace EditSharp.Components.Nodes
             return graph;
         }
 
-        /// <summary>
-        /// An empty graph with no InputNode at all yet — for building a
-        /// fully custom multi-input graph from scratch (see
-        /// VideoClip.CreateCustom/AudioClip.CreateCustom). Not renderable
-        /// until at least one node reaches OutputNode — same as any other
-        /// disconnected-Output state, not a special case.
-        /// </summary>
+        /// <summary>A video graph with only its output node, for building a graph from scratch.</summary>
+        /// <returns>The graph.</returns>
         public static Graph CreateEmptyVideoGraph() => new(NodeDomain.Image, new ImageOutputNode());
+
+        /// <summary>An audio graph with only its output node, for building a graph from scratch.</summary>
+        /// <returns>The graph.</returns>
         public static Graph CreateEmptyAudioGraph() => new(NodeDomain.Audio, new AudioOutputNode());
 
-        /// <summary>Deep copy — a fresh graph with fresh node Ids, connections remapped to match.</summary>
+        /// <summary>A deep copy, with new node ids and the connections rewired to match.</summary>
+        /// <remarks>Nothing is recorded in history.</remarks>
+        /// <returns>The copy.</returns>
         public Graph Duplicate() => Duplicate(out _);
 
-        /// <summary>Deep copy that also reports which new node id each old one became — a composite needs that to carry its exposures across.</summary>
+        //a deep copy that also reports which new node id each old one became, so a composite can carry its exposures across
         internal Graph Duplicate(out Dictionary<Guid, Guid> idMap)
         {
             using var _ = Transaction.Suppress();
@@ -339,16 +336,8 @@ namespace EditSharp.Components.Nodes
 
         private Node? Find(Guid id) => _nodes.FirstOrDefault(n => n.Id == id);
 
-        /// <summary>
-        /// A node's domain is inferred from its own ports: any Audio port
-        /// makes it Audio-only, any Image/Mask port makes it Image-only (a
-        /// node can't declare both — it would belong to neither graph
-        /// cleanly), and a node with ONLY Value ports (or no ports at all)
-        /// is domain-UNIVERSAL, returned as null here — addable to either
-        /// graph type. This null case is exactly how ValueConstantNode/
-        /// MathNode work identically inside an Image-domain clip's graph
-        /// and an Audio-domain clip's graph.
-        /// </summary>
+        //from the node's ports: an Audio port makes it Audio, an Image or Mask port Image, and only Value ports
+        //(or none) null, so it goes in either
         private static NodeDomain? InferDomain(Node node)
         {
             bool hasAudio = node.Ports.Any(p => p.Type == PortType.Audio);
@@ -356,15 +345,18 @@ namespace EditSharp.Components.Nodes
 
             if (hasAudio && hasImage)
                 throw new InvalidOperationException(
-                    $"{node.GetType().Name} declares both Audio and Image/Mask ports — a node must " +
-                    "belong to exactly one signal domain (or be domain-universal, via Value-only ports).");
+                    $"{node.GetType().Name} declares both Audio and Image/Mask ports; a node carries one kind of " +
+                    "signal, or only Value ports.");
 
             if (hasAudio) return NodeDomain.Audio;
             if (hasImage) return NodeDomain.Image;
             return null; //universal
         }
 
-        /// <summary>Rejects a node whose port domain doesn't match this graph's own (universal nodes always pass).</summary>
+        /// <summary>Adds a node, unconnected.</summary>
+        /// <param name="node">The node to add; a node with only Value ports goes in either kind of graph.</param>
+        /// <returns><paramref name="node"/>.</returns>
+        /// <exception cref="InvalidOperationException">The node's ports are for the other kind of graph, or for both.</exception>
         public Node AddNode(Node node)
         {
             NodeDomain? nodeDomain = InferDomain(node);
@@ -378,15 +370,9 @@ namespace EditSharp.Components.Nodes
             return node;
         }
 
-        /// <summary>
-        /// Rejects OutputNode — the one fixed anchor; everything else
-        /// (including every InputNode, TintNode/TransformNode/GainNode,
-        /// which are defaults, not anchors) is fully removable. Also
-        /// removes every Connection that referenced this node, both
-        /// incoming and outgoing, so the graph never carries a Connection
-        /// pointing at a Guid that no longer resolves to anything in
-        /// Nodes.
-        /// </summary>
+        /// <summary>Removes a node and every connection to or from it.</summary>
+        /// <param name="node">The node to remove.</param>
+        /// <exception cref="InvalidOperationException"><paramref name="node"/> is the <see cref="OutputNode"/>.</exception>
         public void RemoveNode(Node node)
         {
             if (ReferenceEquals(node, OutputNode))
@@ -401,16 +387,14 @@ namespace EditSharp.Components.Nodes
                 "remove node");
         }
 
-        /// <summary>
-        /// Validates port types match, no cycle results, and the target
-        /// input port doesn't already have an incoming connection (every
-        /// input port — OutputNode included — accepts at most one; an
-        /// interactive graph editor disconnects before reconnecting rather
-        /// than this silently accumulating extra edges into one input).
-        /// Zero connections into a mandatory input is a valid, if
-        /// incomplete, intermediate state — see the schema doc's own
-        /// remarks on why this isn't rejected at edit time.
-        /// </summary>
+        /// <summary>Wires one node's output port to another's input port.</summary>
+        /// <param name="fromNode">The <see cref="Node.Id"/> of the node the wire comes from.</param>
+        /// <param name="fromPort">The name of its output port.</param>
+        /// <param name="toNode">The <see cref="Node.Id"/> of the node the wire goes to.</param>
+        /// <param name="toPort">The name of its input port.</param>
+        /// <returns>The new connection.</returns>
+        /// <exception cref="ArgumentException">Either node isn't in this graph, or has no such port.</exception>
+        /// <exception cref="InvalidOperationException">The ports' types differ, the input is already connected (disconnect it first), or the wire would make a cycle.</exception>
         public Connection Connect(Guid fromNode, string fromPort, Guid toNode, string toPort)
         {
             Node from = Find(fromNode) ?? throw new ArgumentException("fromNode not found in this graph.");
@@ -429,7 +413,7 @@ namespace EditSharp.Components.Nodes
 
             if (_connections.Any(c => c.ToNodeId == toNode && c.ToPort == toPort))
                 throw new InvalidOperationException(
-                    $"'{toPort}' on this node already has an incoming connection — disconnect it first.");
+                    $"'{toPort}' on this node already has an incoming connection; disconnect it first.");
 
             if (CanReach(toNode, fromNode))
                 throw new InvalidOperationException("This connection would create a cycle.");
@@ -439,6 +423,8 @@ namespace EditSharp.Components.Nodes
             return connection;
         }
 
+        /// <summary>Removes a connection; one that isn't in the graph is ignored.</summary>
+        /// <param name="connection">The connection to remove.</param>
         public void Disconnect(Connection connection)
         {
             int index = _connections.IndexOf(connection);
@@ -450,7 +436,7 @@ namespace EditSharp.Components.Nodes
                 "disconnect");
         }
 
-        /// <summary>True if `from` can reach `to` by following existing Connections forward.</summary>
+        //whether `from` reaches `to` by following connections forward
         private bool CanReach(Guid from, Guid to)
         {
             var visited = new HashSet<Guid>();

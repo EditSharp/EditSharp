@@ -2,11 +2,14 @@ using System.Collections.Generic;
 
 namespace EditSharp.Components.Nodes
 {
-    /// <summary>Feeds the audio mixer. Mandatory, not removable — the one fixed anchor left in an Audio-domain graph.</summary>
+    /// <summary>The output of an audio clip's graph: the sound the clip plays.</summary>
+    /// <remarks>Input: Audio.</remarks>
     public sealed class AudioOutputNode : OutputNode
     {
         private static readonly NodePort[] StaticPorts = [new("Audio", PortType.Audio, PortDirection.Input)];
+        /// <inheritdoc/>
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
+        /// <inheritdoc/>
         public override Node Duplicate() => new AudioOutputNode();
     }
 }

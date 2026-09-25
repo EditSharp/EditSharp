@@ -7,18 +7,12 @@ using EditSharp.Editing;
 
 namespace EditSharp.Components.Nodes.Effects
 {
-    /// <summary>
-    /// Color tint, doubling as transparency via alpha. Auto-created and
-    /// wired in by default (see Graph.CreateVideoGraph) alongside
-    /// TransformNode — this is what replaced the old flat
-    /// VisualClip.Modulate property entirely, fully consistent with how
-    /// GainNode already replaced the old flat AudioClip.Volume: a normal,
-    /// removable, reorderable node beyond the default, not a fixed clip
-    /// property any more.
-    /// </summary>
+    /// <summary>Multiplies the image by a colour; the colour's alpha sets the image's opacity.</summary>
+    /// <remarks>Input: Image. Output: Image. A new video clip's graph has one.</remarks>
     public sealed class TintNode : Node
     {
         Animatable<SKColor> _color = new(SKColors.White);
+        /// <summary>The colour to multiply by; white leaves the image unchanged.</summary>
         [Editable("Color")]
         public Animatable<SKColor> Color { get => _color; set => Transaction.Set(this, ref _color, value, static (o, v) => o._color = v); }
 
@@ -28,9 +22,12 @@ namespace EditSharp.Components.Nodes.Effects
             new("Image", PortType.Image, PortDirection.Output),
         ];
 
+        /// <inheritdoc/>
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
+        /// <inheritdoc/>
         public override IEnumerable<IAnimatable> Animatables => [Color];
 
+        /// <inheritdoc/>
         public override Node Duplicate() => Transaction.Suppressed(() => new TintNode { Enabled = Enabled, Color = Color.Duplicate() });
     }
 }

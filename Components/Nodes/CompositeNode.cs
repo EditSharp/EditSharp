@@ -6,11 +6,16 @@ using EditSharp.History;
 
 namespace EditSharp.Components.Nodes
 {
-    /// <summary>An inner node's input port, shown on the composite under `Name`.</summary>
+    /// <summary>An inner node's input port, shown as one of a <see cref="CompositeNode"/>'s own.</summary>
     public sealed class ExposedPort
     {
+        /// <summary>The <see cref="Nodes.Node.Id"/> of the inner node.</summary>
         public Guid Node { get; }
+
+        /// <summary>The inner node's input port.</summary>
         public string Port { get; }
+
+        /// <summary>The port's name on the composite.</summary>
         public string Name { get; }
 
         internal ExposedPort(Guid node, string port, string name)
@@ -21,11 +26,16 @@ namespace EditSharp.Components.Nodes
         }
     }
 
-    /// <summary>An inner node's editable property, shown on the composite under `Name`.</summary>
+    /// <summary>An inner node's editable property, shown as one of a <see cref="CompositeNode"/>'s own.</summary>
     public sealed class ExposedProperty
     {
+        /// <summary>The <see cref="Nodes.Node.Id"/> of the inner node.</summary>
         public Guid Node { get; }
+
+        /// <summary>The name of the inner node's property.</summary>
         public string Property { get; }
+
+        /// <summary>The property's name on the composite.</summary>
         public string Name { get; }
 
         internal ExposedProperty(Guid node, string property, string name)
@@ -36,37 +46,37 @@ namespace EditSharp.Components.Nodes
         }
     }
 
-    /// <summary>
-    /// A graph folded into one node — what a user gets by assembling a
-    /// graph and saving it as a node of their own. It has the same domain
-    /// as the graph inside it, one output (whatever feeds the inner
-    /// graph's OutputNode), and as inputs exactly the inner input ports
-    /// it chose to expose. Its editable properties are the inner ones it
-    /// chose to expose, each under its own name (see IInspectable).
-    ///
-    /// Nothing evaluates a composite as such: Graph.Flattened replaces
-    /// every composite with the nodes inside it before an evaluator sees
-    /// the graph, so the effect and audio pipelines never know it was
-    /// there. The inner nodes are the same objects, so their content,
-    /// keyframes and in-points are found and shifted like any other's
-    /// (see Graph.AllNodes).
-    ///
-    /// Not yet persisted — that arrives with the project file format.
-    /// </summary>
+    /// <summary>A graph folded into one node, such as a custom effect built from other nodes.</summary>
+    /// <remarks>
+    /// Its output is whatever feeds the inner graph's output node, in the inner
+    /// graph's domain. Its inputs are the inner input ports it exposes, and its
+    /// editable properties are its <see cref="Name"/> plus the inner properties it
+    /// exposes, each under its own name. Evaluation never sees a composite:
+    /// <see cref="Graph.Flattened"/> replaces it with the nodes inside it first.
+    /// </remarks>
     public sealed class CompositeNode : Node, IInspectable
     {
         string _name;
+        /// <summary>The node's name, as editors show it.</summary>
         [Editable("Name", Order = -90)]
         public string Name { get => _name; set => Transaction.Set(this, ref _name, value, static (o, v) => o._name = v); }
 
+        /// <summary>The graph inside the node.</summary>
         public Graph Inner { get; }
 
         private readonly List<ExposedPort> _inputs = [];
         private readonly List<ExposedProperty> _properties = [];
 
+        /// <summary>The inner input ports shown as this node's inputs, in order.</summary>
         public IReadOnlyList<ExposedPort> Inputs => _inputs;
+
+        /// <summary>The inner properties shown as this node's own, in order.</summary>
         public IReadOnlyList<ExposedProperty> ExposedProperties => _properties;
 
+        /// <summary>Folds a graph into a node.</summary>
+        /// <param name="inner">The graph to fold; the node takes it over.</param>
+        /// <param name="name">The node's name.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="inner"/> is null.</exception>
         public CompositeNode(Graph inner, string name = "Custom node")
         {
             Inner = inner ?? throw new ArgumentNullException(nameof(inner));
@@ -74,11 +84,12 @@ namespace EditSharp.Components.Nodes
             _name = name;
         }
 
-        /// <summary>The composite's single output: the inner graph's own output, in the graph's domain.</summary>
+        /// <summary>The node's one output: Image or Audio, matching the inner graph.</summary>
         public NodePort Output => Inner.Domain == NodeDomain.Image
             ? new NodePort("Image", PortType.Image, PortDirection.Output)
             : new NodePort("Audio", PortType.Audio, PortDirection.Output);
 
+        /// <inheritdoc/>
         public override IReadOnlyList<NodePort> Ports
         {
             get
@@ -101,11 +112,15 @@ namespace EditSharp.Components.Nodes
         internal NodePort? InnerPort(ExposedPort exposed)
             => InnerNode(exposed.Node)?.Ports.FirstOrDefault(p => p.Name == exposed.Port && p.Direction == PortDirection.Input);
 
-        // ---------------------------------------------------------------
-        // Exposing
-        // ---------------------------------------------------------------
+        // ---- exposing ----
 
-        /// <summary>Shows an inner node's unconnected input port as one of this node's own. Recorded.</summary>
+        /// <summary>Shows an inner node's unconnected input port as one of this node's inputs.</summary>
+        /// <param name="node">The inner node.</param>
+        /// <param name="port">The name of its input port.</param>
+        /// <param name="name">The input's name on this node; null uses the port's name.</param>
+        /// <returns>The exposed port.</returns>
+        /// <exception cref="ArgumentException"><paramref name="node"/> isn't inside this composite, or has no such input port.</exception>
+        /// <exception cref="InvalidOperationException">The port is already connected inside the composite, or this node already has an input with that name.</exception>
         public ExposedPort ExposeInput(Node node, string port, string? name = null)
         {
             RequireInner(node);
@@ -127,6 +142,8 @@ namespace EditSharp.Components.Nodes
             return exposed;
         }
 
+        /// <summary>Stops showing an exposed input; one that isn't exposed is ignored.</summary>
+        /// <param name="exposed">The exposed input.</param>
         public void HideInput(ExposedPort exposed)
         {
             int index = _inputs.IndexOf(exposed);
@@ -138,7 +155,13 @@ namespace EditSharp.Components.Nodes
                 "hide input");
         }
 
-        /// <summary>Shows an inner node's editable property as one of this node's own. Recorded.</summary>
+        /// <summary>Shows an inner node's editable property as one of this node's own.</summary>
+        /// <param name="node">The inner node.</param>
+        /// <param name="property">The name of its property.</param>
+        /// <param name="name">The property's name on this node; null uses its display name.</param>
+        /// <returns>The exposed property.</returns>
+        /// <exception cref="ArgumentException"><paramref name="node"/> isn't inside this composite, or has no such editable property.</exception>
+        /// <exception cref="InvalidOperationException">This node already exposes a property with that name.</exception>
         public ExposedProperty ExposeProperty(Node node, string property, string? name = null)
         {
             RequireInner(node);
@@ -157,6 +180,8 @@ namespace EditSharp.Components.Nodes
             return exposed;
         }
 
+        /// <summary>Stops showing an exposed property; one that isn't exposed is ignored.</summary>
+        /// <param name="exposed">The exposed property.</param>
         public void HideProperty(ExposedProperty exposed)
         {
             int index = _properties.IndexOf(exposed);
@@ -174,11 +199,9 @@ namespace EditSharp.Components.Nodes
                 throw new ArgumentException("That node is not inside this composite.", nameof(node));
         }
 
-        // ---------------------------------------------------------------
-        // IInspectable — this node's own properties, then the exposed ones,
-        // each redirected to the inner node that really holds it
-        // ---------------------------------------------------------------
+        // ---- IInspectable ----
 
+        /// <summary>This node's own properties, then the exposed ones, each editing the inner node that holds it.</summary>
         public IReadOnlyList<PropertyDescriptor> Properties
         {
             get
@@ -200,8 +223,10 @@ namespace EditSharp.Components.Nodes
             }
         }
 
+        /// <inheritdoc/>
         public override IEnumerable<IAnimatable> Animatables => Inner.Animatables;
 
+        /// <inheritdoc/>
         public override Node Duplicate() => Transaction.Suppressed(() =>
         {
             Graph inner = Inner.Duplicate(out Dictionary<Guid, Guid> ids);
