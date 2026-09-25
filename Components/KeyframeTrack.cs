@@ -5,25 +5,14 @@ using EditSharp.History;
 
 namespace EditSharp.Components
 {
-    /// <summary>
-    /// One end of a keyframe's bezier handle: a 2D offset from the keyframe
-    /// itself (time offset + value offset), not a single scalar "how much
-    /// speed to remove" the way the old EaseInStrength/EaseOutStrength were.
-    /// See the migration note on Keyframe.cs's old shape.
-    ///
-    /// CONVENTION: TimeOffset is always stored as a non-negative magnitude —
-    /// "how far this handle reaches toward the OTHER keyframe of the
-    /// segment," regardless of whether it's an in-handle or an out-handle.
-    /// An out-handle is applied by ADDING TimeOffset to its own keyframe's
-    /// Start; an in-handle is applied by SUBTRACTING TimeOffset from its own
-    /// keyframe's Start. This is what makes "clamp so it can never cross the
-    /// neighboring keyframe" a single one-directional clamp (TimeOffset can
-    /// never exceed the gap to the neighbor) instead of needing a sign check
-    /// at every call site.
-    /// </summary>
+    /// <summary>A Bezier handle: where the curve's control point sits relative to its keyframe.</summary>
+    /// <typeparam name="T">The type of value.</typeparam>
     public sealed class KeyframeHandle<T>
     {
+        /// <summary>How far the handle reaches toward the neighbouring keyframe on its side; never negative, and never past that keyframe.</summary>
         public TimeSpan TimeOffset { get; internal set; }
+
+        /// <summary>The control point's value, as an offset added to the keyframe's value.</summary>
         public T ValueOffset { get; internal set; }
 
         internal KeyframeHandle(TimeSpan timeOffset, T valueOffset)
@@ -33,37 +22,40 @@ namespace EditSharp.Components
         }
     }
 
+    /// <summary>A value at a moment on a <see cref="KeyframeTrack{T}"/>.</summary>
+    /// <remarks>Each side has its own interpolation: a segment's shape comes from the left keyframe's <see cref="OutInterpolation"/> and the right keyframe's <see cref="InInterpolation"/>.</remarks>
+    /// <typeparam name="T">The type of value.</typeparam>
     public class Keyframe<T> : IKeyframe
     {
         object? IKeyframe.Value => Value;
 
-        //relative to the clip/track's own beginning — see the "Keyframe
-        //anchoring under Trim" section of the schema doc for why Trim never
-        //has to touch this
         TimeSpan _start;
+        /// <summary>When the keyframe is, in content time; move it with <see cref="KeyframeTrack{T}.MoveKeyframe"/>.</summary>
         public TimeSpan Start { get => _start; internal set => Transaction.Set(this, ref _start, value, static (o, v) => o._start = v); }
 
         T _value;
+        /// <summary>The value.</summary>
         public T Value { get => _value; set => Transaction.Set(this, ref _value, value, static (o, v) => o._value = v); }
 
-        //shape of curve ARRIVING at this keyframe / LEAVING this keyframe.
-        //Independent per side — see KeyframeTrack.Evaluate for how a
-        //segment's shape is jointly decided by the left keyframe's
-        //OutInterpolation and the right keyframe's InInterpolation.
         InterpolationType _inInterpolation = InterpolationType.Linear;
+        /// <summary>The shape of the curve arriving at this keyframe.</summary>
         public InterpolationType InInterpolation { get => _inInterpolation; set => Transaction.Set(this, ref _inInterpolation, value, static (o, v) => o._inInterpolation = v); }
         InterpolationType _outInterpolation = InterpolationType.Linear;
+        /// <summary>The shape of the curve leaving this keyframe; Hold here holds the value until the next keyframe.</summary>
         public InterpolationType OutInterpolation { get => _outInterpolation; set => Transaction.Set(this, ref _outInterpolation, value, static (o, v) => o._outInterpolation = v); }
 
-        //meaningful only when the matching Interpolation is Bezier
         KeyframeHandle<T>? _inHandle;
+        /// <summary>The handle on the arriving side; used when <see cref="InInterpolation"/> is Bezier.</summary>
         public KeyframeHandle<T>? InHandle { get => _inHandle; internal set => Transaction.Set(this, ref _inHandle, value, static (o, v) => o._inHandle = v); }
         KeyframeHandle<T>? _outHandle;
+        /// <summary>The handle on the leaving side; used when <see cref="OutInterpolation"/> is Bezier.</summary>
         public KeyframeHandle<T>? OutHandle { get => _outHandle; internal set => Transaction.Set(this, ref _outHandle, value, static (o, v) => o._outHandle = v); }
 
         TangentMode _inTangentMode = TangentMode.Auto;
+        /// <summary>How the arriving handle is set; see <see cref="KeyframeTrack{T}.SetTangentMode"/>.</summary>
         public TangentMode InTangentMode { get => _inTangentMode; internal set => Transaction.Set(this, ref _inTangentMode, value, static (o, v) => o._inTangentMode = v); }
         TangentMode _outTangentMode = TangentMode.Auto;
+        /// <summary>How the leaving handle is set; see <see cref="KeyframeTrack{T}.SetTangentMode"/>.</summary>
         public TangentMode OutTangentMode { get => _outTangentMode; internal set => Transaction.Set(this, ref _outTangentMode, value, static (o, v) => o._outTangentMode = v); }
 
         internal Keyframe(TimeSpan start, T value)
@@ -73,40 +65,33 @@ namespace EditSharp.Components
         }
     }
 
-    /// <summary>
-    /// One animatable property's own timeline of keyframes. See the schema
-    /// doc's Keyframes section for the full design — this is "one track per
-    /// animatable property," replacing the old whole-ClipTransform-per-
-    /// keyframe list.
-    ///
-    /// Encapsulation principle applies here same as everywhere else in the
-    /// schema: Keyframes is read-only externally, all mutation goes through
-    /// this class's own methods — which is what makes handle-clamping and
-    /// Auto-tangent-recompute-on-neighbor-change actually enforceable rather
-    /// than something a caller could bypass by editing a Keyframe directly.
-    /// </summary>
+    /// <summary>One value's keyframes, in time order.</summary>
+    /// <remarks>Keyframes change only through the track's methods, which keep them in order, keep two from sharing a time, keep handles from reaching past a neighbour, and update Auto handles when a neighbour changes. Every change is recorded in history.</remarks>
+    /// <typeparam name="T">The type of value.</typeparam>
     public class KeyframeTrack<T>
     {
         private readonly IInterpolator<T> _interpolator;
         private readonly List<Keyframe<T>> _keyframes = [];
 
+        /// <summary>The keyframes, in time order.</summary>
         public IReadOnlyList<Keyframe<T>> Keyframes => _keyframes;
 
+        /// <summary>An empty track using the <see cref="IInterpolator{T}"/> registered for <typeparamref name="T"/>.</summary>
+        /// <exception cref="NotSupportedException">No interpolator is registered for <typeparamref name="T"/>.</exception>
         public KeyframeTrack() : this(Interpolators.Resolve<T>()) { }
 
+        /// <summary>An empty track using a given interpolator.</summary>
+        /// <param name="interpolator">The arithmetic for <typeparamref name="T"/>.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="interpolator"/> is null.</exception>
         public KeyframeTrack(IInterpolator<T> interpolator)
         {
             _interpolator = interpolator ?? throw new ArgumentNullException(nameof(interpolator));
         }
 
-        /// <summary>
-        /// Adding at a Start that already has a keyframe updates that
-        /// keyframe's Value in place rather than creating a duplicate entry —
-        /// no two keyframes on one track can share a Start, and this is the
-        /// least surprising way to enforce it (matches "add a keyframe at
-        /// the current time" in every mainstream tool when one's already
-        /// there).
-        /// </summary>
+        /// <summary>Adds a keyframe, or updates the value of the one already at that time.</summary>
+        /// <param name="start">When, in content time.</param>
+        /// <param name="value">The value.</param>
+        /// <returns>The keyframe.</returns>
         public Keyframe<T> AddKeyframe(TimeSpan start, T value)
         {
             Keyframe<T>? existing = _keyframes.FirstOrDefault(k => k.Start == start);
@@ -126,20 +111,7 @@ namespace EditSharp.Components
                 () => _keyframes.Remove(created),
                 "add keyframe");
 
-            //FOUND IN THE FIELD, FIXED: this used to only recompute the
-            //newly-inserted keyframe's own Auto handles. But a keyframe's
-            //Auto handle depends on its NEIGHBORS (RecomputeAutoHandles
-            //walks to prev/next) — inserting a new keyframe changes what
-            //"neighbor" means for whichever keyframe(s) used to be adjacent
-            //to this Start. Left unrefreshed, an edge keyframe added alone
-            //(no neighbors yet) computes no handles at all and never gets a
-            //second chance once a real neighbor shows up later — its
-            //OutHandle/InHandle stays null forever, so later marking that
-            //side Bezier has no effect (EvaluateValueCubic's Bezier branch
-            //requires a non-null handle) and the segment silently renders
-            //as if it were still Linear. RemoveKeyframe/MoveKeyframe already
-            //refresh both neighbors on their own operations; AddKeyframe
-            //needs the same treatment.
+            //a new keyframe changes its neighbours' Auto handles too
             int index = _keyframes.IndexOf(created);
             RecomputeAutoHandles(created);
             if (index > 0) RecomputeAutoHandles(_keyframes[index - 1]);
@@ -148,19 +120,15 @@ namespace EditSharp.Components
             return created;
         }
 
-        /// <summary>
-        /// Factory hook so a subclass (PositionTrack) can hand back its own
-        /// Keyframe subtype (SpatialKeyframe) instead of a plain Keyframe&lt;T&gt;,
-        /// without AddKeyframe itself needing to know about that.
-        /// </summary>
+        /// <summary>Makes a new keyframe; a subclass can return its own kind, as <see cref="PositionTrack"/> does.</summary>
+        /// <param name="start">When, in content time.</param>
+        /// <param name="value">The value.</param>
+        /// <returns>The keyframe.</returns>
         protected virtual Keyframe<T> CreateKeyframe(TimeSpan start, T value) => new(start, value);
 
-        /// <summary>
-        /// Moves every keyframe by `amount`, in place. Handles are offsets
-        /// from their own keyframe, so they come along untouched. Keyframes
-        /// may end up before zero: a head trim leaves the ones it cut past
-        /// at negative times, so an extend back restores them exactly.
-        /// </summary>
+        /// <summary>Moves every keyframe by the same amount, handles and all.</summary>
+        /// <remarks>Keyframes can end up before zero: a head trim leaves the ones it cut past at negative times, so extending back restores them.</remarks>
+        /// <param name="amount">How far to move them; negative moves them earlier.</param>
         public void Shift(TimeSpan amount)
         {
             if (amount == TimeSpan.Zero) return;
@@ -168,7 +136,9 @@ namespace EditSharp.Components
             foreach (Keyframe<T> keyframe in _keyframes) keyframe.Start += amount;
         }
 
-        /// <summary>Deep copy, of the same concrete track type — see CreateEmptyCopy/CopyKeyframeExtras.</summary>
+        /// <summary>A deep copy of the same kind of track.</summary>
+        /// <remarks>Nothing is recorded in history.</remarks>
+        /// <returns>The copy.</returns>
         public KeyframeTrack<T> Duplicate()
         {
             using var _ = Transaction.Suppress();
@@ -186,9 +156,7 @@ namespace EditSharp.Components
                 if (kf.OutHandle != null)
                     copy.SetHandle(added, isInHandle: false, kf.OutHandle.TimeOffset, kf.OutHandle.ValueOffset);
 
-                //SetHandle promotes Auto -> Free as a side effect (see its
-                //own remarks) — restore the source's real tangent modes now
-                //that both handles are copied
+                //SetHandle turns Auto into Free; put back the real modes
                 added.InTangentMode = kf.InTangentMode;
                 added.OutTangentMode = kf.OutTangentMode;
 
@@ -198,17 +166,17 @@ namespace EditSharp.Components
             return copy;
         }
 
-        /// <summary>An empty track of this exact type, for Duplicate — a subclass returns its own type.</summary>
+        /// <summary>An empty track of this kind, for <see cref="Duplicate"/>.</summary>
+        /// <returns>The empty track.</returns>
         protected virtual KeyframeTrack<T> CreateEmptyCopy() => new(_interpolator);
 
-        /// <summary>Copies whatever a keyframe subtype carries beyond the base fields — see PositionTrack.</summary>
+        /// <summary>Copies whatever a subclass's keyframes hold beyond the base fields, for <see cref="Duplicate"/>.</summary>
+        /// <param name="source">The keyframe copied from.</param>
+        /// <param name="target">The keyframe copied to.</param>
         protected virtual void CopyKeyframeExtras(Keyframe<T> source, Keyframe<T> target) { }
 
-        /// <summary>
-        /// A track reduced to zero keyframes is a valid state, not an error —
-        /// Animatable&lt;T&gt;.Evaluate falls back to StaticValue whenever there
-        /// are fewer than 2 (0 or 1 both qualify).
-        /// </summary>
+        /// <summary>Removes a keyframe; one not on the track is ignored.</summary>
+        /// <param name="keyframe">The keyframe.</param>
         public void RemoveKeyframe(Keyframe<T> keyframe)
         {
             int index = _keyframes.IndexOf(keyframe);
@@ -221,9 +189,7 @@ namespace EditSharp.Components
 
             if (index > 0 && index < _keyframes.Count)
             {
-                //the removed keyframe's neighbors are now adjacent to each
-                //other — an Auto handle on either needs to be recomputed
-                //against its new neighbor
+                //the neighbours are now adjacent, so their Auto handles change
                 RecomputeAutoHandles(_keyframes[index - 1]);
                 RecomputeAutoHandles(_keyframes[index]);
             }
@@ -237,12 +203,10 @@ namespace EditSharp.Components
             }
         }
 
-        /// <summary>
-        /// Clamps newStart so the keyframe can never move onto or past a
-        /// neighboring keyframe on the same track — same clamping principle
-        /// already applied to a handle's own TimeOffset, just applied to the
-        /// keyframe's own position now too.
-        /// </summary>
+        /// <summary>Moves a keyframe and sets its value; it stays strictly between its neighbours.</summary>
+        /// <param name="keyframe">The keyframe; one not on the track is ignored.</param>
+        /// <param name="newStart">The new time, clamped to just inside its neighbours.</param>
+        /// <param name="newValue">The new value.</param>
         public void MoveKeyframe(Keyframe<T> keyframe, TimeSpan newStart, T newValue)
         {
             int index = _keyframes.IndexOf(keyframe);
@@ -251,8 +215,7 @@ namespace EditSharp.Components
             TimeSpan floor = index > 0 ? _keyframes[index - 1].Start : TimeSpan.MinValue;
             TimeSpan ceiling = index < _keyframes.Count - 1 ? _keyframes[index + 1].Start : TimeSpan.MaxValue;
 
-            //strictly between neighbors — touching either would collide with
-            //the "no two keyframes share a Start" rule
+            //strictly between, since two keyframes can't share a time
             TimeSpan clampedFloor = floor == TimeSpan.MinValue ? floor : floor + TimeSpan.FromTicks(1);
             TimeSpan clampedCeiling = ceiling == TimeSpan.MaxValue ? ceiling : ceiling - TimeSpan.FromTicks(1);
 
@@ -263,40 +226,26 @@ namespace EditSharp.Components
             keyframe.Start = clamped;
             keyframe.Value = newValue;
 
-            //re-sort in place — a clamp keeps it between neighbors, but a
-            //caller could still hand this the keyframe list out of the order
-            //it was enumerated in
+            //keeps the list sorted even if the caller had it out of order
             List<Keyframe<T>> before = [.. _keyframes];
             Transaction.Apply(
                 () => _keyframes.Sort((a, b) => a.Start.CompareTo(b.Start)),
                 () => { _keyframes.Clear(); _keyframes.AddRange(before); },
                 "reorder keyframes");
 
-            //FOUND IN THE FIELD: this used to only ever recompute the LEFT
-            //neighbor's Auto handle (`index - 1`, using the PRE-move index)
-            //— the right neighbor's Auto handle depends on the gap to this
-            //keyframe too and was left stale after a move, unlike
-            //RemoveKeyframe, which correctly refreshes both sides. Recompute
-            //using the keyframe's freshly-resorted index so both actual
-            //neighbors (left AND right) get refreshed.
+            //both neighbours' Auto handles depend on the gap to this keyframe
             int newIndex = _keyframes.IndexOf(keyframe);
             RecomputeAutoHandles(keyframe);
             if (newIndex > 0) RecomputeAutoHandles(_keyframes[newIndex - 1]);
             if (newIndex < _keyframes.Count - 1) RecomputeAutoHandles(_keyframes[newIndex + 1]);
         }
 
-        /// <summary>
-        /// Sets a handle's offset, clamping TimeOffset so it can never cross
-        /// the neighboring keyframe on that side. Setting a handle on a
-        /// keyframe whose TangentMode for that side is Auto switches it to
-        /// Free first — matches After-Effects-style "manually dragging an
-        /// Auto handle promotes it to Free."
-        ///
-        /// Smooth mirrors the OTHER side's handle through the keyframe
-        /// automatically: setting one side of a Smooth-paired keyframe
-        /// updates the mirrored side too, so the curve stays continuous
-        /// without the caller having to set both by hand.
-        /// </summary>
+        /// <summary>Sets one of a keyframe's handles.</summary>
+        /// <remarks>An Auto side becomes Free. A Smooth side mirrors the other handle through the keyframe, so the curve stays continuous.</remarks>
+        /// <param name="keyframe">The keyframe; one not on the track is ignored.</param>
+        /// <param name="isInHandle">True for the arriving handle, false for the leaving one.</param>
+        /// <param name="timeOffset">How far the handle reaches toward the neighbour on its side, clamped to that neighbour.</param>
+        /// <param name="valueOffset">The control point's value, as an offset added to the keyframe's value.</param>
         public void SetHandle(Keyframe<T> keyframe, bool isInHandle, TimeSpan timeOffset, T valueOffset)
         {
             int index = _keyframes.IndexOf(keyframe);
@@ -326,6 +275,11 @@ namespace EditSharp.Components
             }
         }
 
+        /// <summary>Sets how one of a keyframe's handles is set.</summary>
+        /// <remarks>Auto recomputes the handle from the neighbours now and whenever they change; Smooth mirrors the other handle; Free leaves it as set.</remarks>
+        /// <param name="keyframe">The keyframe.</param>
+        /// <param name="isIn">True for the arriving side, false for the leaving one.</param>
+        /// <param name="mode">The mode.</param>
         public void SetTangentMode(Keyframe<T> keyframe, bool isIn, TangentMode mode)
         {
             if (isIn) keyframe.InTangentMode = mode;
@@ -346,15 +300,8 @@ namespace EditSharp.Components
             else keyframe.InHandle = mirrored;
         }
 
-        /// <summary>
-        /// Recomputes an Auto handle from neighboring keyframes — a simple,
-        /// symmetric "continuous through the neighbors" heuristic (the
-        /// tangent direction is the direction from the previous keyframe to
-        /// the next one), reasoned from Auto's job description rather than
-        /// matched pixel-for-pixel against any specific NLE's own Auto
-        /// algorithm. Both handle sides are recomputed together so an Auto
-        /// keyframe always looks continuous on both sides at once.
-        /// </summary>
+        //Auto handles point from the previous keyframe toward the next, so the curve is continuous through
+        //the keyframe; both sides are recomputed together
         private void RecomputeAutoHandles(Keyframe<T> keyframe)
         {
             int index = _keyframes.IndexOf(keyframe);
@@ -370,33 +317,15 @@ namespace EditSharp.Components
 
             T tangentValue = _interpolator.Scale(_interpolator.Subtract(next.Value, prev.Value), 1f / 6f);
 
-            //One-sided span for an edge keyframe (only one real neighbor)
-            //uses the standard one-sided-tangent proportion instead of the
-            //symmetric /6 — see the FOUND IN THE FIELD note below for why
-            //this alone isn't sufficient.
+            //an edge keyframe reaches a third of the way to its one neighbour
             TimeSpan span = hasPrev && hasNext
                 ? TimeSpan.FromTicks((next.Start - prev.Start).Ticks / 6)
                 : hasNext
                     ? TimeSpan.FromTicks((next.Start - keyframe.Start).Ticks / 3)
                     : TimeSpan.FromTicks((keyframe.Start - prev.Start).Ticks / 3);
 
-            //FOUND IN THE FIELD, FIXED: `span` is derived from the WHOLE
-            //prev-to-next distance (or the one-sided gap), but any single
-            //keyframe's actual reach toward ONE neighbor can be shorter than
-            //that — e.g. an interior keyframe with a short gap on one side
-            //and a long gap on the other, or several keyframes added close
-            //together. The old code clamped the handle's TIME component down
-            //to that shorter actual gap but left the VALUE component at the
-            //full, unclamped tangentValue — a control point that barely
-            //advances in time while still carrying (nearly) the whole value
-            //delta is a near-vertical approach, which makes the cubic's
-            //value component overshoot past the endpoint before snapping
-            //back at u=1. Scaling the value component by the exact same
-            //ratio the time component got clamped by keeps the handle's
-            //slope (value-per-time) consistent instead of steepening it —
-            //the standard fix for this class of auto-tangent overshoot
-            //(the same reason After Effects' own "Auto Bezier" doesn't
-            //overshoot on unevenly-spaced keyframes).
+            //a handle clamped to a shorter gap scales its value by the same ratio, keeping its slope; a steeper
+            //handle would overshoot the next keyframe
             if (keyframe.OutTangentMode == TangentMode.Auto && hasNext)
             {
                 TimeSpan gap = next.Start - keyframe.Start;
@@ -414,11 +343,10 @@ namespace EditSharp.Components
             }
         }
 
-        /// <summary>
-        /// Fewer than 2 keyframes: Animatable&lt;T&gt; handles the StaticValue
-        /// fallback, but Evaluate is still well-defined on its own (holds the
-        /// single keyframe's value, or the interpolator's default if empty).
-        /// </summary>
+        /// <summary>The value at a moment.</summary>
+        /// <remarks>Before the first keyframe it's the first keyframe's value, after the last the last's. <see cref="Animatable{T}"/> uses its static value instead when there are fewer than two keyframes.</remarks>
+        /// <param name="time">Content time.</param>
+        /// <returns>The value; default when there are no keyframes.</returns>
         public T Evaluate(TimeSpan time)
         {
             if (_keyframes.Count == 0) return default!;
@@ -432,24 +360,7 @@ namespace EditSharp.Components
                 Keyframe<T> from = _keyframes[i];
                 Keyframe<T> to = _keyframes[i + 1];
 
-                //FOUND IN THE FIELD, FIXED: this used to be `time > to.Start`
-                //(strict), which meant that at the EXACT instant of an
-                //interior keyframe (time == to.Start, and `to` isn't the
-                //very last keyframe — that case is already handled by the
-                //early return above) THIS segment matched and won, before
-                //the next iteration (whose own `from` is this same `to`)
-                //ever got a chance to. For a Linear/Bezier segment that's
-                //harmless (u solves to 1, so InterpolateSegment already
-                //returns `to.Value` either way) — but InterpolateSegment
-                //short-circuits a Hold segment straight to `from.Value`
-                //regardless of u, so exactly AT a Hold keyframe's own time
-                //this returned the OLD held value instead of that
-                //keyframe's own new one — one instant too early. Using
-                //`>=` here defers time == to.Start to the NEXT segment
-                //instead, where `to` is that segment's own `from` and u
-                //correctly solves to 0 — giving `to.Value` in every case,
-                //matching how the very last keyframe already behaves via
-                //the early return above.
+                //a time exactly on a keyframe belongs to the segment it starts, so a Hold changes at its own time
                 if (time < from.Start || time >= to.Start) continue;
 
                 return InterpolateSegment(from, to, time);
@@ -458,40 +369,22 @@ namespace EditSharp.Components
             return _keyframes[^1].Value;
         }
 
-        /// <summary>
-        /// Resolves one segment's value at `time`. Virtual so PositionTrack
-        /// can reuse the Hold/Linear/Bezier TIMING logic (via the protected
-        /// SolveU helper) while swapping in a spatial bezier for the actual
-        /// value, instead of this class's plain value-cubic — see the
-        /// schema doc's "two-stage, deliberately NOT independent per-axis
-        /// easing" remark on PositionTrack.
-        /// </summary>
+        /// <summary>The value between two neighbouring keyframes.</summary>
+        /// <param name="from">The earlier keyframe.</param>
+        /// <param name="to">The later keyframe.</param>
+        /// <param name="time">A content time between them.</param>
+        /// <returns>The value.</returns>
         protected virtual T InterpolateSegment(Keyframe<T> from, Keyframe<T> to, TimeSpan time)
         {
-            //Hold on the outgoing side always wins for this segment,
-            //regardless of the incoming keyframe's own InInterpolation — a
-            //real step function, not "zero easing"
+            //Hold on the leaving side wins, whatever the arriving side says
             if (from.OutInterpolation == InterpolationType.Hold) return from.Value;
 
             float u = SolveBezierU(time, from, to);
             return EvaluateValueCubic(from, to, u);
         }
 
-        /// <summary>
-        /// Solves for the cubic-bezier parameter u in [0,1] whose TIME
-        /// component equals `time`, by bisection. Deliberately iterative,
-        /// unlike the old ffmpeg-era Ease() function's closed-form cubic —
-        /// that shortcut only worked because the old model had no real 2D
-        /// handles to place in time at all (see Keyframe.cs's migration
-        /// note). A Linear side contributes a zero-offset control point
-        /// (P1/P2 sitting exactly on their own keyframe), which is why
-        /// Linear-in/Bezier-out and similar mixed segments fall out for free
-        /// here with no special-casing beyond "is this side Bezier."
-        ///
-        /// Monotonic and safe to bisect because handle TimeOffsets are
-        /// always clamped (see SetHandle/RecomputeAutoHandles) to never
-        /// cross the segment's own span.
-        /// </summary>
+        //the Bezier parameter u in [0, 1] whose time is `time`, by bisection. A Linear side's control point sits
+        //on its keyframe. The time curve is monotonic because handles never reach past a neighbour
         private static float SolveBezierU<TVal>(TimeSpan time, Keyframe<TVal> from, Keyframe<TVal> to)
         {
             double tA = from.Start.Ticks;
@@ -540,7 +433,11 @@ namespace EditSharp.Components
             return _interpolator.Add(_interpolator.Add(term0, term1), _interpolator.Add(term2, term3));
         }
 
-        /// <summary>Shared by PositionTrack's temporal stage — see its own remarks.</summary>
+        /// <summary>How far through a segment a time is, in the curve's own parameter, taking the time handles into account.</summary>
+        /// <param name="time">A content time between the keyframes.</param>
+        /// <param name="from">The earlier keyframe.</param>
+        /// <param name="to">The later keyframe.</param>
+        /// <returns>The parameter, from 0 at <paramref name="from"/> to 1 at <paramref name="to"/>.</returns>
         protected static float SolveU(TimeSpan time, Keyframe<T> from, Keyframe<T> to) =>
             SolveBezierU(time, from, to);
     }

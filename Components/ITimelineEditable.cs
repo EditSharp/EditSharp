@@ -4,63 +4,62 @@ using EditSharp.Components.Clips;
 
 namespace EditSharp.Components
 {
-    /// <summary>
-    /// The core behavior contract shared by Clip and LinkGroup — see the
-    /// schema doc's "The core behavior rule" section.
-    ///
-    /// Called on a Clip, every member here affects only that clip, exactly
-    /// like an unlinked clip's behavior always has, regardless of whether it
-    /// belongs to a LinkGroup. Called on a LinkGroup, the same member
-    /// coordinates the edit across every member, handling type/constraint
-    /// mismatches internally. This is a universal contract — any operation
-    /// added here in the future automatically gets that same scoping from
-    /// both implementations, not a per-operation special case.
-    ///
-    /// Exact member shapes are this rewrite's own call (the schema doc
-    /// explicitly deferred "exact ITimelineEditable signatures"); Split
-    /// deliberately returns void rather than the new fragments — the
-    /// encapsulation principle means a channel's Clips collection is the
-    /// source of truth for what exists after a split, not a value handed
-    /// back from the call that caused it.
-    /// </summary>
+    /// <summary>Timeline edits that work on one clip or on a linked group of clips.</summary>
+    /// <remarks>On a <see cref="Clips.Clip"/>, an edit affects only that clip, linked or not. On a <see cref="LinkGroup"/>, it's applied to every member together, limited by whichever member has the least room.</remarks>
     public interface ITimelineEditable
     {
-        /// <summary>
-        /// Overwrite semantics at the destination — see Placement Integrity
-        /// in the schema doc. targetChannel defaults to the clip's current
-        /// channel; a different, type-compatible channel is a cross-channel
-        /// move.
-        /// </summary>
+        /// <summary>Moves to a new start, overwriting whatever is there.</summary>
+        /// <param name="newStart">The new start; for a group, where its earliest member goes, the rest keeping their offsets.</param>
+        /// <param name="targetChannel">The channel to move to; null stays on the current one.</param>
+        /// <exception cref="InvalidOperationException">A clip isn't placed.</exception>
+        /// <exception cref="ArgumentException"><paramref name="targetChannel"/> holds the other kind of clip.</exception>
         void Move(TimeSpan newStart, Channel? targetChannel = null);
 
-        /// <summary>Same as Move, but destination-side neighbors shift later instead of being overwritten.</summary>
+        /// <summary>Moves to a new start, moving clips from there on later instead of overwriting them.</summary>
+        /// <param name="newStart">The new start; for a group, where its earliest member goes, the rest keeping their offsets.</param>
+        /// <param name="targetChannel">The channel to move to; null stays on the current one.</param>
+        /// <exception cref="InvalidOperationException">A clip isn't placed.</exception>
+        /// <exception cref="ArgumentException"><paramref name="targetChannel"/> holds the other kind of clip.</exception>
         void RippleMove(TimeSpan newStart, Channel? targetChannel = null);
 
-        /// <summary>Shrinks from the head — never creates overlap, so there is no Ripple variant.</summary>
+        /// <summary>Shortens from the start; the content stays where it is on the timeline.</summary>
+        /// <param name="amount">How much to trim; it stops at <see cref="Clips.Clip.MinimumDuration"/>.</param>
         void TrimStart(TimeSpan amount);
 
-        /// <summary>Shrinks from the tail — never creates overlap, so there is no Ripple variant.</summary>
+        /// <summary>Shortens from the end.</summary>
+        /// <param name="amount">How much to trim; it stops at <see cref="Clips.Clip.MinimumDuration"/>.</param>
         void TrimEnd(TimeSpan amount);
 
-        /// <summary>Grows from the head (Overwrite default) — can newly overlap a neighbor.</summary>
+        /// <summary>Lengthens from the start, overwriting whatever it grows into.</summary>
+        /// <param name="amount">How much to extend; it stops where a source runs out (<see cref="Clips.Clip.HeadExtendLimit"/>).</param>
+        /// <exception cref="InvalidOperationException">A clip isn't placed.</exception>
         void ExtendStart(TimeSpan amount);
 
-        /// <summary>Grows from the tail (Overwrite default) — can newly overlap a neighbor.</summary>
+        /// <summary>Lengthens from the end, overwriting whatever it grows into.</summary>
+        /// <param name="amount">How much to extend; it stops where a source runs out (<see cref="Clips.Clip.TailExtendLimit"/>).</param>
+        /// <exception cref="InvalidOperationException">A clip isn't placed.</exception>
         void ExtendEnd(TimeSpan amount);
 
+        /// <summary>Lengthens from the start; clips from the new start on move later by the same amount instead of being overwritten.</summary>
+        /// <param name="amount">How much to extend; it stops where a source runs out (<see cref="Clips.Clip.HeadExtendLimit"/>).</param>
+        /// <exception cref="InvalidOperationException">A clip isn't placed.</exception>
         void RippleExtendStart(TimeSpan amount);
 
+        /// <summary>Lengthens from the end; clips after it move later by the same amount instead of being overwritten.</summary>
+        /// <param name="amount">How much to extend; it stops where a source runs out (<see cref="Clips.Clip.TailExtendLimit"/>).</param>
+        /// <exception cref="InvalidOperationException">A clip isn't placed.</exception>
         void RippleExtendEnd(TimeSpan amount);
 
-        /// <summary>
-        /// Cuts at a point in time. On a Clip, splits just that clip (both
-        /// halves keep the same LinkGroupId). On a LinkGroup, splits every
-        /// member spanning the point and resolves into two groups — see the
-        /// schema doc's Split section for the full DaVinci-Resolve-matching
-        /// behavior.
-        /// </summary>
+        /// <summary>Cuts in two at a timeline time.</summary>
+        /// <remarks>A clip's halves keep its name and link group. A group splits every member that spans the time; members from the time on form a new group, and a side left with one clip is unlinked.</remarks>
+        /// <param name="at">Where to cut; for a single clip, strictly inside it.</param>
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="at"/> isn't strictly inside the clip.</exception>
+        /// <exception cref="InvalidOperationException">A clip isn't placed.</exception>
         void Split(TimeSpan at);
 
+        /// <summary>Removes from the channel, leaving a gap.</summary>
+        /// <remarks>A link group left with one member is unlinked.</remarks>
+        /// <exception cref="InvalidOperationException">A clip isn't placed.</exception>
         void Delete();
     }
 }

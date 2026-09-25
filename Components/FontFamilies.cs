@@ -13,7 +13,8 @@ namespace EditSharp.Components
 
         private static (IReadOnlyList<string> Families, long ReadAt)? _installed;
 
-        /// <summary>Every installed family, Title Cased, sorted. Re-read at most every two seconds, so a new install shows up.</summary>
+        /// <summary>Every installed family, in title case, sorted.</summary>
+        /// <remarks>Read again at most every two seconds, so a newly installed font shows up.</remarks>
         public static IReadOnlyList<string> Installed
         {
             get
@@ -31,13 +32,15 @@ namespace EditSharp.Components
             }
         }
 
+        /// <summary>Whether a family is installed.</summary>
+        /// <param name="family">The family's name, in any case.</param>
+        /// <returns>True when it's installed.</returns>
         public static bool IsInstalled(string family) =>
             SKFontManager.Default.GetFontFamilies().Contains(family, StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>
-        /// Each word's first letter capitalized; a word already in capitals
-        /// (UI, MS) is left as it is. Nothing is lowercased.
-        /// </summary>
+        /// <summary>A name with each word's first letter capitalized; nothing is lowercased, so UI and MS stay as they are.</summary>
+        /// <param name="name">The name.</param>
+        /// <returns>The name in title case.</returns>
         public static string TitleCase(string name) => string.Join(' ', name.Split(' ').Select(word =>
             word.Length == 0 || char.IsUpper(word[0]) ? word : char.ToUpperInvariant(word[0]) + word[1..]));
 
@@ -47,7 +50,9 @@ namespace EditSharp.Components
             (500, "Medium"), (600, "Semibold"), (700, "Bold"), (800, "Extra Bold"), (900, "Black"), (950, "Extra Black"),
         ];
 
-        /// <summary>The weights a family ships, lightest first; empty when it isn't installed.</summary>
+        /// <summary>The weights a family has, lightest first.</summary>
+        /// <param name="family">The family's name.</param>
+        /// <returns>The weights, from 100 (thin) to 900 (black); empty when the family isn't installed.</returns>
         public static IReadOnlyList<int> WeightsOf(string family)
         {
             if (string.IsNullOrWhiteSpace(family)) return [];
@@ -56,14 +61,23 @@ namespace EditSharp.Components
             return [.. styles.Select(s => s.Weight).Distinct().Order()];
         }
 
-        /// <summary>A weight's usual name ("Semibold"), by the nearest standard weight.</summary>
+        /// <summary>A weight's usual name, such as "Semibold", from the nearest standard weight.</summary>
+        /// <param name="weight">The weight.</param>
+        /// <returns>The name.</returns>
         public static string WeightName(int weight) => WeightNames.MinBy(w => Math.Abs(w.Weight - weight)).Name;
 
-        /// <summary>Of `weights`, the one nearest `weight`; `weight` itself when there are none.</summary>
+        /// <summary>The weight in a list nearest to another.</summary>
+        /// <param name="weights">The weights to choose from.</param>
+        /// <param name="weight">The weight wanted.</param>
+        /// <returns>The nearest; <paramref name="weight"/> itself when the list is empty.</returns>
         public static int Nearest(IReadOnlyList<int> weights, int weight) =>
             weights.Count == 0 ? weight : weights.MinBy(w => Math.Abs(w - weight));
 
-        /// <summary>The family's typeface in this style; a missing family draws with the default font and warns once.</summary>
+        /// <summary>A family's typeface in a style.</summary>
+        /// <remarks>A family that isn't installed gives the default font, and logs a warning once per family.</remarks>
+        /// <param name="family">The family's name.</param>
+        /// <param name="style">The weight, width and slant.</param>
+        /// <returns>The typeface.</returns>
         public static SKTypeface Resolve(string family, SKFontStyle style)
         {
             SKTypeface? typeface = string.IsNullOrWhiteSpace(family) ? null : SKFontManager.Default.MatchFamily(family, style);
