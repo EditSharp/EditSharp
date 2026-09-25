@@ -17,15 +17,7 @@ namespace EditSharp.Components.Nodes
         internal Graph? Graph { get; set; }
 
         //the clip this node is in, through any composites around it
-        internal Clips.Clip? OwnerClip
-        {
-            get
-            {
-                for (Graph? graph = Graph; graph is not null; graph = graph.Composite?.Graph)
-                    if (graph.Clip is { } clip) return clip;
-                return null;
-            }
-        }
+        internal Clips.Clip? OwnerClip => Graph?.OwnerClip;
 
         /// <summary>The node's ports, fixed by its type.</summary>
         public abstract IReadOnlyList<NodePort> Ports { get; }

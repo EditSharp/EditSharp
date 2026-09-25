@@ -112,6 +112,17 @@ namespace EditSharp.Components.Nodes
         internal Clips.Clip? Clip { get; set; }
         internal CompositeNode? Composite { get; set; }
 
+        //the clip this graph is in, through any composites around it
+        internal Clips.Clip? OwnerClip
+        {
+            get
+            {
+                for (Graph? graph = this; graph is not null; graph = graph.Composite?.Graph)
+                    if (graph.Clip is { } clip) return clip;
+                return null;
+            }
+        }
+
         private readonly List<Node> _nodes = [];
         private readonly List<Connection> _connections = [];
 
@@ -365,6 +376,8 @@ namespace EditSharp.Components.Nodes
                 throw new InvalidOperationException(
                     $"Cannot add a {nodeDomain} node to a {Domain} Graph.");
 
+            Timeline.Reembed(OwnerClip, [], Timeline.EmbeddedIn(node));
+
             node.Graph = this;
             Transaction.Apply(() => _nodes.Add(node), () => _nodes.Remove(node), "add node");
             return node;
@@ -379,6 +392,8 @@ namespace EditSharp.Components.Nodes
                 throw new InvalidOperationException("OutputNode cannot be removed from a Graph.");
 
             int index = _nodes.IndexOf(node);
+            if (index >= 0) Timeline.Reembed(OwnerClip, Timeline.EmbeddedIn(node), []);
+
             List<Connection> severed = _connections.Where(c => c.FromNodeId == node.Id || c.ToNodeId == node.Id).ToList();
 
             Transaction.Apply(

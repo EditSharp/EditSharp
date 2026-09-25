@@ -143,7 +143,7 @@ public class TimelineAudioSource : AudioSource
     Timeline? _timeline;
     /// <summary>The timeline to play; null plays nothing and reports the source offline.</summary>
     [Editable("Timeline")]
-    public Timeline? Timeline { get => _timeline; set { Transaction.Set(this, ref _timeline, value, static (o, v) => o._timeline = v); EndMayHaveMoved(); } }
+    public Timeline? Timeline { get => _timeline; set { Components.Timeline.Reembed(Holder?.OwnerClip, _timeline, value); Transaction.Set(this, ref _timeline, value, static (o, v) => o._timeline = v); EndMayHaveMoved(); } }
 
     /// <inheritdoc/>
     public override TimelineAudioSource Duplicate() => (TimelineAudioSource)base.Duplicate();

@@ -22,7 +22,8 @@ namespace EditSharp.Components.Nodes.Sources
             get => _source;
             set
             {
-                Transaction.Set(this, ref _source, value, static (o, v) => { o._source = v; v.Holder = o; });
+                Timeline.Reembed(OwnerClip, Timeline.EmbeddedIn(_source), Timeline.EmbeddedIn(value));
+                Transaction.Set(this, ref _source, value, static (o, v) => { o._source = v; if (v is not null) v.Holder = o; });
                 value.Holder = this;
                 OwnerClip?.TrimToSources();
             }

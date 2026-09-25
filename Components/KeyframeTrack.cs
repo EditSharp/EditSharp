@@ -527,7 +527,7 @@ namespace EditSharp.Components
                 : from.Value;
 
             T p2 = to.InInterpolation == InterpolationType.Bezier && to.InHandle != null
-                ? _interpolator.Subtract(to.Value, to.InHandle.ValueOffset)
+                ? _interpolator.Add(to.Value, to.InHandle.ValueOffset)
                 : to.Value;
 
             float m = 1 - u;

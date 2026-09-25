@@ -160,25 +160,28 @@ namespace EditSharp.Components.Channels
         // Move
         // ---------------------------------------------------------------
 
-        /// <summary>
-        /// KNOWN GAP, carried forward unchanged from before this rewrite:
-        /// a cross-Timeline move of a clip embedding a nested Timeline
-        /// doesn't re-run the cycle check or update Timeline.UsedBy — Move
-        /// goes through PlaceInternal directly, not AddClipCore, exactly
-        /// like every other internal repositioning helper here (Extend/
-        /// Split) deliberately does not re-trigger that bookkeeping either.
-        /// </summary>
         internal void Move(Clip clip, TimeSpan newStart, Channel? targetChannel, bool ripple)
         {
-            clip.Channel?.DetachClip(clip);
-
             Channel destination = targetChannel ?? this;
+
+            //a clip moving to another timeline takes its embeds with it; check for a cycle before anything moves
+            Timeline? from = Timeline, to = destination.Timeline;
+            bool crossing = !ReferenceEquals(from, to);
+            if (crossing) to?.ValidateNoCycle(clip);
+
+            clip.Channel?.DetachClip(clip);
 
             if (ripple) destination.RippleFrom(newStart, clip.Duration);
             else destination.Overwrite(newStart, newStart + clip.Duration);
 
             clip.Start = newStart;
             destination.PlaceInternal(clip);
+
+            if (crossing)
+            {
+                from?.UnregisterEmbeddedTimelines(clip);
+                to?.RegisterEmbeddedTimelines(clip);
+            }
         }
 
         // ---------------------------------------------------------------

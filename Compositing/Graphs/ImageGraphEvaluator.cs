@@ -449,13 +449,10 @@ namespace EditSharp.Compositing.Graphs
                 canvas.Clear(SKColors.Transparent);
                 canvas.DrawImage(a, 0, 0);
 
-                using (var paint = new SKPaint { Color = new SKColor(255, 255, 255, (byte)Math.Round(mix * 255f)) })
-                {
-                    canvas.SaveLayer(paint);
-                    using var blendPaint = new SKPaint { BlendMode = ChannelCompositor.ToNativeForMerge(blendMode) };
-                    canvas.DrawImage(b, 0, 0, blendPaint);
-                    canvas.Restore();
-                }
+                //B straight onto A at Mix opacity, so the blend mode sees A underneath
+                using var paint = new SKPaint { Color = new SKColor(255, 255, 255, (byte)Math.Round(mix * 255f)) };
+                ChannelCompositor.ApplyBlend(paint, blendMode);
+                canvas.DrawImage(b, 0, 0, paint);
 
                 return surface.Snapshot();
             }

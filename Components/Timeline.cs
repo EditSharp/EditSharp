@@ -250,7 +250,7 @@ namespace EditSharp.Components
             while (target >= list.Count)
             {
                 T created = factory();
-                list.Add(created);
+                Transaction.Apply(() => list.Add(created), () => list.Remove(created), "add channel");
                 created.Timeline = this;
             }
 
@@ -353,7 +353,7 @@ namespace EditSharp.Components
                 Transaction.Apply(() => embedded._usedBy.Add(this), () => embedded._usedBy.Remove(this), "register embed");
         }
 
-        private void UnregisterEmbeddedTimelines(Clip clip)
+        internal void UnregisterEmbeddedTimelines(Clip clip)
         {
             foreach (Timeline embedded in EmbeddedTimelinesOf(clip))
             {
@@ -363,15 +363,49 @@ namespace EditSharp.Components
             }
         }
 
-        private static IEnumerable<Timeline> EmbeddedTimelinesOf(Clip clip)
-        {
-            foreach (VideoSourceNode node in clip.Graph.AllNodes.OfType<VideoSourceNode>())
-                if (node.Source is TimelineVideoSource { Timeline: { } embedded })
-                    yield return embedded;
+        private static IEnumerable<Timeline> EmbeddedTimelinesOf(Clip clip) => clip.Graph.AllNodes.SelectMany(EmbeddedIn);
 
-            foreach (AudioSourceNode node in clip.Graph.AllNodes.OfType<AudioSourceNode>())
-                if (node.Source is TimelineAudioSource { Timeline: { } embedded })
-                    yield return embedded;
+        //the timelines a node embeds, through any composite
+        internal static IEnumerable<Timeline> EmbeddedIn(Nodes.Node node) => node switch
+        {
+            VideoSourceNode video => EmbeddedIn(video.Source),
+            AudioSourceNode audio => EmbeddedIn(audio.Source),
+            Nodes.CompositeNode composite => composite.Inner.AllNodes.SelectMany(EmbeddedIn),
+            _ => [],
+        };
+
+        internal static IEnumerable<Timeline> EmbeddedIn(Components.Sources.Source? source) => source switch
+        {
+            TimelineVideoSource { Timeline: { } embedded } => [embedded],
+            TimelineAudioSource { Timeline: { } embedded } => [embedded],
+            _ => [],
+        };
+
+        //a placed clip's embed changing from `removed` to `added`; see the other overload
+        internal static void Reembed(Clip? clip, Timeline? removed, Timeline? added) =>
+            Reembed(clip, removed is null ? [] : [removed], added is null ? [] : [added]);
+
+        //a placed clip's embeds changing: rejects a cycle before anything changes, then moves the UsedBy entries
+        internal static void Reembed(Clip? clip, IEnumerable<Timeline> removed, IEnumerable<Timeline> added)
+        {
+            if (clip?.Channel?.Timeline is not { } host) return;
+
+            List<Timeline> adding = [.. added];
+            foreach (Timeline embedded in adding)
+            {
+                if (host.WouldCreateCycle(embedded))
+                    throw new InvalidOperationException(
+                        "This would embed a Timeline in itself (directly or through a chain of embeddings).");
+            }
+
+            foreach (Timeline embedded in removed)
+            {
+                if (!embedded._usedBy.Contains(host)) continue;
+                Transaction.Apply(() => embedded._usedBy.Remove(host), () => embedded._usedBy.Add(host), "unregister embed");
+            }
+
+            foreach (Timeline embedded in adding)
+                Transaction.Apply(() => embedded._usedBy.Add(host), () => embedded._usedBy.Remove(host), "register embed");
         }
 
         /// <summary>
