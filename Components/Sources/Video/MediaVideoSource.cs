@@ -18,7 +18,7 @@ namespace EditSharp.Components.Sources.Video;
 /// random access always reads the proxy.
 /// </remarks>
 [SourceKind("media-video", DisplayName = "Media")]
-public class MediaVideoSource : VideoSource, IFileBackedSource
+public class MediaVideoSource : VideoSource, IFileBackedSource, IPropertyDefaults
 {
     string _path = "";
     /// <summary>The full path of the file.</summary>
@@ -29,6 +29,17 @@ public class MediaVideoSource : VideoSource, IFileBackedSource
 
     /// <inheritdoc/>
     public override MediaVideoSource Duplicate() => (MediaVideoSource)base.Duplicate();
+
+    /// <inheritdoc/>
+    /// <remarks>Duration resets to the file's length once it's probed.</remarks>
+    public bool TryGetDefault(string propertyName, out object? value)
+    {
+        value = null;
+        if (propertyName != nameof(Duration) || !TryGetNaturalLength(out TimeSpan? length) || length is null) return false;
+
+        value = length;
+        return true;
+    }
 
     /// <inheritdoc/>
     /// <remarks>Answers from the probe cache; a file not probed yet starts its probe in the background.</remarks>

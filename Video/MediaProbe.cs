@@ -42,6 +42,8 @@ namespace EditSharp.Video
         public static bool TryGetCached(string path, out MediaInfo info)
         {
             info = default!;
+            if (string.IsNullOrEmpty(path)) return false;
+
             var file = new FileInfo(path);
             if (!file.Exists) return false;
 

@@ -190,19 +190,23 @@ namespace EditSharp.Editing
         // ---- defaults ----
 
         /// <summary>The value a reset returns the property to on <paramref name="target"/>.</summary>
-        /// <remarks>The attribute's Default when it has one, otherwise the value the property has on a newly constructed object of the same type.</remarks>
+        /// <remarks>The holder's own <see cref="IPropertyDefaults"/> answer first, then the attribute's Default, otherwise the value the property has on a newly constructed object of the same type.</remarks>
         /// <param name="target">The object the property belongs to.</param>
         /// <param name="value">The default, when there is one.</param>
         /// <returns>False when there is no default, such as for an abstract type with no attribute default.</returns>
         public bool TryGetDefault(object target, out object? value)
         {
+            object holder = Holder(target);
+
+            if (holder is IPropertyDefaults defaults && defaults.TryGetDefault(_property.Name, out value))
+                return true;
+
             if (Attribute.Default is not null)
             {
                 value = Coerce(Attribute.Default, ValueType);
                 return true;
             }
 
-            object holder = Holder(target);
             object? prototype = Prototype.Of(holder.GetType());
 
             if (prototype is null)

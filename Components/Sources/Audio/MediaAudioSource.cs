@@ -11,7 +11,7 @@ namespace EditSharp.Components.Sources.Audio;
 /// <summary>The audio of a media file on disk: an audio file, or a video file's soundtrack.</summary>
 /// <remarks>It's streamed through ffmpeg. A file with no audio stream plays silence for its length.</remarks>
 [SourceKind("media-audio", DisplayName = "Media")]
-public class MediaAudioSource : AudioSource, IFileBackedSource
+public class MediaAudioSource : AudioSource, IFileBackedSource, IPropertyDefaults
 {
     string _path = "";
     /// <summary>The full path of the file.</summary>
@@ -22,6 +22,17 @@ public class MediaAudioSource : AudioSource, IFileBackedSource
 
     /// <inheritdoc/>
     public override MediaAudioSource Duplicate() => (MediaAudioSource)base.Duplicate();
+
+    /// <inheritdoc/>
+    /// <remarks>Duration resets to the file's length once it's probed.</remarks>
+    public bool TryGetDefault(string propertyName, out object? value)
+    {
+        value = null;
+        if (propertyName != nameof(Duration) || !TryGetNaturalLength(out TimeSpan? length) || length is null) return false;
+
+        value = length;
+        return true;
+    }
 
     /// <inheritdoc/>
     /// <remarks>Answers from the probe cache; a file not probed yet starts its probe in the background.</remarks>
