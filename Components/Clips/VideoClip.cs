@@ -1,10 +1,10 @@
 using System;
 using SkiaSharp;
 using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Nodes.Sources;
 using EditSharp.History;
 using EditSharp.Components.Sources.Video;
- 
+
 namespace EditSharp.Components.Clips
 {
     /// <summary>
@@ -25,22 +25,22 @@ namespace EditSharp.Components.Clips
     {
         private readonly Graph _graph;
         public override Graph Graph => _graph;
- 
+
         private VideoClip(Graph graph)
         {
             _graph = graph;
             graph.Clip = this;
         }
- 
+
         // ---------------------------------------------------------------
         // Convenience factories — one per InputNode kind, each producing
         // the "normal/default" graph shape: that InputNode -> TintNode ->
         // TransformNode -> Output. Equivalent to what used to be
         // constructing a distinct Clip subtype.
         // ---------------------------------------------------------------
- 
+
         public static VideoClip CreateFromSource(VideoSource source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new VideoSourceNode { Source = source })) { Start = start, Duration = duration });
- 
+
         public static VideoClip CreateText(
             string content, TimeSpan start, TimeSpan duration,
             string font = "Comic Sans MS", int weight = 400, bool italic = false,
@@ -53,10 +53,10 @@ namespace EditSharp.Components.Clips
                 HorizontalAlignment = align,
                 Size = size,
             }, start, duration);
- 
+
         public static VideoClip CreateColorGenerator(SKColor color, TimeSpan start, TimeSpan duration) =>
             CreateFromSource(Transaction.Suppressed(() => new ColorVideoSource { Color = new(color) }), start, duration);
- 
+
         public static VideoClip CreateNoise(TimeSpan start, TimeSpan duration, int? seed = null, float detail = 0.03f, float seetheRate = 0.03f) =>
             CreateFromSource(Transaction.Suppressed(() => new NoiseVideoSource
             {
@@ -64,10 +64,10 @@ namespace EditSharp.Components.Clips
                 Detail = detail,
                 SeetheRate = seetheRate,
             }), start, duration);
- 
+
         public static VideoClip CreateTimelineEmbed(Timeline timeline, TimeSpan start, TimeSpan duration) =>
             CreateFromSource(Transaction.Suppressed(() => new TimelineVideoSource { Timeline = timeline }), start, duration);
- 
+
         /// <summary>
         /// Escape hatch for a fully custom graph — multiple InputNodes,
         /// branches merged through MergeNode, extra effect nodes, whatever
@@ -80,11 +80,10 @@ namespace EditSharp.Components.Clips
         {
             if (graph.Domain != NodeDomain.Image)
                 throw new ArgumentException("VideoClip requires an Image-domain Graph.", nameof(graph));
- 
+
             return Transaction.Suppressed(() => new VideoClip(graph) { Start = start, Duration = duration });
         }
- 
+
         public override VideoClip Duplicate() => Transaction.Suppressed(() => new VideoClip(Graph.Duplicate()) { Start = Start, Duration = Duration, Speed = Speed });
     }
 }
- 

@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components.Nodes;
- 
+
 namespace EditSharp.Compositing.Graphs
 {
     /// <summary>
@@ -67,4 +67,3 @@ namespace EditSharp.Compositing.Graphs
         }
     }
 }
- 

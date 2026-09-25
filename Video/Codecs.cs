@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
- 
+
 namespace EditSharp.Video
 {
     public enum VideoCodec
@@ -11,7 +11,7 @@ namespace EditSharp.Video
         AV1,
         GIF,
         FFV1,
- 
+
         /// <summary>
         /// Avid DNxHR — one of two codecs OptimizedMediaCache can build its
         /// persistent optimized media with (see EditSharpConfig.
@@ -25,7 +25,7 @@ namespace EditSharp.Video
         /// only, nothing else, on any vendor).
         /// </summary>
         DNxHR,
- 
+
         /// <summary>
         /// Apple ProRes — the other codec OptimizedMediaCache can build
         /// optimized media with. Common in pro NLE ecosystems; ffmpeg's
@@ -35,14 +35,14 @@ namespace EditSharp.Video
         /// </summary>
         ProRes,
     }
- 
+
     public enum AudioCodec
     {
         AAC,
         MP3,
         FLAC
     }
- 
+
     /// <summary>
     /// A single top-level switch covering every stage of the pipeline that
     /// has a hardware path at all: source DECODE (SourceDecoder's ffmpeg
@@ -75,4 +75,3 @@ namespace EditSharp.Video
         GPU,
     }
 }
- 

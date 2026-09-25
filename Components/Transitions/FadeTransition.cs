@@ -7,4 +7,3 @@ namespace EditSharp.Components.Transitions
         public override Transition Duplicate() => Transaction.Suppressed(() => new FadeTransition { Duration = Duration });
     }
 }
- 

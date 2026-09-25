@@ -1,5 +1,5 @@
 using System;
- 
+
 namespace EditSharp.Playback
 {
     /// <summary>
@@ -19,7 +19,7 @@ namespace EditSharp.Playback
         public int SampleRate { get; }
         public int ChannelCount { get; }
         public TimeSpan Position { get; }
- 
+
         public AudioSampleEventArgs(byte[] buffer, int length, int sampleRate, int channelCount, TimeSpan position)
         {
             Buffer = buffer;
@@ -30,4 +30,3 @@ namespace EditSharp.Playback
         }
     }
 }
- 

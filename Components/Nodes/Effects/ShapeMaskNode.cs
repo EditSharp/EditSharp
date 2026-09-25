@@ -4,11 +4,11 @@ using EditSharp.Components;
 using EditSharp.Components.Nodes;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Nodes.Effects
 {
     public enum ShapeType { Rectangle, Ellipse, Polygon }
- 
+
     /// <summary>
     /// Geometry is normalized 0-1 — a fraction of whatever image this mask
     /// ends up merged against — rather than absolute pixels. See the schema
@@ -32,7 +32,7 @@ namespace EditSharp.Components.Nodes.Effects
         Animatable<float> _feather = new(0f);
         [Editable("Feather", Min = 0, Max = 1, Step = 0.001)]
         public Animatable<float> Feather { get => _feather; set => Transaction.Set(this, ref _feather, value, static (o, v) => o._feather = v); }
- 
+
         //only meaningful when Shape == Polygon. Kept as a plain list rather
         //than dedicated add/remove/reorder endpoints — flagged as an open
         //question in the schema doc, not settled here
@@ -40,10 +40,10 @@ namespace EditSharp.Components.Nodes.Effects
         [Editable("Points", Frame = FrameMeasure.HalfFrame)]
         [VisibleWhen(nameof(Shape), ShapeType.Polygon)]
         public List<Animatable<Vector2>> PolygonPoints { get => _polygonPoints; set => Transaction.Set(this, ref _polygonPoints, value, static (o, v) => o._polygonPoints = v); }
- 
+
         private static readonly NodePort[] StaticPorts = [new("Mask", PortType.Mask, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
- 
+
         public override IEnumerable<IAnimatable> Animatables => [Position, Size, Rotation, Feather, .. PolygonPoints];
 
         public override Node Duplicate() => Transaction.Suppressed(() => new ShapeMaskNode
@@ -58,4 +58,3 @@ namespace EditSharp.Components.Nodes.Effects
         });
     }
 }
- 

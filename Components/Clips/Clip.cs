@@ -5,7 +5,7 @@ using EditSharp.Components.Nodes;
 using EditSharp.History;
 
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Clips
 {
     /// <summary>
@@ -68,30 +68,30 @@ namespace EditSharp.Components.Clips
             double ticks = content.Ticks / Speed;
             return ticks >= long.MaxValue ? TimeSpan.MaxValue : TimeSpan.FromTicks((long)Math.Round(ticks));
         }
- 
+
         //null = unlinked
         Guid? _linkGroupId;
         public Guid? LinkGroupId { get => _linkGroupId; internal set => Transaction.Set(this, ref _linkGroupId, value, static (o, v) => o._linkGroupId = v); }
- 
+
         //back-ref, set by the owning Channel
         Channel? _channel;
         public Channel? Channel { get => _channel; internal set => Transaction.Set(this, ref _channel, value, static (o, v) => o._channel = v); }
- 
+
         public static readonly TimeSpan MinimumDuration = TimeSpan.FromMilliseconds(1);
- 
+
         /// <summary>
         /// A clip's single Graph, fixed to this clip's own
         /// NodeDomain at construction (Image for VideoClip, Audio for
         /// AudioClip) — see this class's own remarks.
         /// </summary>
         public abstract Graph Graph { get; }
- 
+
         /// <summary>
         /// Deep copy — does NOT copy LinkGroupId/Channel (a duplicate
         /// starts unlinked and unplaced; the caller decides where it goes).
         /// </summary>
         public abstract Clip Duplicate();
- 
+
         // ---------------------------------------------------------------
         // Head in-point shifting — now GENERIC over every trimmable input
         // node in this clip's graph, rather than a per-Clip-subtype
@@ -99,7 +99,7 @@ namespace EditSharp.Components.Clips
         // multi-input-trim rule: every trimmable input shifts together, by
         // the same amount.
         // ---------------------------------------------------------------
- 
+
         /// <summary>Positive `amount` = trim (in-point advances), negative = extend (in-point recedes).</summary>
         protected internal virtual void OnHeadInPointShift(TimeSpan amount)
         {
@@ -114,7 +114,7 @@ namespace EditSharp.Components.Clips
             //to stay where they were
             foreach (IAnimatable animatable in Graph.Animatables) animatable.ShiftKeyframes(-amount);
         }
- 
+
         /// <summary>
         /// The most-constrained trimmable input node sets the ceiling for
         /// the WHOLE clip — extending the head further than any ONE of them
@@ -127,20 +127,20 @@ namespace EditSharp.Components.Clips
         protected internal virtual TimeSpan MaxHeadExtend()
         {
             TimeSpan min = TimeSpan.MaxValue;
- 
+
             foreach (ITrimmableInput trimmable in Graph.AllNodes.OfType<ITrimmableInput>())
             {
                 if (trimmable.MaxHeadroom < min) min = trimmable.MaxHeadroom;
             }
- 
+
             return min;
         }
- 
+
         // ---------------------------------------------------------------
         // Trim — self-contained, never touches sibling clips (trimming can
         // never create an overlap, only shrink this clip's own span).
         // ---------------------------------------------------------------
- 
+
         /// <summary>
         /// How much earlier Start can be pulled before the content runs
         /// out, in TIMELINE time (MaxHeadExtend is content time, and the
@@ -199,7 +199,7 @@ namespace EditSharp.Components.Clips
         {
             TimeSpan clamped = ClampTrim(amount);
             if (clamped <= TimeSpan.Zero) return;
- 
+
             TimeSpan previousStart = Start;
             Start += clamped;
             Duration -= clamped;
@@ -207,53 +207,53 @@ namespace EditSharp.Components.Clips
             Channel?.Rekey(this, previousStart);
             Channel?.ReconcileTransitionsFor(this);
         }
- 
+
         public void TrimEnd(TimeSpan amount)
         {
             TimeSpan clamped = ClampTrim(amount);
             if (clamped <= TimeSpan.Zero) return;
- 
+
             Duration -= clamped;
             Channel?.ReconcileTransitionsFor(this);
         }
- 
+
         private TimeSpan ClampTrim(TimeSpan amount)
         {
             if (amount <= TimeSpan.Zero) return TimeSpan.Zero;
- 
+
             TimeSpan maxTrim = Duration - MinimumDuration;
             if (maxTrim < TimeSpan.Zero) maxTrim = TimeSpan.Zero;
- 
+
             return amount > maxTrim ? maxTrim : amount;
         }
- 
+
         // ---------------------------------------------------------------
         // Extend — may collide with a sibling clip, so conflict resolution
         // (Overwrite/Ripple) is delegated to Channel.
         // ---------------------------------------------------------------
- 
+
         public void ExtendStart(TimeSpan amount) => ExtendStartCore(amount, ripple: false);
         public void RippleExtendStart(TimeSpan amount) => ExtendStartCore(amount, ripple: true);
- 
+
         private void ExtendStartCore(TimeSpan amount, bool ripple)
         {
             if (amount <= TimeSpan.Zero) return;
- 
+
             TimeSpan clamped = ClampToContentCeiling(amount);
             if (clamped <= TimeSpan.Zero) return;
- 
+
             RequireChannel().ExtendHead(this, clamped, ripple);
         }
- 
+
         private TimeSpan ClampToContentCeiling(TimeSpan amount)
         {
             TimeSpan ceiling = HeadExtendLimit;
             return ceiling == TimeSpan.MaxValue || amount <= ceiling ? amount : ceiling;
         }
- 
+
         public void ExtendEnd(TimeSpan amount) => ExtendEndCore(amount, ripple: false);
         public void RippleExtendEnd(TimeSpan amount) => ExtendEndCore(amount, ripple: true);
- 
+
         private void ExtendEndCore(TimeSpan amount, bool ripple)
         {
             TimeSpan limit = TailExtendLimit;
@@ -262,7 +262,7 @@ namespace EditSharp.Components.Clips
 
             RequireChannel().ExtendTail(this, amount, ripple);
         }
- 
+
         /// <summary>Actual mutation once Channel has resolved any conflicts with siblings.</summary>
         internal void ApplyHeadExtend(TimeSpan amount)
         {
@@ -270,7 +270,7 @@ namespace EditSharp.Components.Clips
             Duration += amount;
             OnHeadInPointShift(-ToContentTime(amount));
         }
- 
+
         internal void ApplyTailExtend(TimeSpan amount)
         {
             Duration += amount;
@@ -322,45 +322,45 @@ namespace EditSharp.Components.Clips
 
             if (newDuration > TimeSpan.Zero) Speed = (double)content.Ticks / newDuration.Ticks;
         }
- 
+
         // ---------------------------------------------------------------
         // Move / Split / Delete — all delegate to Channel, the sole
         // authority on the no-overlap invariant and conflict resolution.
         // ---------------------------------------------------------------
- 
+
         public void Move(TimeSpan newStart, Channel? targetChannel = null) =>
             RequireChannel().Move(this, newStart, targetChannel, ripple: false);
- 
+
         public void RippleMove(TimeSpan newStart, Channel? targetChannel = null) =>
             RequireChannel().Move(this, newStart, targetChannel, ripple: true);
- 
+
         public void Split(TimeSpan at) => RequireChannel().SplitClip(this, at);
- 
+
         public void Delete() => RequireChannel().RemoveClip(this);
 
         /// <summary>Delete, and close the gap this clip leaves on its own channel.</summary>
         public void RippleDelete() => RequireChannel().RippleRemoveRange(Start, End);
- 
+
         private Channel RequireChannel() =>
             Channel ?? throw new InvalidOperationException("This clip is not currently placed on any Channel.");
- 
+
         // ---------------------------------------------------------------
         // Relative-position helpers
         // ---------------------------------------------------------------
- 
+
         public bool StartsAt(TimeSpan time) => Start == time;
         public bool EndsAt(TimeSpan time) => End == time;
- 
+
         public bool StartsInside(Clip other) => Start > other.Start && Start < other.End;
         public bool EndsInside(Clip other) => End > other.Start && End < other.End;
- 
+
         public bool StartIntersectsWith(Clip other) => Start >= other.Start && Start < other.End;
         public bool EndIntersectsWith(Clip other) => End > other.Start && End <= other.End;
- 
+
         public bool FullyIntersects(Clip other) => Start <= other.Start && End >= other.End;
- 
+
         public bool IsLongerThan(Clip other) => Duration > other.Duration;
- 
+
         public TimeSpan IntersectionWith(Clip other)
         {
             TimeSpan start = Start > other.Start ? Start : other.Start;
@@ -368,22 +368,21 @@ namespace EditSharp.Components.Clips
             return end > start ? end - start : TimeSpan.Zero;
         }
 
-        public TimeSpan DistanceFrom(Clip other) 
+        public TimeSpan DistanceFrom(Clip other)
         {
             // if clips intersect at all, immediately return zero distance
             if (IntersectionWith(other) > TimeSpan.Zero) return TimeSpan.Zero;
 
             // this clip comes before the other clip
-            if (End < other.Start) 
+            if (End < other.Start)
             {
                 return other.Start - End;
             }
             // this clip comes after the other clip
-            else 
+            else
             {
                 return Start - other.End;
             }
         }
     }
 }
- 

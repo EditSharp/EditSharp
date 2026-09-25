@@ -2,7 +2,7 @@ using System;
 using SkiaSharp;
 using EditSharp.Components.Transitions;
 using EditSharp.Compositing.Gpu;
- 
+
 namespace EditSharp.Compositing
 {
     /// <summary>
@@ -38,28 +38,28 @@ namespace EditSharp.Compositing
             double progress, int canvasWidth, int canvasHeight, SurfacePool pool)
         {
             float p = (float)Math.Clamp(progress, 0.0, 1.0);
- 
+
             SKSurface surface = pool.Rent(canvasWidth, canvasHeight);
             try
             {
                 SKCanvas canvas = surface.Canvas;
                 canvas.Clear(SKColors.Transparent);
- 
+
                 switch (transition)
                 {
                     case null:
                     case FadeTransition:
                         DrawFade(canvas, outgoing, incoming, p);
                         break;
- 
+
                     case FadeToColorTransition fadeToColor:
                         DrawFadeToColor(canvas, outgoing, incoming, p, canvasWidth, canvasHeight, fadeToColor.Color);
                         break;
- 
+
                     case SlideTransition slide:
                         DrawSlide(canvas, outgoing, incoming, p, canvasWidth, canvasHeight, slide.Angle);
                         break;
- 
+
                     default:
                         throw new NotSupportedException(
                             $"Transition type {transition.GetType().Name} has no Skia " +
@@ -67,7 +67,7 @@ namespace EditSharp.Compositing
                             "CircleOpen, Dissolve, etc.) have no Transition subclass at " +
                             "all yet — see Transition.cs and the migration manifest.");
                 }
- 
+
                 return surface.Snapshot();
             }
             finally
@@ -75,14 +75,14 @@ namespace EditSharp.Compositing
                 pool.Return(surface, canvasWidth, canvasHeight);
             }
         }
- 
+
         /// <summary>Direct alpha crossfade — outgoing fades out as incoming fades in.</summary>
         private static void DrawFade(SKCanvas canvas, SKImage outgoing, SKImage incoming, float progress)
         {
             DrawWithAlpha(canvas, outgoing, 1f - progress);
             DrawWithAlpha(canvas, incoming, progress);
         }
- 
+
         /// <summary>
         /// Fades OUT to `colour` over [0, 0.5], then fades IN from it over
         /// [0.5, 1].
@@ -93,7 +93,7 @@ namespace EditSharp.Compositing
         {
             using var fill = new SKPaint { Color = colour };
             canvas.DrawRect(new SKRect(0, 0, canvasWidth, canvasHeight), fill);
- 
+
             if (progress < 0.5f)
             {
                 float t = progress / 0.5f;
@@ -105,7 +105,7 @@ namespace EditSharp.Compositing
                 DrawWithAlpha(canvas, incoming, t);
             }
         }
- 
+
         /// <summary>
         /// Both images translate together across the canvas at `angleDegrees`
         /// — outgoing exits in that direction while incoming enters from
@@ -125,26 +125,25 @@ namespace EditSharp.Compositing
             float progress, int canvasWidth, int canvasHeight, float angleDegrees)
         {
             double radians = angleDegrees * Math.PI / 180.0;
- 
+
             // Y-up math convention -> screen (Y-down) draw convention.
             float dx = (float)Math.Cos(radians);
             float dy = (float)-Math.Sin(radians);
- 
+
             float travelX = dx * canvasWidth;
             float travelY = dy * canvasHeight;
- 
+
             canvas.DrawImage(outgoing, progress * travelX, progress * travelY);
             canvas.DrawImage(incoming, (progress - 1f) * travelX, (progress - 1f) * travelY);
         }
- 
+
         private static void DrawWithAlpha(SKCanvas canvas, SKImage image, float alpha)
         {
             if (alpha <= 0f) return;
- 
+
             byte a = (byte)Math.Round(Math.Clamp(alpha, 0f, 1f) * 255f);
             using var paint = new SKPaint { Color = new SKColor(255, 255, 255, a) };
             canvas.DrawImage(image, 0, 0, paint);
         }
     }
 }
- 

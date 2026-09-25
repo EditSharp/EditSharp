@@ -9,7 +9,7 @@ using EditSharp.Components.Sources;
 using EditSharp.Components.Sources.Audio;
 using EditSharp.Components.Sources.Video;
 using EditSharp.History;
- 
+
 namespace EditSharp.Video
 {
     /// <summary>
@@ -37,15 +37,15 @@ namespace EditSharp.Video
         {
             if (!File.Exists(video.Path))
                 throw new FileNotFoundException($"Video input not found: {video.Path}", video.Path);
- 
+
             if (!File.Exists(audio.Path))
                 throw new FileNotFoundException($"Audio input not found: {audio.Path}", audio.Path);
- 
+
             var args = new List<string> { "-y", "-v", "error" };
- 
+
             AddTrimmedInput(args, video, video.Path);
             AddTrimmedInput(args, audio, audio.Path);
- 
+
             args.AddRange(new[]
             {
                 "-map", "0:v:0",
@@ -57,7 +57,7 @@ namespace EditSharp.Video
                 "-shortest",
                 outputPath,
             });
- 
+
             var psi = new ProcessStartInfo
             {
                 FileName = EditSharpConfig.FfmpegPath,
@@ -67,23 +67,23 @@ namespace EditSharp.Video
                 CreateNoWindow = true,
             };
             foreach (string arg in args) psi.ArgumentList.Add(arg);
- 
+
             using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             var stderr = new StringBuilder();
             process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
- 
+
             process.Start();
             process.BeginErrorReadLine();
             process.BeginOutputReadLine();
             await process.WaitForExitAsync();
- 
+
             if (process.ExitCode != 0)
                 throw new InvalidOperationException(
                     $"ffmpeg exited with code {process.ExitCode}:\n{stderr}");
- 
+
             return Transaction.Suppressed(() => new MediaVideoSource { Path = outputPath });
         }
- 
+
         /// <summary>
         /// Re-encodes a source's video stream to a different codec via a single
         /// ffmpeg process — decode input, encode output, an optional resize,
@@ -125,49 +125,49 @@ namespace EditSharp.Video
         {
             if (!File.Exists(source.Path))
                 throw new FileNotFoundException($"Input not found: {source.Path}", source.Path);
- 
+
             if (!CodecNames.VideoCodecNames.TryGetValue(codec, out string? encoderName))
                 throw new NotSupportedException($"ReencodeVideoAsync has no encoder mapping for {codec}.");
- 
+
             string extension = ContainerExtensionFor(codec);
             string outputPath = TempPaths.GetVideoTempFilePath($"reencode_{Guid.NewGuid():N}.{extension}");
- 
+
             var args = new List<string> { "-y", "-v", "error" };
- 
+
             //see EditSharpConfig.FilterThreads. The -vf scale below is exactly
             //the kind of filter this applies to — ffmpeg 8.0's swscale is
             //multi-threaded, unlike the effectively-serial one this pipeline
             //was originally written against. Added before AddTrimmedInput
             //because these are GLOBAL options and must precede -i.
             args.AddRange(FfmpegArgs.FilterThreadingArgs());
- 
+
             AddTrimmedInput(args, source, source.Path);
- 
+
             if (scaleTo is { } size)
             {
                 args.Add("-vf");
                 args.Add($"scale={size.Width}:{size.Height},setsar=1");
             }
- 
+
             args.Add("-c:v");
             args.Add(encoderName);
- 
+
             string? pixelFormat = PixelFormatFor(codec);
             if (pixelFormat != null)
             {
                 args.Add("-pix_fmt");
                 args.Add(pixelFormat);
             }
- 
+
             args.AddRange(MuxerTuningArgsFor(codec));
- 
+
             //video only — this exists to build optimized media for the
             //frame-by-frame compositor step, which never touches audio; the
             //whole timeline's audio is still mixed separately, once, in
             //AudioMixer
             args.Add("-an");
             args.Add(outputPath);
- 
+
             var psi = new ProcessStartInfo
             {
                 FileName = EditSharpConfig.FfmpegPath,
@@ -177,39 +177,39 @@ namespace EditSharp.Video
                 CreateNoWindow = true,
             };
             foreach (string arg in args) psi.ArgumentList.Add(arg);
- 
+
             using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             var stderr = new StringBuilder();
             process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
- 
+
             //logged the moment ffmpeg is actually about to be spawned — if a
             //caller reports a hang with no logs, this line (or its absence)
             //is what tells you whether it's stuck BEFORE this method even
             //got called or DURING ffmpeg's own run
             EditSharpConfig.Logger.LogVerbose($"ReencodeVideoAsync starting for '{source.Path}'...");
- 
+
             var spawnSw = Stopwatch.StartNew();
             process.Start();
             long spawnMs = spawnSw.ElapsedMilliseconds;
- 
+
             process.BeginErrorReadLine();
             process.BeginOutputReadLine();
- 
+
             var runSw = Stopwatch.StartNew();
             await process.WaitForExitAsync();
             long runMs = runSw.ElapsedMilliseconds;
- 
+
             if (process.ExitCode != 0)
                 throw new InvalidOperationException(
                     $"ffmpeg exited with code {process.ExitCode}:\n{stderr}");
- 
+
             EditSharpConfig.Logger.LogVerbose(
                 $"ReencodeVideoAsync for '{source.Path}' done: spawn {spawnMs}ms, " +
                 $"run {runMs}ms -> {outputPath}");
- 
+
             return outputPath;
         }
- 
+
         /// <summary>
         /// The one pixel format this pipeline forces for optimized media at
         /// all — FFV1's, gbrap16le. Kept as ITS OWN named constant here
@@ -233,7 +233,7 @@ namespace EditSharp.Video
         /// one file that uses it.
         /// </summary>
         internal const string Ffv1PixelFormat = "gbrap16le";
- 
+
         /// <summary>
         /// The pixel format optimized media is built at for a given codec.
         /// Only FFV1 has one wired up: Ffv1PixelFormat (gbrap16le).
@@ -271,7 +271,7 @@ namespace EditSharp.Video
             VideoCodec.ProRes => "yuv422p10le",
             _ => null,
         };
- 
+
         /// <summary>
         /// The `-profile:v` argument(s) a codec needs to land on a specific
         /// quality tier, or an empty array for a codec with no profile
@@ -295,7 +295,7 @@ namespace EditSharp.Video
             VideoCodec.ProRes => ["-profile:v", "3"], // prores_ks: 3 = "hq"
             _ => [],
         };
- 
+
         /// <summary>
         /// Muxer-level tuning for optimized media's seek performance. Only
         /// matters for FFV1's matroska container.
@@ -334,7 +334,7 @@ namespace EditSharp.Video
             VideoCodec.FFV1 => ["-cluster_time_limit", "1"],
             _ => [],
         };
- 
+
         /// <summary>
         /// Container extension for a re-encoded codec's output file. FFV1
         /// needs a real container — matroska is the standard pairing and
@@ -365,7 +365,7 @@ namespace EditSharp.Video
             VideoCodec.ProRes => "mov",
             _ => "mp4",
         };
- 
+
         /// <summary>
         /// The ffmpeg MUXER name (`-f` argument) for a codec's container —
         /// NOT always the same string as its file extension
@@ -403,7 +403,7 @@ namespace EditSharp.Video
             VideoCodec.ProRes => "mov",
             _ => "mp4",
         };
- 
+
         /// <summary>
         /// Adds a source's -i, with -ss/-t placed BEFORE it when Source.Start or
         /// Source.Duration are set, so ffmpeg seeks on the demuxer instead of
@@ -418,7 +418,7 @@ namespace EditSharp.Video
             args.Add("-i");
             args.Add(path);
         }
- 
+
         /// <summary>
         /// The -ss/-t pair for a source's Start/Duration, or empty when neither
         /// is set. Factored out of AddTrimmedInput so callers registering an
@@ -432,21 +432,20 @@ namespace EditSharp.Video
         internal static string[] TrimArgsFor(Source source)
         {
             var args = new List<string>();
- 
+
             if (source.Start.HasValue)
             {
                 args.Add("-ss");
                 args.Add(FfmpegArgs.Sec(source.Start.Value));
             }
- 
+
             if (source.Duration.HasValue)
             {
                 args.Add("-t");
                 args.Add(FfmpegArgs.Sec(source.Duration.Value));
             }
- 
+
             return [.. args];
         }
     }
 }
- 

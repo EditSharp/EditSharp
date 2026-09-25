@@ -1,7 +1,7 @@
 using System;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
- 
+
 namespace EditSharp.Components
 {
     /// <summary>
@@ -32,26 +32,26 @@ namespace EditSharp.Components
         /// move.
         /// </summary>
         void Move(TimeSpan newStart, Channel? targetChannel = null);
- 
+
         /// <summary>Same as Move, but destination-side neighbors shift later instead of being overwritten.</summary>
         void RippleMove(TimeSpan newStart, Channel? targetChannel = null);
- 
+
         /// <summary>Shrinks from the head — never creates overlap, so there is no Ripple variant.</summary>
         void TrimStart(TimeSpan amount);
- 
+
         /// <summary>Shrinks from the tail — never creates overlap, so there is no Ripple variant.</summary>
         void TrimEnd(TimeSpan amount);
- 
+
         /// <summary>Grows from the head (Overwrite default) — can newly overlap a neighbor.</summary>
         void ExtendStart(TimeSpan amount);
- 
+
         /// <summary>Grows from the tail (Overwrite default) — can newly overlap a neighbor.</summary>
         void ExtendEnd(TimeSpan amount);
- 
+
         void RippleExtendStart(TimeSpan amount);
- 
+
         void RippleExtendEnd(TimeSpan amount);
- 
+
         /// <summary>
         /// Cuts at a point in time. On a Clip, splits just that clip (both
         /// halves keep the same LinkGroupId). On a LinkGroup, splits every
@@ -60,8 +60,7 @@ namespace EditSharp.Components
         /// behavior.
         /// </summary>
         void Split(TimeSpan at);
- 
+
         void Delete();
     }
 }
- 

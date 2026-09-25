@@ -9,8 +9,7 @@ namespace EditSharp.Components.Transitions
         float _angle = 0f;
         [Editable("Angle", Editor = PropertyEditor.Angle)]
         public float Angle { get => _angle; set => Transaction.Set(this, ref _angle, value, static (o, v) => o._angle = v); }
- 
+
         public override Transition Duplicate() => Transaction.Suppressed(() => new SlideTransition { Duration = Duration, Angle = Angle });
     }
 }
- 

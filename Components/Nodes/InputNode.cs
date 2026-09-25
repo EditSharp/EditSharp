@@ -35,4 +35,3 @@ namespace EditSharp.Components.Nodes
     /// </summary>
     public abstract class InputNode : Node { }
 }
- 

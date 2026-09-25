@@ -4,9 +4,9 @@ using System;
 using System.Collections.Generic;
 using EditSharp.Components.Sources.Audio;
 using EditSharp.Components.Nodes;
-using EditSharp.History;
+using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Nodes.Sources
 {
     /// <summary>Feeds an AudioSource's samples into the graph, whatever kind it is. Replaces the old AudioClip.Source property directly.</summary>
@@ -24,23 +24,22 @@ namespace EditSharp.Components.Nodes.Sources
                 OwnerClip?.TrimToSources();
             }
         }
- 
+
         private static readonly NodePort[] StaticPorts = [new("Audio", PortType.Audio, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
         public override IEnumerable<IAnimatable> Animatables => Source.Animatables;
         internal override IAudioProcessor CreateAudioProcessor(AudioSession session) =>
             new ContentInputProcessor(() => Source, () => new SourceContentAudio(Source, Id, session), session);
         public override Node Duplicate() => Transaction.Suppressed(() => new AudioSourceNode { Enabled = Enabled, Source = Source.Duplicate() });
- 
+
         public TimeSpan InPoint
         {
             get => Source.Start ?? TimeSpan.Zero;
             set => Source.Start = value;
         }
- 
+
         public TimeSpan MaxHeadroom => Source.Start ?? TimeSpan.Zero;
 
         public TimeSpan? ContentLength => !Source.Loop && Source.TryGetUsableLength(out TimeSpan? length) ? length : null;
     }
 }
- 

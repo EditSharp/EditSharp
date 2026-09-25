@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Effects;
- 
+
 namespace EditSharp.Compositing
 {
     /// <summary>
@@ -37,23 +37,22 @@ namespace EditSharp.Compositing
             var visited = new HashSet<System.Guid> { start.Id };
             var queue = new Queue<System.Guid>();
             queue.Enqueue(start.Id);
- 
+
             while (queue.Count > 0)
             {
                 System.Guid current = queue.Dequeue();
- 
+
                 foreach (Connection c in graph.Connections.Where(x => x.FromNodeId == current))
                 {
                     if (!visited.Add(c.ToNodeId)) continue;
- 
+
                     Node? node = graph.Nodes.FirstOrDefault(n => n.Id == c.ToNodeId);
                     if (node is TransformNode transform) return transform;
                     if (node != null) queue.Enqueue(node.Id);
                 }
             }
- 
+
             return null;
         }
     }
 }
- 

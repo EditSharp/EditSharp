@@ -3,7 +3,7 @@ using System;
 using System.Collections.Generic;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Nodes
 {
     public abstract class Node
@@ -23,15 +23,15 @@ namespace EditSharp.Components.Nodes
                 return null;
             }
         }
- 
+
         //fixed set, declared by the concrete node type
         public abstract IReadOnlyList<NodePort> Ports { get; }
- 
+
         //bypass — see Graph's class remarks
         bool _enabled = true;
         [Editable("Enabled", Order = -100)]
         public bool Enabled { get => _enabled; set => Transaction.Set(this, ref _enabled, value, static (o, v) => o._enabled = v); }
- 
+
         /// <summary>
         /// Deep copy with a FRESH Id — a duplicated clip's graph must not
         /// share node identity with the original, or a Connection recorded
@@ -54,4 +54,3 @@ namespace EditSharp.Components.Nodes
         internal virtual IAudioProcessor? CreateAudioProcessor(AudioSession session) => null;
     }
 }
- 

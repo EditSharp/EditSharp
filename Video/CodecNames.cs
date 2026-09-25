@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 using EditSharp.Components;
- 
+
 namespace EditSharp.Video
 {
     /// <summary>
@@ -23,7 +23,7 @@ namespace EditSharp.Video
             [VideoCodec.AV1] = "libaom-av1",
             [VideoCodec.GIF] = "gif",
             [VideoCodec.FFV1] = "ffv1",
- 
+
             // Both added for OptimizedMediaCache — see that class's own
             // remarks for why these two specifically, and Codecs.cs for why
             // each is CPU-only with no hardware encoder entry in
@@ -32,7 +32,7 @@ namespace EditSharp.Video
             [VideoCodec.DNxHR] = "dnxhd", // handles modern DNxHR profiles too, not just legacy DNxHD
             [VideoCodec.ProRes] = "prores_ks", // the modern, better-quality ProRes encoder, not the older "prores"
         };
- 
+
         // Hardware encoder candidates per codec, in TRY-FIRST-TO-LAST priority
         // order. GetVideoEncoderSettingsAsync probes each in turn with a
         // trial encode and uses the first that actually works on this
@@ -50,7 +50,7 @@ namespace EditSharp.Video
             [VideoCodec.H265] = ["hevc_nvenc", "hevc_amf", "hevc_qsv"],
             [VideoCodec.AV1] = ["av1_nvenc", "av1_amf", "av1_qsv"], // av1_nvenc needs an RTX 40-series+ GPU
         };
- 
+
         // ffmpeg -hwaccel candidates for source DECODE, in TRY-FIRST-TO-LAST
         // priority order: cuda (NVIDIA, GPU-scale-capable — decode AND the
         // resize step stay on the GPU, only the final already-small frame
@@ -91,7 +91,7 @@ namespace EditSharp.Video
             ("cuda", "cuda", "scale_cuda"),
             ("d3d11va", null, null), // decode-only — CPU scale/format-convert fallback for this candidate specifically
         ];
- 
+
         public static readonly Dictionary<AudioCodec, string> AudioCodecNames = new()
         {
             [AudioCodec.AAC] = "aac",
@@ -100,4 +100,3 @@ namespace EditSharp.Video
         };
     }
 }
- 

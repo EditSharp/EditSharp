@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
-using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Nodes.Sources;
 using EditSharp.Components.Sources.Video;
 using EditSharp.Components.Sources.Audio;
 using EditSharp.History;

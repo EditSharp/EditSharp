@@ -5,7 +5,7 @@ using EditSharp.Components;
 using EditSharp.Components.Nodes;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Nodes.Effects
 {
     public sealed class CompressorNode : Node
@@ -25,15 +25,15 @@ namespace EditSharp.Components.Nodes.Effects
         Animatable<float> _makeupGainDb = new(0f);
         [Editable("Makeup gain", Min = -24, Max = 24, Step = 0.5, Unit = "dB")]
         public Animatable<float> MakeupGainDb { get => _makeupGainDb; set => Transaction.Set(this, ref _makeupGainDb, value, static (o, v) => o._makeupGainDb = v); }
- 
+
         private static readonly NodePort[] StaticPorts =
         [
             new("Audio", PortType.Audio, PortDirection.Input),
             new("Audio", PortType.Audio, PortDirection.Output),
         ];
- 
+
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
- 
+
         public override IEnumerable<IAnimatable> Animatables => [Threshold, Ratio, AttackMs, ReleaseMs, MakeupGainDb];
         internal override IAudioProcessor CreateAudioProcessor(AudioSession session) => new CompressorProcessor(this);
 
@@ -48,4 +48,3 @@ namespace EditSharp.Components.Nodes.Effects
         });
     }
 }
- 

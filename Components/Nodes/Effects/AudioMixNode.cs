@@ -5,7 +5,7 @@ using EditSharp.Components;
 using EditSharp.Components.Nodes;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Nodes.Effects
 {
     /// <summary>
@@ -23,24 +23,24 @@ namespace EditSharp.Components.Nodes.Effects
         Animatable<float> _mixB = new(1f);
         [Editable("Mix B", Min = 0, Max = 1, Step = 0.01)]
         public Animatable<float> MixB { get => _mixB; set => Transaction.Set(this, ref _mixB, value, static (o, v) => o._mixB = v); }
- 
+
         private static readonly NodePort[] StaticPorts =
         [
             new("A", PortType.Audio, PortDirection.Input),
             new("B", PortType.Audio, PortDirection.Input),
- 
+
             //optional Value modulation inputs (see
             //EditSharp.Components.Nodes.Math's own remarks) — when
             //connected, MULTIPLY against MixA/MixB's own keyframed values
             //rather than replacing them
             new("MixAModulation", PortType.Value, PortDirection.Input, optional: true),
             new("MixBModulation", PortType.Value, PortDirection.Input, optional: true),
- 
+
             new("Result", PortType.Audio, PortDirection.Output),
         ];
- 
+
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
- 
+
         public override IEnumerable<IAnimatable> Animatables => [MixA, MixB];
         internal override IAudioProcessor CreateAudioProcessor(AudioSession session) => new AudioMixProcessor(this);
 
@@ -52,4 +52,3 @@ namespace EditSharp.Components.Nodes.Effects
         });
     }
 }
- 

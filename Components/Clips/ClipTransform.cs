@@ -4,7 +4,7 @@ using System.Numerics;
 using EditSharp.Components;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Clips
 {
     /// <summary>
@@ -15,7 +15,7 @@ namespace EditSharp.Components.Clips
     /// track instead of interpolating between two flat ClipTransform blobs.
     /// </summary>
     public readonly record struct ResolvedTransform(Vector2 Position, Vector2 Scale, float Rotation, float Pitch, float Yaw);
- 
+
     /// <summary>
     /// Every field is individually Animatable&lt;T&gt; — see the schema doc's
     /// Keyframes section. This replaces the old model where an entire
@@ -42,7 +42,7 @@ namespace EditSharp.Components.Clips
 
         /// <summary>Every track on this transform — see Node.Animatables.</summary>
         public IEnumerable<IAnimatable> Animatables => [Position, Scale, Rotation, Pitch, Yaw];
- 
+
         /// <summary>
         /// Position specifically gets the spatial-handle PositionTrack
         /// treatment (see the schema doc) — this is a convenience that
@@ -53,12 +53,12 @@ namespace EditSharp.Components.Clips
         public PositionTrack UsePositionTrack()
         {
             if (Position.Track is PositionTrack existing) return existing;
- 
+
             var track = new PositionTrack();
             Position.AttachTrack(track);
             return track;
         }
- 
+
         public ClipTransform Duplicate() => Transaction.Suppressed(() => new ClipTransform
         {
             Position = Position.Duplicate(),
@@ -67,16 +67,16 @@ namespace EditSharp.Components.Clips
             Pitch = Pitch.Duplicate(),
             Yaw = Yaw.Duplicate(),
         });
- 
+
         public ResolvedTransform Evaluate(TimeSpan clipRelativeTime) => new(
             Position.Evaluate(clipRelativeTime),
             Scale.Evaluate(clipRelativeTime),
             Rotation.Evaluate(clipRelativeTime),
             Pitch.Evaluate(clipRelativeTime),
             Yaw.Evaluate(clipRelativeTime));
- 
+
         public static Vector2 FromPosition(Positions position) => PositionToVector2[position];
- 
+
         private static readonly Dictionary<Positions, Vector2> PositionToVector2 = new()
         {
             [Positions.TopLeft] = new Vector2(-1, 1),
@@ -90,7 +90,7 @@ namespace EditSharp.Components.Clips
             [Positions.BottomRight] = new Vector2(1, -1),
         };
     }
- 
+
     public enum Positions
     {
         TopLeft, TopCenter, TopRight,
@@ -98,4 +98,3 @@ namespace EditSharp.Components.Clips
         BottomLeft, BottomCenter, BottomRight,
     }
 }
- 

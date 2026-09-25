@@ -2,7 +2,7 @@ using System;
 using System.Linq;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Math;
- 
+
 namespace EditSharp.Compositing.Graphs
 {
     /// <summary>
@@ -30,25 +30,25 @@ namespace EditSharp.Compositing.Graphs
         {
             Connection? c = graph.Connections.FirstOrDefault(x => x.ToNodeId == node.Id && x.ToPort == inputPortName);
             if (c == null) return null;
- 
+
             Node? source = graph.Nodes.FirstOrDefault(n => n.Id == c.FromNodeId);
             if (source == null) return null;
- 
+
             return Evaluate(graph, source, c.FromPort, time);
         }
- 
+
         private static float Evaluate(Graph graph, Node node, string outputPortName, TimeSpan time)
         {
             switch (node)
             {
                 case ValueConstantNode constant:
                     return constant.Value.Evaluate(time);
- 
+
                 case MathNode math:
                 {
                     float a = TryEvaluateConnectedInput(graph, math, "A", time) ?? 0f;
                     float b = TryEvaluateConnectedInput(graph, math, "B", time) ?? 0f;
- 
+
                     return math.Operation switch
                     {
                         MathOperation.Add => a + b,
@@ -60,7 +60,7 @@ namespace EditSharp.Compositing.Graphs
                         _ => throw new NotSupportedException($"Unknown MathOperation: {math.Operation}"),
                     };
                 }
- 
+
                 default:
                     throw new NotSupportedException(
                         $"ValueGraphEvaluator has no dispatch for {node.GetType().Name} on port '{outputPortName}'.");
@@ -68,4 +68,3 @@ namespace EditSharp.Compositing.Graphs
         }
     }
 }
- 

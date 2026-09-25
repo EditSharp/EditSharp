@@ -1,7 +1,7 @@
 using System;
 using System.Numerics;
 using EditSharp.History;
- 
+
 namespace EditSharp.Components
 {
     /// <summary>
@@ -18,15 +18,15 @@ namespace EditSharp.Components
         public Vector2? SpatialInHandle { get => _spatialInHandle; internal set => Transaction.Set(this, ref _spatialInHandle, value, static (o, v) => o._spatialInHandle = v); }
         Vector2? _spatialOutHandle;
         public Vector2? SpatialOutHandle { get => _spatialOutHandle; internal set => Transaction.Set(this, ref _spatialOutHandle, value, static (o, v) => o._spatialOutHandle = v); }
- 
+
         TangentMode _spatialInTangentMode = TangentMode.Auto;
         public TangentMode SpatialInTangentMode { get => _spatialInTangentMode; internal set => Transaction.Set(this, ref _spatialInTangentMode, value, static (o, v) => o._spatialInTangentMode = v); }
         TangentMode _spatialOutTangentMode = TangentMode.Auto;
         public TangentMode SpatialOutTangentMode { get => _spatialOutTangentMode; internal set => Transaction.Set(this, ref _spatialOutTangentMode, value, static (o, v) => o._spatialOutTangentMode = v); }
- 
+
         internal SpatialKeyframe(TimeSpan start, Vector2 value) : base(start, value) { }
     }
- 
+
     /// <summary>
     /// Position's own KeyframeTrack&lt;Vector2&gt; subclass. Evaluate is
     /// deliberately two-stage rather than sharing the base class's plain
@@ -50,7 +50,7 @@ namespace EditSharp.Components
     {
         protected override Keyframe<Vector2> CreateKeyframe(TimeSpan start, Vector2 value) =>
             new SpatialKeyframe(start, value);
- 
+
         public SpatialKeyframe AddSpatialKeyframe(TimeSpan start, Vector2 value) =>
             (SpatialKeyframe)AddKeyframe(start, value);
 
@@ -65,7 +65,7 @@ namespace EditSharp.Components
             to.SpatialInTangentMode = from.SpatialInTangentMode;
             to.SpatialOutTangentMode = from.SpatialOutTangentMode;
         }
- 
+
         public void SetSpatialHandle(SpatialKeyframe keyframe, bool isInHandle, Vector2 offset)
         {
             if (isInHandle)
@@ -85,30 +85,30 @@ namespace EditSharp.Components
                     keyframe.SpatialInHandle = -offset;
             }
         }
- 
+
         protected override Vector2 InterpolateSegment(Keyframe<Vector2> from, Keyframe<Vector2> to, TimeSpan time)
         {
             if (from.OutInterpolation == InterpolationType.Hold) return from.Value;
- 
+
             //stage 1: temporal — reuses the exact same Hold/Linear/Bezier
             //cubic-solve every other track uses, just to get u rather than a
             //final value
             float u = SolveU(time, from, to);
- 
+
             //stage 2: spatial — a DIFFERENT cubic, over the path shape
             var fromSpatial = (SpatialKeyframe)from;
             var toSpatial = (SpatialKeyframe)to;
- 
+
             Vector2 p1 = fromSpatial.SpatialOutHandle.HasValue
                 ? fromSpatial.Value + fromSpatial.SpatialOutHandle.Value
                 : fromSpatial.Value;
- 
+
             Vector2 p2 = toSpatial.SpatialInHandle.HasValue
                 ? toSpatial.Value + toSpatial.SpatialInHandle.Value
                 : toSpatial.Value;
- 
+
             float m = 1 - u;
- 
+
             return (m * m * m * fromSpatial.Value)
                  + (3 * m * m * u * p1)
                  + (3 * m * u * u * p2)
@@ -116,4 +116,3 @@ namespace EditSharp.Components
         }
     }
 }
- 

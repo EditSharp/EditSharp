@@ -36,7 +36,7 @@ namespace EditSharp.Components.Channels
         SrcATop, DstATop, Xor, Plus, Modulate, Screen, Overlay, Darken,
         Lighten, ColorDodge, ColorBurn, HardLight, SoftLight, Difference,
         Exclusion, Multiply, Hue, Saturation, Color, Luminosity,
- 
+
         // Reserved — no native SKBlendMode equivalent. Throws in
         // ChannelCompositor until/unless a custom SkSL SKRuntimeEffect
         // shader is built for one of these (per the conversation: only
@@ -44,4 +44,3 @@ namespace EditSharp.Components.Channels
         Average, Negation, Divide, Subtract,
     }
 }
- 

@@ -2,26 +2,26 @@ using System;
 using System.Numerics;
 using EditSharp.Components.Sources;
 using EditSharp.Video;
- 
+
 namespace EditSharp.Rendering;
- 
+
 public struct RenderSettings
     {
         //output resolution of rendered video
         public Vector2 Resolution { get; set; } = new(1920, 1080);
- 
+
         //output framerate of rendered video
         public int Framerate { get; set; } = 30;
- 
+
         //what encoding to render video with
         public VideoCodec VideoCodec { get; set; } = VideoCodec.H265;
- 
+
         //what encoding to render audio with
         public AudioCodec AudioCodec { get; set; } = AudioCodec.AAC;
- 
+
          //whether to use gpu acceleration and what kind
         public HardwareAccelerator HardwareAccelerator { get; set; } = HardwareAccelerator.GPU;
- 
+
         /// <summary>
         /// Which GPU the Skia compositor should run on, as a DXGI adapter
         /// index. NULL (the default) means AUTO: pick the first non-software
@@ -56,8 +56,7 @@ public struct RenderSettings
         /// the next session.
         /// </summary>
         public SourceMode SourceMode { get; set; } = SourceMode.SourceOnly;
- 
+
         public RenderSettings() { }
- 
+
     }
- 

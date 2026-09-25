@@ -2,7 +2,7 @@ using System;
 using EditSharp.Components.Clips;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Transitions
 {
     /// <summary>
@@ -22,14 +22,14 @@ namespace EditSharp.Components.Transitions
         public Clip From { get => _from; internal set => Transaction.Set(this, ref _from, value, static (o, v) => o._from = v); }
         Clip _to = null!;
         public Clip To { get => _to; internal set => Transaction.Set(this, ref _to, value, static (o, v) => o._to = v); }
- 
+
         //the transition's length — see Channel's overlap invariant for the
         //carve-out this creates and how it's actually achieved (extending
         //into each clip's own trim-handle material, not destructive trimming)
         TimeSpan _duration;
         [Editable("Duration")]
         public TimeSpan Duration { get => _duration; set => Transaction.Set(this, ref _duration, value, static (o, v) => o._duration = v); }
- 
+
         //deep copy — clip fragments produced by a split must not share
         //Transition instances. From/To are NOT copied here — see
         //Channel.SplitClip, which drops any Transition referencing a clip
@@ -37,4 +37,3 @@ namespace EditSharp.Components.Transitions
         public abstract Transition Duplicate();
     }
 }
- 

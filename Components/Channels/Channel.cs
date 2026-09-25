@@ -5,7 +5,7 @@ using EditSharp.Components.Clips;
 using EditSharp.Components.Transitions;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Channels
 {
     /// <summary>
@@ -35,16 +35,16 @@ namespace EditSharp.Components.Channels
         string _name = "Channel";
         [Editable("Name")]
         public string Name { get => _name; set => Transaction.Set(this, ref _name, value, static (o, v) => o._name = v); }
- 
+
         private readonly SortedDictionary<TimeSpan, Clip> _clips = new();
         private readonly List<Transition> _transitions = [];
- 
+
         public IReadOnlyCollection<Clip> Clips => _clips.Values;
         public IReadOnlyList<Transition> Transitions => _transitions;
- 
+
         Timeline? _timeline;
         public Timeline? Timeline { get => _timeline; internal set => Transaction.Set(this, ref _timeline, value, static (o, v) => o._timeline = v); }
- 
+
         /// <summary>
         /// This channel's position among channels of its own kind — 0 is
         /// the bottom layer, matching VideoChannels'/AudioChannels' own
@@ -64,46 +64,46 @@ namespace EditSharp.Components.Channels
 
         /// <summary>Swaps this channel with the one directly below it. No-op at the bottom.</summary>
         public void MoveDown() => Timeline?.SwapChannel(this, -1);
- 
+
         public TimeSpan End => _clips.Count == 0 ? TimeSpan.Zero : _clips.Values.Max(c => c.End);
- 
+
         protected internal abstract bool IsValidClipType(Clip clip);
- 
+
         private void ValidateType(Clip clip)
         {
             if (!IsValidClipType(clip))
                 throw new ArgumentException(
                     $"{clip.GetType().Name} is not a valid clip type for {GetType().Name}.", nameof(clip));
         }
- 
+
         // ---------------------------------------------------------------
         // Add
         // ---------------------------------------------------------------
- 
+
         public Clip AddClip(Clip clip) => AddClipCore(clip, ripple: false);
         public Clip RippleAddClip(Clip clip) => AddClipCore(clip, ripple: true);
- 
+
         private Clip AddClipCore(Clip clip, bool ripple)
         {
             ValidateType(clip);
- 
+
             //cycle-check BEFORE any mutation — a clip whose graph embeds a
             //nested Timeline that would create a cycle must be rejected
             //outright, not partially placed and then rolled back
             Timeline?.ValidateNoCycle(clip);
- 
+
             if (ripple) RippleFrom(clip.Start, clip.Duration);
             else Overwrite(clip.Start, clip.End);
- 
+
             PlaceInternal(clip);
- 
+
             //now that placement succeeded, register this clip's embedded
             //timelines (if any) in their own Timeline.UsedBy
             Timeline?.RegisterEmbeddedTimelines(clip);
- 
+
             return clip;
         }
- 
+
         /// <summary>
         /// A placed clip's Start is its key here, so anything that moves a
         /// clip's Start in place — a head trim — has to move the entry with
@@ -155,11 +155,11 @@ namespace EditSharp.Components.Channels
                 () => { foreach ((int index, Transition t) in removed) _transitions.Insert(Math.Min(index, _transitions.Count), t); },
                 "remove transitions");
         }
- 
+
         // ---------------------------------------------------------------
         // Move
         // ---------------------------------------------------------------
- 
+
         /// <summary>
         /// KNOWN GAP, carried forward unchanged from before this rewrite:
         /// a cross-Timeline move of a clip embedding a nested Timeline
@@ -171,20 +171,20 @@ namespace EditSharp.Components.Channels
         internal void Move(Clip clip, TimeSpan newStart, Channel? targetChannel, bool ripple)
         {
             clip.Channel?.DetachClip(clip);
- 
+
             Channel destination = targetChannel ?? this;
- 
+
             if (ripple) destination.RippleFrom(newStart, clip.Duration);
             else destination.Overwrite(newStart, newStart + clip.Duration);
- 
+
             clip.Start = newStart;
             destination.PlaceInternal(clip);
         }
- 
+
         // ---------------------------------------------------------------
         // Extend
         // ---------------------------------------------------------------
- 
+
         /// <summary>
         /// `exclude`, when given, is skipped entirely by the Overwrite scan
         /// this performs — used ONLY by AddTransition below, where `clip`
@@ -197,23 +197,23 @@ namespace EditSharp.Components.Channels
         internal void ExtendHead(Clip clip, TimeSpan amount, bool ripple, Clip? exclude = null)
         {
             Unplace(clip);
- 
+
             TimeSpan newStart = clip.Start - amount;
             if (ripple) RippleFrom(newStart, amount);
             else Overwrite(newStart, clip.Start, exclude);
- 
+
             clip.ApplyHeadExtend(amount);
             PlaceInternal(clip);
             ReconcileTransitionsFor(clip);
         }
- 
+
         internal void ExtendTail(Clip clip, TimeSpan amount, bool ripple, Clip? exclude = null)
         {
             Unplace(clip);
- 
+
             if (ripple) RippleFrom(clip.End, amount);
             else Overwrite(clip.End, clip.End + amount, exclude);
- 
+
             clip.ApplyTailExtend(amount);
             PlaceInternal(clip);
             ReconcileTransitionsFor(clip);
@@ -248,23 +248,23 @@ namespace EditSharp.Components.Channels
             PlaceInternal(clip);
             ReconcileTransitionsFor(clip);
         }
- 
+
         // ---------------------------------------------------------------
         // Split / Delete
         // ---------------------------------------------------------------
- 
+
         internal void SplitClip(Clip clip, TimeSpan at)
         {
             if (at <= clip.Start || at >= clip.End)
                 throw new ArgumentOutOfRangeException(nameof(at), "Split point must be strictly inside the clip.");
- 
+
             (Clip head, Clip tail) = SplitFragments(clip, at, at);
- 
+
             DetachClip(clip);
             PlaceInternal(head);
             PlaceInternal(tail);
         }
- 
+
         internal void RemoveClip(Clip clip)
         {
             if (clip.Channel != this) return;
@@ -300,18 +300,18 @@ namespace EditSharp.Components.Channels
             RemoveRange(start, end);
             RippleClose(end, end - start);
         }
- 
+
         private void DetachClip(Clip clip)
         {
             Unplace(clip);
             RemoveTransitionsWhere(t => t.From == clip || t.To == clip);
             clip.Channel = null;
         }
- 
+
         // ---------------------------------------------------------------
         // Transitions
         // ---------------------------------------------------------------
- 
+
         /// <summary>
         /// FOUND IN THE FIELD, FIXED: this used to call the ordinary
         /// `to.ExtendStart(achievableHalf)` / `from.ExtendEnd(achievableHalf)`
@@ -339,45 +339,45 @@ namespace EditSharp.Components.Channels
         {
             Clip from = transition.From;
             Clip to = transition.To;
- 
+
             if (from.Channel != this || to.Channel != this)
                 throw new ArgumentException("Both clips must already be placed on this channel.");
             if (to.Start != from.End)
                 throw new ArgumentException("Transition.From and Transition.To must be adjacent (To.Start == From.End).");
- 
+
             TimeSpan requestedHalf = TimeSpan.FromTicks(transition.Duration.Ticks / 2);
- 
+
             //each clip grows into the other by half, as far as its content allows
             TimeSpan achievableHalf = requestedHalf;
             if (to.HeadExtendLimit < achievableHalf) achievableHalf = to.HeadExtendLimit;
             if (from.TailExtendLimit < achievableHalf) achievableHalf = from.TailExtendLimit;
- 
+
             if (achievableHalf > TimeSpan.Zero)
             {
                 ExtendHead(to, achievableHalf, ripple: false, exclude: from);
                 ExtendTail(from, achievableHalf, ripple: false, exclude: to);
             }
- 
+
             transition.Duration = achievableHalf + achievableHalf;
             Transaction.Apply(() => _transitions.Add(transition), () => _transitions.Remove(transition), "add transition");
- 
+
             return transition;
         }
- 
+
         public void RemoveTransition(Transition transition) => RemoveTransitionsWhere(t => ReferenceEquals(t, transition));
- 
+
         internal void ReconcileTransitionsFor(Clip clip)
         {
             RemoveTransitionsWhere(t => (t.From == clip || t.To == clip) && !IsTransitionValid(t));
         }
- 
+
         private static bool IsTransitionValid(Transition t) =>
             t.From.Duration > TimeSpan.Zero && t.To.Duration > TimeSpan.Zero && t.To.Start == t.From.End - t.Duration;
- 
+
         // ---------------------------------------------------------------
         // Overwrite / Ripple mechanics
         // ---------------------------------------------------------------
- 
+
         /// <summary>
         /// `exclude`, when given, is never trimmed/split/deleted by this
         /// scan even if its span falls inside [newStart, newEnd) — see
@@ -389,10 +389,10 @@ namespace EditSharp.Components.Channels
             {
                 if (ReferenceEquals(target, exclude)) continue;
                 if (target.End <= newStart || target.Start >= newEnd) continue; //no overlap
- 
+
                 bool coveredHead = target.Start >= newStart;
                 bool coveredTail = target.End <= newEnd;
- 
+
                 if (coveredHead && coveredTail)
                 {
                     DetachClip(target);
@@ -415,7 +415,7 @@ namespace EditSharp.Components.Channels
                 }
             }
         }
- 
+
         /// <summary>The reverse of RippleFrom: every clip starting at or after `at` moves EARLIER by `amount`. Earliest first, so each clip moves into room the one before it has just left.</summary>
         private void RippleClose(TimeSpan at, TimeSpan amount)
         {
@@ -432,7 +432,7 @@ namespace EditSharp.Components.Channels
         private void RippleFrom(TimeSpan at, TimeSpan amount)
         {
             if (amount <= TimeSpan.Zero) return;
- 
+
             foreach (Clip clip in _clips.Values.Where(c => c.Start >= at).OrderByDescending(c => c.Start).ToList())
             {
                 Unplace(clip);
@@ -440,7 +440,7 @@ namespace EditSharp.Components.Channels
                 Place(clip);
             }
         }
- 
+
         /// <summary>
         /// Splits `target` into [target.Start, cutStart) and [cutEnd, target.End),
         /// preserving LinkGroupId. Uses each fragment's OWN TrimEnd/TrimStart
@@ -465,9 +465,8 @@ namespace EditSharp.Components.Channels
             Clip tail = target.Duplicate();
             tail.LinkGroupId = target.LinkGroupId;
             tail.TrimStart(cutEnd - tail.Start);
- 
+
             return (head, tail);
         }
     }
 }
- 

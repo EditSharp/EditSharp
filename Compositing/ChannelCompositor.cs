@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using SkiaSharp;
 using EditSharp.Components;
 using EditSharp.Components.Channels;
- 
+
 namespace EditSharp.Compositing
 {
     /// <summary>
@@ -73,11 +73,11 @@ namespace EditSharp.Compositing
             [ChannelBlendMode.Saturation] = SKBlendMode.Saturation,
             [ChannelBlendMode.Color] = SKBlendMode.Color,
             [ChannelBlendMode.Luminosity] = SKBlendMode.Luminosity,
- 
+
             // Average, Negation, Divide, Subtract deliberately absent —
             // see ToNative's throw below.
         };
- 
+
         /// <summary>
         /// Draws a finished channel onto the accumulator canvas with the
         /// given blend mode. No `enable`/`setpts` gating needed here, same
@@ -89,7 +89,7 @@ namespace EditSharp.Compositing
             using var paint = new SKPaint { BlendMode = ToNativeForMerge(blendMode) };
             canvas.DrawImage(channel, 0, 0, paint);
         }
- 
+
         /// <summary>
         /// Throws for the four reserved arithmetic modes rather than
         /// silently falling back to SrcOver or no-oping — a clip configured
@@ -106,7 +106,7 @@ namespace EditSharp.Compositing
         {
             if (NativeModes.TryGetValue(mode, out SKBlendMode native))
                 return native;
- 
+
             throw new NotSupportedException(
                 $"ChannelBlendMode.{mode} has no native SKBlendMode implementation. " +
                 "This mode is reserved for a future SKRuntimeEffect (SkSL) shader " +
@@ -114,4 +114,3 @@ namespace EditSharp.Compositing
         }
     }
 }
- 

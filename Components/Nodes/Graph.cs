@@ -2,25 +2,25 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.History;
- 
+
 namespace EditSharp.Components.Nodes
 {
     public enum PortType { Image, Mask, Audio, Value }
     public enum PortDirection { Input, Output }
- 
+
     /// <summary>A fixed port declared by a concrete Node type.</summary>
     public sealed class NodePort
     {
         public string Name { get; }
         public PortType Type { get; }
         public PortDirection Direction { get; }
- 
+
         //true for a port that's allowed to sit unconnected at render time
         //(e.g. a filter node's "Mask" input, or a node's optional Value
         //modulation input) — see Graph.Connect and the bypass/inert-
         //input rules in the schema doc
         public bool Optional { get; }
- 
+
         public NodePort(string name, PortType type, PortDirection direction, bool optional = false)
         {
             Name = name;
@@ -29,14 +29,14 @@ namespace EditSharp.Components.Nodes
             Optional = optional;
         }
     }
- 
+
     public sealed class Connection
     {
         public Guid FromNodeId { get; }
         public string FromPort { get; }
         public Guid ToNodeId { get; }
         public string ToPort { get; }
- 
+
         internal Connection(Guid fromNodeId, string fromPort, Guid toNodeId, string toPort)
         {
             FromNodeId = fromNodeId;
@@ -45,10 +45,10 @@ namespace EditSharp.Components.Nodes
             ToPort = toPort;
         }
     }
- 
+
     /// <summary>Which domain a graph's ports may use — see Graph.AddNode.</summary>
     public enum NodeDomain { Image, Audio }
- 
+
     /// <summary>
     /// A directed graph of nodes — see the schema doc's "Effects:
     /// Node-Based Compositing Graph" section for the full design. The same
@@ -86,10 +86,10 @@ namespace EditSharp.Components.Nodes
         //what holds this graph: a clip, or a composite node around it
         internal Clips.Clip? Clip { get; set; }
         internal CompositeNode? Composite { get; set; }
- 
+
         private readonly List<Node> _nodes = [];
         private readonly List<Connection> _connections = [];
- 
+
         public IReadOnlyList<Node> Nodes => _nodes;
 
         /// <summary>Every keyframe track on every node — see Node.Animatables.</summary>
@@ -204,19 +204,19 @@ namespace EditSharp.Components.Nodes
 
             return new Graph(Domain, OutputNode, nodes, connections);
         }
- 
+
         //the ONLY fixed anchor left — mandatory, not removable. Every INPUT
         //is now an ordinary node (see InputNode) instead of a second fixed
         //anchor the way it used to be.
         public OutputNode OutputNode { get; }
- 
+
         /// <summary>
         /// Convenience access to every InputNode currently in this graph,
         /// without the caller having to filter Nodes by hand — see
         /// InputNode's own remarks.
         /// </summary>
         public IReadOnlyList<InputNode> InputNodes => _nodes.OfType<InputNode>().ToList();
- 
+
         private Graph(NodeDomain domain, OutputNode outputNode)
         {
             Domain = domain;
@@ -233,7 +233,7 @@ namespace EditSharp.Components.Nodes
             _nodes = nodes;
             _connections = connections;
         }
- 
+
         /// <summary>
         /// A "normal/default" video clip: a single InputNode you supply
         /// (a VideoSourceNode wrapping a Source, in the common case, but
@@ -252,18 +252,18 @@ namespace EditSharp.Components.Nodes
             using var _ = Transaction.Suppress();
 
             var graph = new Graph(NodeDomain.Image, new ImageOutputNode());
- 
+
             graph.AddNode(input);
             var tint = (Effects.TintNode)graph.AddNode(new Effects.TintNode());
             var transform = (Effects.TransformNode)graph.AddNode(new Effects.TransformNode());
- 
+
             graph.Connect(input.Id, "Image", tint.Id, "Image");
             graph.Connect(tint.Id, "Image", transform.Id, "Image");
             graph.Connect(transform.Id, "Image", graph.OutputNode.Id, "Image");
- 
+
             return graph;
         }
- 
+
         /// <summary>
         /// A "normal/default" audio clip: a single InputNode you supply
         /// (a AudioSourceNode wrapping a Source, in the common case —
@@ -276,16 +276,16 @@ namespace EditSharp.Components.Nodes
             using var _ = Transaction.Suppress();
 
             var graph = new Graph(NodeDomain.Audio, new AudioOutputNode());
- 
+
             graph.AddNode(input);
             var gain = (Effects.GainNode)graph.AddNode(new Effects.GainNode());
- 
+
             graph.Connect(input.Id, "Audio", gain.Id, "Audio");
             graph.Connect(gain.Id, "Audio", graph.OutputNode.Id, "Audio");
- 
+
             return graph;
         }
- 
+
         /// <summary>
         /// An empty graph with no InputNode at all yet — for building a
         /// fully custom multi-input graph from scratch (see
@@ -295,7 +295,7 @@ namespace EditSharp.Components.Nodes
         /// </summary>
         public static Graph CreateEmptyVideoGraph() => new(NodeDomain.Image, new ImageOutputNode());
         public static Graph CreateEmptyAudioGraph() => new(NodeDomain.Audio, new AudioOutputNode());
- 
+
         /// <summary>Deep copy — a fresh graph with fresh node Ids, connections remapped to match.</summary>
         public Graph Duplicate() => Duplicate(out _);
 
@@ -314,31 +314,31 @@ namespace EditSharp.Components.Nodes
                 ids[original.Id] = copy.Id;
                 return copy;
             }
- 
+
             var newOutput = (OutputNode)NewOf(OutputNode);
             var graph = new Graph(Domain, newOutput);
- 
+
             foreach (Node node in _nodes)
             {
                 if (ReferenceEquals(node, OutputNode)) continue;
- 
+
                 Node copy = NewOf(node);
                 copy.Graph = graph;
                 graph._nodes.Add(copy);
             }
- 
+
             foreach (Connection c in _connections)
             {
                 graph._connections.Add(new Connection(
                     map[c.FromNodeId].Id, c.FromPort, map[c.ToNodeId].Id, c.ToPort));
             }
- 
+
             idMap = ids;
             return graph;
         }
 
         private Node? Find(Guid id) => _nodes.FirstOrDefault(n => n.Id == id);
- 
+
         /// <summary>
         /// A node's domain is inferred from its own ports: any Audio port
         /// makes it Audio-only, any Image/Mask port makes it Image-only (a
@@ -353,31 +353,31 @@ namespace EditSharp.Components.Nodes
         {
             bool hasAudio = node.Ports.Any(p => p.Type == PortType.Audio);
             bool hasImage = node.Ports.Any(p => p.Type is PortType.Image or PortType.Mask);
- 
+
             if (hasAudio && hasImage)
                 throw new InvalidOperationException(
                     $"{node.GetType().Name} declares both Audio and Image/Mask ports — a node must " +
                     "belong to exactly one signal domain (or be domain-universal, via Value-only ports).");
- 
+
             if (hasAudio) return NodeDomain.Audio;
             if (hasImage) return NodeDomain.Image;
             return null; //universal
         }
- 
+
         /// <summary>Rejects a node whose port domain doesn't match this graph's own (universal nodes always pass).</summary>
         public Node AddNode(Node node)
         {
             NodeDomain? nodeDomain = InferDomain(node);
- 
+
             if (nodeDomain != null && nodeDomain != Domain)
                 throw new InvalidOperationException(
                     $"Cannot add a {nodeDomain} node to a {Domain} Graph.");
- 
+
             node.Graph = this;
             Transaction.Apply(() => _nodes.Add(node), () => _nodes.Remove(node), "add node");
             return node;
         }
- 
+
         /// <summary>
         /// Rejects OutputNode — the one fixed anchor; everything else
         /// (including every InputNode, TintNode/TransformNode/GainNode,
@@ -391,7 +391,7 @@ namespace EditSharp.Components.Nodes
         {
             if (ReferenceEquals(node, OutputNode))
                 throw new InvalidOperationException("OutputNode cannot be removed from a Graph.");
- 
+
             int index = _nodes.IndexOf(node);
             List<Connection> severed = _connections.Where(c => c.FromNodeId == node.Id || c.ToNodeId == node.Id).ToList();
 
@@ -400,7 +400,7 @@ namespace EditSharp.Components.Nodes
                 () => { _nodes.Insert(System.Math.Min(index, _nodes.Count), node); _connections.AddRange(severed); },
                 "remove node");
         }
- 
+
         /// <summary>
         /// Validates port types match, no cycle results, and the target
         /// input port doesn't already have an incoming connection (every
@@ -415,10 +415,10 @@ namespace EditSharp.Components.Nodes
         {
             Node from = Find(fromNode) ?? throw new ArgumentException("fromNode not found in this graph.");
             Node to = Find(toNode) ?? throw new ArgumentException("toNode not found in this graph.");
- 
+
             NodePort? outPort = from.Ports.FirstOrDefault(p => p.Name == fromPort && p.Direction == PortDirection.Output);
             NodePort? inPort = to.Ports.FirstOrDefault(p => p.Name == toPort && p.Direction == PortDirection.Input);
- 
+
             if (outPort == null)
                 throw new ArgumentException($"'{fromPort}' is not an output port on {from.GetType().Name}.");
             if (inPort == null)
@@ -426,19 +426,19 @@ namespace EditSharp.Components.Nodes
             if (outPort.Type != inPort.Type)
                 throw new InvalidOperationException(
                     $"Port type mismatch: {outPort.Type} output cannot feed a {inPort.Type} input.");
- 
+
             if (_connections.Any(c => c.ToNodeId == toNode && c.ToPort == toPort))
                 throw new InvalidOperationException(
                     $"'{toPort}' on this node already has an incoming connection — disconnect it first.");
- 
+
             if (CanReach(toNode, fromNode))
                 throw new InvalidOperationException("This connection would create a cycle.");
- 
+
             var connection = new Connection(fromNode, fromPort, toNode, toPort);
             Transaction.Apply(() => _connections.Add(connection), () => _connections.Remove(connection), "connect");
             return connection;
         }
- 
+
         public void Disconnect(Connection connection)
         {
             int index = _connections.IndexOf(connection);
@@ -449,26 +449,25 @@ namespace EditSharp.Components.Nodes
                 () => _connections.Insert(System.Math.Min(index, _connections.Count), connection),
                 "disconnect");
         }
- 
+
         /// <summary>True if `from` can reach `to` by following existing Connections forward.</summary>
         private bool CanReach(Guid from, Guid to)
         {
             var visited = new HashSet<Guid>();
             var queue = new Queue<Guid>();
             queue.Enqueue(from);
- 
+
             while (queue.Count > 0)
             {
                 Guid current = queue.Dequeue();
                 if (current == to) return true;
                 if (!visited.Add(current)) continue;
- 
+
                 foreach (Connection c in _connections.Where(c => c.FromNodeId == current))
                     queue.Enqueue(c.ToNodeId);
             }
- 
+
             return false;
         }
     }
 }
- 

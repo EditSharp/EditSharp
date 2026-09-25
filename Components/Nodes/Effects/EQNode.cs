@@ -6,7 +6,7 @@ using EditSharp.Components;
 using EditSharp.Components.Nodes;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Nodes.Effects
 {
     public sealed class EQBand
@@ -20,7 +20,7 @@ namespace EditSharp.Components.Nodes.Effects
         Animatable<float> _q = new(1f);
         [Editable("Q", Min = 0.1, Max = 10, Step = 0.1)]
         public Animatable<float> Q { get => _q; set => Transaction.Set(this, ref _q, value, static (o, v) => o._q = v); }
- 
+
         public EQBand Duplicate() => Transaction.Suppressed(() => new EQBand
         {
             FrequencyHz = FrequencyHz.Duplicate(),
@@ -28,21 +28,21 @@ namespace EditSharp.Components.Nodes.Effects
             Q = Q.Duplicate(),
         });
     }
- 
+
     public sealed class EQNode : Node
     {
         List<EQBand> _bands = [];
         [Editable("Bands")]
         public List<EQBand> Bands { get => _bands; set => Transaction.Set(this, ref _bands, value, static (o, v) => o._bands = v); }
- 
+
         private static readonly NodePort[] StaticPorts =
         [
             new("Audio", PortType.Audio, PortDirection.Input),
             new("Audio", PortType.Audio, PortDirection.Output),
         ];
- 
+
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
- 
+
         public override IEnumerable<IAnimatable> Animatables => Bands.SelectMany(b => new IAnimatable[] { b.FrequencyHz, b.GainDb, b.Q });
         internal override IAudioProcessor CreateAudioProcessor(AudioSession session) => new EqProcessor(this);
 
@@ -53,4 +53,3 @@ namespace EditSharp.Components.Nodes.Effects
         });
     }
 }
- 

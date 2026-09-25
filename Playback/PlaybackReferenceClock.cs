@@ -1,6 +1,6 @@
 using System;
 using System.Diagnostics;
- 
+
 namespace EditSharp.Playback
 {
     /// <summary>
@@ -54,12 +54,12 @@ namespace EditSharp.Playback
         // achieve the requested duration, which is why this is small but
         // not relied on as the primary precision mechanism.
         public static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(2);
- 
+
         private readonly object _lock = new();
         private readonly Stopwatch _wallClock = new();
         private TimeSpan _reportedPosition;
         private TimeSpan _reportedAt;
- 
+
         //the clock holds its position until Begin, so nothing moves while playback is still waiting on its sources
         private bool _begun;
         private bool _paused;
@@ -78,7 +78,7 @@ namespace EditSharp.Playback
         }
 
         public double Rate { get; }
- 
+
         public TimeSpan Position
         {
             get
@@ -89,11 +89,11 @@ namespace EditSharp.Playback
                     reportedPosition = _reportedPosition;
                     reportedAt = _reportedAt;
                 }
- 
+
                 return reportedPosition + TimeSpan.FromTicks((long)((_wallClock.Elapsed - reportedAt).Ticks * Rate));
             }
         }
- 
+
         public void Report(TimeSpan position)
         {
             lock (_lock)
@@ -102,7 +102,7 @@ namespace EditSharp.Playback
                 _reportedAt = _wallClock.Elapsed;
             }
         }
- 
+
         public void PauseWallClock()
         {
             lock (_lock)
@@ -122,4 +122,3 @@ namespace EditSharp.Playback
         }
     }
 }
- 

@@ -1,5 +1,5 @@
 using System.Collections.Generic;
- 
+
 namespace EditSharp.Video
 {
     /// <summary>
@@ -31,20 +31,20 @@ namespace EditSharp.Video
     {
         /// <summary>No hwaccel, no GPU scale — the always-available fallback.</summary>
         public static readonly DecodeHwAccelPlan Software = new("software", null, null);
- 
+
         public string Candidate { get; }
         public string? HwaccelOutputFormat { get; }
         public string? ScaleFilterName { get; }
- 
+
         public bool UsesGpuScale => ScaleFilterName != null;
- 
+
         public DecodeHwAccelPlan(string candidate, string? hwaccelOutputFormat, string? scaleFilterName)
         {
             Candidate = candidate;
             HwaccelOutputFormat = hwaccelOutputFormat;
             ScaleFilterName = scaleFilterName;
         }
- 
+
         /// <summary>
         /// The -hwaccel/-hwaccel_output_format args to insert before -i, or an
         /// empty list for software decode (Candidate == "software", or any
@@ -59,7 +59,7 @@ namespace EditSharp.Video
             {
                 if (ReferenceEquals(this, Software))
                     return new List<string>();
- 
+
                 var args = new List<string> { "-hwaccel", Candidate };
                 if (HwaccelOutputFormat != null)
                 {
@@ -69,7 +69,7 @@ namespace EditSharp.Video
                 return args;
             }
         }
- 
+
         /// <summary>
         /// The full -vf filter graph string for this plan at the given fps/
         /// target size. GPU-scale plans scale on the GPU then hwdownload the
@@ -124,4 +124,3 @@ namespace EditSharp.Video
         }
     }
 }
- 

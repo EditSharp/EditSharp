@@ -1,6 +1,6 @@
 using System;
 using SkiaSharp;
- 
+
 namespace EditSharp.Compositing.Generators
 {
     /// <summary>
@@ -105,7 +105,7 @@ namespace EditSharp.Compositing.Generators
     {
         private const double DetailCellsPerCanvas = 1000.0;
         private const double SeetheCellsPerSecond = 10.0;
- 
+
         private const string ShaderSource = """
             uniform float4 u0; // resolution.x, resolution.y, xscale, yscale
             uniform float4 u1; // tscale, time, seedOffset.x, seedOffset.y
@@ -193,9 +193,9 @@ namespace EditSharp.Compositing.Generators
                 return half4(v, v, v, 1.0);
             }
             """;
- 
+
         private static readonly SKRuntimeEffect Effect = CreateEffect();
- 
+
         private static SKRuntimeEffect CreateEffect()
         {
             SKRuntimeEffect? effect = SKRuntimeEffect.CreateShader(ShaderSource, out string errors);
@@ -203,7 +203,7 @@ namespace EditSharp.Compositing.Generators
                 throw new InvalidOperationException($"The noise shader failed to compile: {errors}");
             return effect;
         }
- 
+
         /// <summary>
         /// Draws the noise field for `seconds` of content time over a
         /// width x height canvas. `detail` sets the cell size relative to the
@@ -234,4 +234,3 @@ namespace EditSharp.Compositing.Generators
         }
     }
 }
- 

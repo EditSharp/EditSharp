@@ -3,7 +3,7 @@ using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Nodes.Effects
 {
     /// <summary>
@@ -27,17 +27,16 @@ namespace EditSharp.Components.Nodes.Effects
         ClipTransform _transform = new();
         [Editable("Transform")]
         public ClipTransform Transform { get => _transform; set => Transaction.Set(this, ref _transform, value, static (o, v) => o._transform = v); }
- 
+
         private static readonly NodePort[] StaticPorts =
         [
             new("Image", PortType.Image, PortDirection.Input),
             new("Image", PortType.Image, PortDirection.Output),
         ];
- 
+
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
         public override IEnumerable<IAnimatable> Animatables => Transform.Animatables;
 
         public override Node Duplicate() => Transaction.Suppressed(() => new TransformNode { Enabled = Enabled, Transform = Transform.Duplicate() });
     }
 }
- 

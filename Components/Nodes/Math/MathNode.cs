@@ -2,11 +2,11 @@ using System.Collections.Generic;
 using EditSharp.Components.Nodes;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Nodes.Math
 {
     public enum MathOperation { Add, Subtract, Multiply, Divide, Min, Max }
- 
+
     /// <summary>
     /// The "base node type for math functions that are universally
     /// applicable" — combines two Value inputs with a plain arithmetic
@@ -30,16 +30,15 @@ namespace EditSharp.Components.Nodes.Math
         MathOperation _operation = MathOperation.Add;
         [Editable("Operation")]
         public MathOperation Operation { get => _operation; set => Transaction.Set(this, ref _operation, value, static (o, v) => o._operation = v); }
- 
+
         private static readonly NodePort[] StaticPorts =
         [
             new("A", PortType.Value, PortDirection.Input),
             new("B", PortType.Value, PortDirection.Input),
             new("Result", PortType.Value, PortDirection.Output),
         ];
- 
+
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
         public override Node Duplicate() => Transaction.Suppressed(() => new MathNode { Enabled = Enabled, Operation = Operation });
     }
 }
- 

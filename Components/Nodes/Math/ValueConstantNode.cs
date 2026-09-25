@@ -3,7 +3,7 @@ using EditSharp.Components;
 using EditSharp.Components.Nodes;
 using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Nodes.Math
 {
     /// <summary>
@@ -22,7 +22,7 @@ namespace EditSharp.Components.Nodes.Math
         Animatable<float> _value = new(0f);
         [Editable("Value")]
         public Animatable<float> Value { get => _value; set => Transaction.Set(this, ref _value, value, static (o, v) => o._value = v); }
- 
+
         private static readonly NodePort[] StaticPorts = [new("Value", PortType.Value, PortDirection.Output)];
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
         public override IEnumerable<IAnimatable> Animatables => [Value];
@@ -30,4 +30,3 @@ namespace EditSharp.Components.Nodes.Math
         public override Node Duplicate() => Transaction.Suppressed(() => new ValueConstantNode { Enabled = Enabled, Value = Value.Duplicate() });
     }
 }
- 

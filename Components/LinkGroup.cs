@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components.Channels;
-using EditSharp.Components.Clips;
+using EditSharp.Components.Clips;
 using EditSharp.History;
 
 namespace EditSharp.Components
@@ -257,7 +257,7 @@ namespace EditSharp.Components
             Timeline timeline, TimeSpan start, TimeSpan duration)
         {
             using var _ = Transaction.Suppress();
-            
+
             Guid groupId = Guid.NewGuid();
 
             VideoClip video = VideoClip.CreateTimelineEmbed(timeline, start, duration);

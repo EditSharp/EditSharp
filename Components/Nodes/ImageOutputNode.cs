@@ -1,5 +1,5 @@
 using System.Collections.Generic;
- 
+
 namespace EditSharp.Components.Nodes
 {
     /// <summary>Feeds the renderer. Mandatory, not removable — the one fixed anchor left in an Image-domain graph.</summary>
@@ -10,4 +10,3 @@ namespace EditSharp.Components.Nodes
         public override Node Duplicate() => new ImageOutputNode();
     }
 }
- 

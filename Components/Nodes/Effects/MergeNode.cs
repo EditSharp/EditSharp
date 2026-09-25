@@ -2,9 +2,9 @@ using System.Collections.Generic;
 using EditSharp.Components;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Nodes;
-using EditSharp.History;
+using EditSharp.History;
 using EditSharp.Editing;
- 
+
 namespace EditSharp.Components.Nodes.Effects
 {
     /// <summary>
@@ -27,12 +27,12 @@ namespace EditSharp.Components.Nodes.Effects
         Animatable<float> _mix = new(1f);
         [Editable("Mix", Min = 0, Max = 1, Step = 0.01)]
         public Animatable<float> Mix { get => _mix; set => Transaction.Set(this, ref _mix, value, static (o, v) => o._mix = v); } // 0 = pure A, 1 = pure B
- 
+
         private static readonly NodePort[] StaticPorts =
         [
             new("A", PortType.Image, PortDirection.Input),
             new("B", PortType.Image, PortDirection.Input),
- 
+
             //optional Value modulation input — when connected (typically to
             //a ValueConstantNode or a MathNode chain — see
             //EditSharp.Components.Nodes.Math), MULTIPLIES against Mix's own
@@ -40,12 +40,12 @@ namespace EditSharp.Components.Nodes.Effects
             //Mix's own curve and layers a procedurally-computed modulation
             //on top of it
             new("MixModulation", PortType.Value, PortDirection.Input, optional: true),
- 
+
             new("Result", PortType.Image, PortDirection.Output),
         ];
- 
+
         public override IReadOnlyList<NodePort> Ports => StaticPorts;
- 
+
         public override IEnumerable<IAnimatable> Animatables => [Mix];
 
         public override Node Duplicate() => Transaction.Suppressed(() => new MergeNode
@@ -56,4 +56,3 @@ namespace EditSharp.Components.Nodes.Effects
         });
     }
 }
- 

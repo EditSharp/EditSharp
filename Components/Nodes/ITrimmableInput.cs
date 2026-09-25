@@ -1,5 +1,5 @@
 using System;
- 
+
 namespace EditSharp.Components.Nodes
 {
     /// <summary>
@@ -22,7 +22,7 @@ namespace EditSharp.Components.Nodes
     {
         /// <summary>The node's own in-point. Setting this is what OnHeadInPointShift actually does, per node.</summary>
         TimeSpan InPoint { get; set; }
- 
+
         /// <summary>How far InPoint could move EARLIER (an extend) — TimeSpan.MaxValue if unconstrained.</summary>
         TimeSpan MaxHeadroom { get; }
 
@@ -30,4 +30,3 @@ namespace EditSharp.Components.Nodes
         TimeSpan? ContentLength { get; }
     }
 }
- 

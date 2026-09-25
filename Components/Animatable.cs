@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.History;
- 
+
 namespace EditSharp.Components
 {
     /// <summary>
@@ -72,25 +72,25 @@ namespace EditSharp.Components
         //used when there's no track, or fewer than 2 keyframes
         T _staticValue;
         public T StaticValue { get => _staticValue; set => Transaction.Set(this, ref _staticValue, value, static (o, v) => o._staticValue = v); }
- 
+
         //null = not animated
         KeyframeTrack<T>? _track;
         public KeyframeTrack<T>? Track { get => _track; private set => Transaction.Set(this, ref _track, value, static (o, v) => o._track = v); }
- 
+
         public Animatable(T staticValue)
         {
             _staticValue = staticValue;
         }
- 
+
         public static implicit operator Animatable<T>(T value) => new(value);
- 
+
         /// <summary>
         /// Lazily creates the backing track on first use — a caller adding
         /// its first keyframe shouldn't have to separately new up a
         /// KeyframeTrack&lt;T&gt; first.
         /// </summary>
         public KeyframeTrack<T> GetOrCreateTrack() => Track ??= new KeyframeTrack<T>();
- 
+
         /// <summary>
         /// Installs an already-constructed track — the escape hatch a
         /// KeyframeTrack&lt;T&gt; SUBCLASS (e.g. PositionTrack, which needs
@@ -98,7 +98,7 @@ namespace EditSharp.Components
         /// build) needs to become this property's backing track.
         /// </summary>
         public void AttachTrack(KeyframeTrack<T> track) => Track = track ?? throw new ArgumentNullException(nameof(track));
- 
+
         /// <summary>
         /// Clears the track entirely, falling back to StaticValue — the
         /// schema doc leaves it open whether an empty track persists or is
@@ -106,17 +106,17 @@ namespace EditSharp.Components
         /// caller that wants that.
         /// </summary>
         public void ClearTrack() => Track = null;
- 
+
         public T Evaluate(TimeSpan clipRelativeTime)
         {
             //fewer than 2 keyframes: StaticValue wins, per the schema doc —
             //this covers both "no Track at all" and "Track exists but has 0
             //or 1 keyframes," e.g. right after RemoveKeyframe empties it
             if (Track == null || Track.Keyframes.Count < 2) return StaticValue;
- 
+
             return Track.Evaluate(clipRelativeTime);
         }
- 
+
         public void ShiftKeyframes(TimeSpan amount) => Track?.Shift(amount);
 
         public Type ValueType => typeof(T);
@@ -160,4 +160,3 @@ namespace EditSharp.Components
         }
     }
 }
- 
