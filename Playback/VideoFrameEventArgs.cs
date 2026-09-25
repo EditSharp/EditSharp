@@ -2,27 +2,31 @@ using System;
 
 namespace EditSharp.Playback
 {
-    /// <summary>
-    /// One rendered output frame, raw RGBA8888 (OutputFormat), straight
-    /// alpha, no row padding — the exact same byte layout Renderer's
-    /// accumulator writes.
-    ///
-    /// Buffer OWNERSHIP: Buffer is rented from ArrayPool&lt;byte&gt;.Shared
-    /// and is only valid for the duration of the VideoFrame event handler.
-    /// It is returned to the pool immediately after the handler returns, so
-    /// a subscriber that needs the pixels past that point (uploading to a
-    /// GPU texture on another thread, queuing for display, etc.) MUST copy
-    /// out of Buffer[..Length] synchronously, before returning from the
-    /// handler.
-    /// </summary>
+    /// <summary>One rendered frame: RGBA8888 with straight alpha and no row padding.</summary>
+    /// <remarks><see cref="Buffer"/> is rented from <c>ArrayPool&lt;byte&gt;.Shared</c> and returned when the handler returns, so copy <c>Buffer[..Length]</c> before then to keep the pixels.</remarks>
     public sealed class VideoFrameEventArgs : EventArgs
     {
+        /// <summary>The pixels; valid only during the handler.</summary>
         public byte[] Buffer { get; }
+
+        /// <summary>How many bytes of <see cref="Buffer"/> hold pixels.</summary>
         public int Length { get; }
+
+        /// <summary>The frame's width in pixels.</summary>
         public int Width { get; }
+
+        /// <summary>The frame's height in pixels.</summary>
         public int Height { get; }
+
+        /// <summary>The frame's timeline time.</summary>
         public TimeSpan Position { get; }
 
+        /// <summary>Wraps one frame.</summary>
+        /// <param name="buffer">The pixels.</param>
+        /// <param name="length">How many bytes of <paramref name="buffer"/> hold pixels.</param>
+        /// <param name="width">The width in pixels.</param>
+        /// <param name="height">The height in pixels.</param>
+        /// <param name="position">The frame's timeline time.</param>
         public VideoFrameEventArgs(byte[] buffer, int length, int width, int height, TimeSpan position)
         {
             Buffer = buffer;

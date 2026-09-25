@@ -4,28 +4,8 @@ using System.Threading.Tasks;
 
 namespace EditSharp.Playback
 {
-    /// <summary>
-    /// Lets Pause()/Resume() halt the video and audio loops IN PLACE —
-    /// without cancelling them, so nothing they own (SourceDecoder
-    /// instances, the GpuContext/SurfacePool, PlaybackAudioEngine's
-    /// ffmpeg process) gets torn down the way Stop() tears it down. See
-    /// Playback's own remarks on why Pause and Stop are deliberately
-    /// different operations.
-    ///
-    /// Both loops check this at the top of every iteration — before
-    /// rendering the next frame / reading the next audio chunk — so
-    /// nothing new is PRODUCED while paused, but everything already open
-    /// stays open. On the audio side specifically: not reading from the
-    /// ffmpeg process's stdout pipe while paused means the OS pipe buffer
-    /// fills and ffmpeg's own writes BLOCK — its decode pipeline
-    /// self-throttles to a stop with zero signaling needed from us, the
-    /// same backpressure SourceDecoder already relies on for ordinary
-    /// pacing.
-    ///
-    /// Unlike PlaybackStartGate (fires exactly once, permanently open
-    /// after), this one toggles — Pause()/Resume() can be called any
-    /// number of times across a session.
-    /// </summary>
+    /// <summary>Holds the video and audio loops in place while paused, without tearing down what they have open.</summary>
+    /// <remarks>Both loops check it before producing each frame or block, so nothing new is produced while paused. It toggles as often as Pause and Resume are called.</remarks>
     internal sealed class PlaybackPauseGate
     {
         private readonly object _lock = new();
@@ -56,12 +36,7 @@ namespace EditSharp.Playback
             signal?.TrySetResult(true);
         }
 
-        /// <summary>
-        /// Returns immediately if not currently paused. If paused, waits
-        /// until Resume() is called — or the token is cancelled (Stop()
-        /// unblocks a paused loop this way, with no special-casing needed
-        /// on Stop()'s part).
-        /// </summary>
+        //returns at once unless paused; otherwise waits for Resume, or for `token` (which is how Stop unblocks it)
         public async Task WaitIfPausedAsync(CancellationToken token)
         {
             Task? waitTask;

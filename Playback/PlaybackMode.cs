@@ -2,15 +2,15 @@ using System;
 
 namespace EditSharp.Playback;
 
+/// <summary>What playback gives up when it can't keep up in real time.</summary>
 public enum PlaybackMode
 {
-    //ensure every frame is played
-    //delays audio to hit target
+    /// <summary>Every video frame is shown; when video falls behind, playback slows down and audio waits with it.</summary>
     EveryFrame,
-    //ensure target frame rate is hit
-    //skips audio/video to hit target
+
+    /// <summary>Video keeps real time by skipping frames that would be late, and audio skips blocks that would be late.</summary>
     FrameDropping,
-    //ensure frame rate matches the pace of audio
-    //delays/skips frames to hit target
+
+    /// <summary>Audio sets the pace; video shows the frame for audio's position, waiting or skipping to stay on it.</summary>
     SyncToAudio
 }
