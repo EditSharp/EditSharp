@@ -37,7 +37,7 @@ namespace EditSharp.Components.Nodes.Effects
         [Editable("Size", Frame = FrameMeasure.Frame)]
         public Animatable<Vector2> Size { get => _size; set => Transaction.Set(this, ref _size, value, static (o, v) => o._size = v); }
         Animatable<float> _rotation = new(0f);
-        /// <summary>The shape's rotation about its centre, in degrees anticlockwise.</summary>
+        /// <summary>The shape's rotation about its centre, in degrees clockwise.</summary>
         [Editable("Rotation", Editor = PropertyEditor.Angle)]
         public Animatable<float> Rotation { get => _rotation; set => Transaction.Set(this, ref _rotation, value, static (o, v) => o._rotation = v); }
         Animatable<float> _feather = new(0f);

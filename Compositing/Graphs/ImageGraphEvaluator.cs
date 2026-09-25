@@ -487,7 +487,8 @@ namespace EditSharp.Compositing.Graphs
 
                 canvas.Save();
                 canvas.Translate(centerX, centerY);
-                canvas.RotateDegrees(-rotation);
+                //clockwise, like ClipTransform.Rotation
+                canvas.RotateDegrees(rotation);
 
                 using (var paint = new SKPaint { Color = SKColors.White, IsAntialias = true })
                 {

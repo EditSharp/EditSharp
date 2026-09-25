@@ -163,6 +163,7 @@ namespace EditSharp.Components.Channels
         internal void Move(Clip clip, TimeSpan newStart, Channel? targetChannel, bool ripple)
         {
             Channel destination = targetChannel ?? this;
+            destination.ValidateType(clip);
 
             //a clip moving to another timeline takes its embeds with it; check for a cycle before anything moves
             Timeline? from = Timeline, to = destination.Timeline;
