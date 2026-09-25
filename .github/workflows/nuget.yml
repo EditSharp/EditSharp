@@ -1,0 +1,36 @@
+# Packs EditSharp and pushes it to nuget.org.
+# A tag like v0.2.0 publishes 0.2.0; a push to main publishes <Version>-ci.<run number> as a prerelease.
+name: NuGet
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}".TrimStart('v')
+          } else {
+            $base = ([xml](Get-Content EditSharp.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+            $version = "$base-ci.${{ github.run_number }}"
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - run: dotnet pack EditSharp.csproj -c Release -p:Version=${{ steps.version.outputs.value }} -o out
+      - run: dotnet nuget push "out/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
