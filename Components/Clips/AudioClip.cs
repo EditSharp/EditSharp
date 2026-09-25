@@ -8,20 +8,12 @@ using EditSharp.Components.Sources.Audio;
 
 namespace EditSharp.Components.Clips
 {
-    /// <summary>
-    /// The only concrete audible Clip type — mirrors VideoClip exactly, one
-    /// domain over. What used to be AudioClip's own flat Source property
-    /// and the distinct TimelineAudioClip Clip subtype are now InputNode
-    /// types wired into this class's single Audio-domain Graph — see
-    /// the static factory methods below and
-    /// EditSharp.Components.Nodes.Sources. Also new
-    /// in this rewrite: CreateTone, wrapping the brand-new
-    /// ToneGeneratorInputNode (there was no synthesized-tone clip type at
-    /// all before this).
-    /// </summary>
+    /// <summary>A clip that plays sound: its graph's inputs, through its effects.</summary>
+    /// <remarks>It goes on an <see cref="Channels.AudioChannel"/>. The factories build the usual graph: the source, then a gain.</remarks>
     public sealed class AudioClip : Clip
     {
         private readonly Graph _graph;
+        /// <inheritdoc/>
         public override Graph Graph => _graph;
 
         PitchPreservation _preservePitch = PitchPreservation.WSOLA;
@@ -35,17 +27,43 @@ namespace EditSharp.Components.Clips
             graph.Clip = this;
         }
 
+        /// <summary>A clip playing a source.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="source">What the clip plays.</param>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <returns>The clip.</returns>
         public static AudioClip CreateFromSource(AudioSource source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(new AudioSourceNode { Source = source })) { Start = start, Duration = duration });
 
+        /// <summary>A clip playing a synthesized tone; see <see cref="ToneAudioSource"/>.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <param name="waveform">The shape of the wave.</param>
+        /// <param name="frequencyHz">The pitch, in hertz.</param>
+        /// <param name="amplitude">The volume, from 0 (silent) to 1 (full scale).</param>
+        /// <returns>The clip.</returns>
         public static AudioClip CreateTone(
             TimeSpan start, TimeSpan duration, Waveform waveform = Waveform.Sine,
             float frequencyHz = 440f, float amplitude = 1f) =>
             CreateFromSource(Transaction.Suppressed(() => new ToneAudioSource { Waveform = waveform, Frequency = new(frequencyHz), Amplitude = new(amplitude) }), start, duration);
 
+        /// <summary>A clip playing another timeline's mixed audio.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="timeline">The timeline to play.</param>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <returns>The clip.</returns>
         public static AudioClip CreateTimelineEmbed(Timeline timeline, TimeSpan start, TimeSpan duration) =>
             CreateFromSource(Transaction.Suppressed(() => new TimelineAudioSource { Timeline = timeline }), start, duration);
 
-        /// <summary>Escape hatch for a fully custom graph — see VideoClip.CreateCustom's own remarks.</summary>
+        /// <summary>A clip with a graph you've built, such as one with several inputs mixed together.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="graph">The clip's graph; start one with <see cref="Graph.CreateEmptyAudioGraph"/>.</param>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <returns>The clip.</returns>
+        /// <exception cref="ArgumentException"><paramref name="graph"/> isn't an audio graph.</exception>
         public static AudioClip CreateCustom(Graph graph, TimeSpan start, TimeSpan duration)
         {
             if (graph.Domain != NodeDomain.Audio)
@@ -54,6 +72,7 @@ namespace EditSharp.Components.Clips
             return Transaction.Suppressed(() => new AudioClip(graph) { Start = start, Duration = duration });
         }
 
+        /// <inheritdoc/>
         public override AudioClip Duplicate() => Transaction.Suppressed(() => new AudioClip(Graph.Duplicate()) { Name = Name, Start = Start, Duration = Duration, Speed = Speed, PreservePitch = PreservePitch });
     }
 }

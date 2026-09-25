@@ -7,23 +7,12 @@ using EditSharp.Components.Sources.Video;
 
 namespace EditSharp.Components.Clips
 {
-    /// <summary>
-    /// The only concrete visual Clip type — see Clip's own remarks on the
-    /// "clips are graphs" rewrite. What used to be TextClip/GeneratorClip/
-    /// NoiseClip/TimelineVideoClip (each a distinct Clip subtype) and
-    /// VideoClip's own flat Source property are now all just different
-    /// InputNode types wired into this class's single Image-domain
-    /// Graph — see the static factory methods below and
-    /// EditSharp.Components.Nodes.Sources.
-    ///
-    /// Sealed and otherwise data-less beyond Start/Duration/LinkGroupId
-    /// (inherited from Clip) and Graph — everything else a visual clip
-    /// used to carry directly (Modulate, Transform) now lives on nodes
-    /// INSIDE the graph (TintNode, TransformNode), not on this class.
-    /// </summary>
+    /// <summary>A clip that shows an image: its graph's inputs, through its effects.</summary>
+    /// <remarks>It goes on a <see cref="Channels.VideoChannel"/>. The factories build the usual graph: the source, then a tint, then a transform.</remarks>
     public sealed class VideoClip : Clip
     {
         private readonly Graph _graph;
+        /// <inheritdoc/>
         public override Graph Graph => _graph;
 
         private VideoClip(Graph graph)
@@ -32,15 +21,25 @@ namespace EditSharp.Components.Clips
             graph.Clip = this;
         }
 
-        // ---------------------------------------------------------------
-        // Convenience factories — one per InputNode kind, each producing
-        // the "normal/default" graph shape: that InputNode -> TintNode ->
-        // TransformNode -> Output. Equivalent to what used to be
-        // constructing a distinct Clip subtype.
-        // ---------------------------------------------------------------
-
+        /// <summary>A clip showing a source.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="source">What the clip shows.</param>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <returns>The clip.</returns>
         public static VideoClip CreateFromSource(VideoSource source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new VideoSourceNode { Source = source })) { Start = start, Duration = duration });
 
+        /// <summary>A clip showing text; see <see cref="TextVideoSource"/>.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="content">The text.</param>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <param name="font">The name of an installed font family.</param>
+        /// <param name="weight">How heavy the letters are, from 100 (thin) to 900 (black).</param>
+        /// <param name="italic">Whether to use the font's italic.</param>
+        /// <param name="align">How lines line up across the text box.</param>
+        /// <param name="size">The font's em size, as a fraction of the frame's width.</param>
+        /// <returns>The clip.</returns>
         public static VideoClip CreateText(
             string content, TimeSpan start, TimeSpan duration,
             string font = "Comic Sans MS", int weight = 400, bool italic = false,
@@ -54,9 +53,23 @@ namespace EditSharp.Components.Clips
                 Size = size,
             }, start, duration);
 
+        /// <summary>A clip filling the frame with one colour.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="color">The colour.</param>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <returns>The clip.</returns>
         public static VideoClip CreateColorGenerator(SKColor color, TimeSpan start, TimeSpan duration) =>
             CreateFromSource(Transaction.Suppressed(() => new ColorVideoSource { Color = new(color) }), start, duration);
 
+        /// <summary>A clip filling the frame with changing noise; see <see cref="NoiseVideoSource"/>.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <param name="seed">Picks the pattern; null picks one at random.</param>
+        /// <param name="detail">How fine the noise is, from 0 to 1.</param>
+        /// <param name="seetheRate">How fast it changes, from 0 (still) to 1.</param>
+        /// <returns>The clip.</returns>
         public static VideoClip CreateNoise(TimeSpan start, TimeSpan duration, int? seed = null, float detail = 0.03f, float seetheRate = 0.03f) =>
             CreateFromSource(Transaction.Suppressed(() => new NoiseVideoSource
             {
@@ -65,17 +78,22 @@ namespace EditSharp.Components.Clips
                 SeetheRate = seetheRate,
             }), start, duration);
 
+        /// <summary>A clip showing another timeline's picture.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="timeline">The timeline to show.</param>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <returns>The clip.</returns>
         public static VideoClip CreateTimelineEmbed(Timeline timeline, TimeSpan start, TimeSpan duration) =>
             CreateFromSource(Transaction.Suppressed(() => new TimelineVideoSource { Timeline = timeline }), start, duration);
 
-        /// <summary>
-        /// Escape hatch for a fully custom graph — multiple InputNodes,
-        /// branches merged through MergeNode, extra effect nodes, whatever
-        /// an author wants. `graph` must already be a valid Image-domain
-        /// Graph (see Graph.CreateEmptyVideoGraph to start one
-        /// from scratch, or build on a Create* factory's own graph after
-        /// construction via `clip.Graph.AddNode(...)`/`Connect(...)`).
-        /// </summary>
+        /// <summary>A clip with a graph you've built, such as one with several inputs merged together.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="graph">The clip's graph; start one with <see cref="Graph.CreateEmptyVideoGraph"/>.</param>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <returns>The clip.</returns>
+        /// <exception cref="ArgumentException"><paramref name="graph"/> isn't a video graph.</exception>
         public static VideoClip CreateCustom(Graph graph, TimeSpan start, TimeSpan duration)
         {
             if (graph.Domain != NodeDomain.Image)
@@ -84,6 +102,7 @@ namespace EditSharp.Components.Clips
             return Transaction.Suppressed(() => new VideoClip(graph) { Start = start, Duration = duration });
         }
 
+        /// <inheritdoc/>
         public override VideoClip Duplicate() => Transaction.Suppressed(() => new VideoClip(Graph.Duplicate()) { Name = Name, Start = Start, Duration = Duration, Speed = Speed });
     }
 }
