@@ -5,58 +5,38 @@ using EditSharp.Video;
 
 namespace EditSharp.Rendering;
 
+/// <summary>How a timeline is rendered: output size, frame rate, codecs and the GPU to use.</summary>
 public struct RenderSettings
-    {
-        //output resolution of rendered video
-        public Vector2 Resolution { get; set; } = new(1920, 1080);
+{
+    /// <summary>The output size in pixels.</summary>
+    public Vector2 Resolution { get; set; } = new(1920, 1080);
 
-        //output framerate of rendered video
-        public int Framerate { get; set; } = 30;
+    /// <summary>Output frames per second.</summary>
+    public int Framerate { get; set; } = 30;
 
-        //what encoding to render video with
-        public VideoCodec VideoCodec { get; set; } = VideoCodec.H265;
+    /// <summary>The video codec to encode with.</summary>
+    public VideoCodec VideoCodec { get; set; } = VideoCodec.H265;
 
-        //what encoding to render audio with
-        public AudioCodec AudioCodec { get; set; } = AudioCodec.AAC;
+    /// <summary>The audio codec to encode with.</summary>
+    public AudioCodec AudioCodec { get; set; } = AudioCodec.AAC;
 
-         //whether to use gpu acceleration and what kind
-        public HardwareAccelerator HardwareAccelerator { get; set; } = HardwareAccelerator.GPU;
+    /// <summary>Whether compositing and encoding use the GPU, and which kind.</summary>
+    public HardwareAccelerator HardwareAccelerator { get; set; } = HardwareAccelerator.GPU;
 
-        /// <summary>
-        /// Which GPU the Skia compositor should run on, as a DXGI adapter
-        /// index. NULL (the default) means AUTO: pick the first non-software
-        /// adapter, which is what every prior version did implicitly.
-        ///
-        /// This exists because "which GPU is this actually running on" turned
-        /// out to be a load-bearing question rather than an implementation
-        /// detail. On a hybrid machine the first non-software adapter may be
-        /// the integrated GPU or the discrete one depending on enumeration
-        /// order, system power settings, and BIOS mode — so the same build
-        /// can silently execute the whole compositor on a different vendor's
-        /// driver and shader compiler from one boot to the next. Making the
-        /// choice explicit turns that into a setting instead of a surprise,
-        /// and gives a direct way to A/B two GPUs with one binary at one
-        /// moment when something renders differently than expected.
-        ///
-        /// Adapter indices are logged at the start of every GPU session (see
-        /// GpuContext), so the valid values for a given machine are visible
-        /// without guessing. An index that doesn't exist, or names a software
-        /// adapter, falls back to software rendering with a logged warning
-        /// rather than failing the render.
-        ///
-        /// Ignored entirely when HardwareAccelerator is None.
-        /// </summary>
-        public int? GpuAdapterIndex { get; set; } = null;
+    /// <summary>The DXGI adapter the compositor runs on; null picks the first hardware adapter.</summary>
+    /// <remarks>
+    /// On a machine with integrated and discrete GPUs, which one comes first can
+    /// change between boots, so set this to pin one. Adapter indices are logged
+    /// at the start of every GPU session. An index that doesn't exist, or names a
+    /// software adapter, falls back to software rendering with a warning. Ignored
+    /// when <see cref="HardwareAccelerator"/> is None.
+    /// </remarks>
+    public int? GpuAdapterIndex { get; set; } = null;
 
-        /// <summary>
-        /// Proxies or originals, for sources that have proxies. Defaults to
-        /// SourceOnly so an export is full quality unless asked otherwise;
-        /// previews (Playback, thumbnails) opt into ProxiesOnly themselves.
-        /// Read when a session prepares its sources, so a change applies from
-        /// the next session.
-        /// </summary>
-        public SourceMode SourceMode { get; set; } = SourceMode.SourceOnly;
+    /// <summary>Whether sources with proxies read the proxies or the originals.</summary>
+    /// <remarks>Defaults to SourceOnly, so an export is full quality; previews opt into ProxiesOnly. Read when a session prepares its sources, so a change applies from the next session.</remarks>
+    public SourceMode SourceMode { get; set; } = SourceMode.SourceOnly;
 
-        public RenderSettings() { }
-
-    }
+    /// <summary>Settings with every default: 1920x1080 at 30 fps, H.265 and AAC, on the GPU, from original sources.</summary>
+    public RenderSettings() { }
+}

@@ -26,111 +26,28 @@ using EditSharp.Video;
 
 namespace EditSharp.Rendering
 {
-    /// <summary>
-    /// Entry point for the render strategy — wires the Skia compositor into
-    /// an actual end-to-end render.
-    ///
-    /// Shape of a render:
-    ///   1. Probe every Video-type VideoSourceNode's native size (MediaProbe)
-    ///      across the whole timeline — everything about a video clip's media
-    ///      inputs that's constant across its whole life, done once up front
-    ///      (ContentPreparation). TextInputNode/ColorGeneratorInputNode/
-    ///      NoiseInputNode/TimelineVideoInputNode need no such up-front prep
-    ///      any more — see ContentPreparation's own remarks.
-    ///   2. Mix the timeline's audio once (AudioMixer.ComposeAsync) and spawn
-    ///      the SINGLE ffmpeg process that will do the real mux + encode for
-    ///      the whole render, with its stdin left open as a raw-video pipe.
-    ///   3. Render every output frame SEQUENTIALLY directly against an
-    ///      in-process SKCanvas (FrameCompositor), writing each frame's raw
-    ///      RGBA8888 bytes straight into that ffmpeg process's stdin as it's
-    ///      produced — see STREAMING REWRITE below. A Video-type
-    ///      VideoSourceNode's SourceDecoder is opened on its clip's first
-    ///      visible frame and disposed once that clip's visible window ends
-    ///      (ClipContentSource).
-    ///   4. Close stdin once every frame has been written (ffmpeg's rawvideo
-    ///      demuxer treats that exactly like reaching EOF on a file) and wait
-    ///      for ffmpeg to finish encoding.
-    ///
-    /// STREAMING REWRITE — WHY THIS EXISTS: this used to append every frame's
-    /// raw, uncompressed RGBA8888 bytes to a single growing "accumulator"
-    /// temp file on disk, and only handed that file to ffmpeg for mux/encode
-    /// once every frame had already been rendered. At 1920x1080 that's
-    /// 8,294,400 bytes/frame (~7.9MiB); an 18-minute 30fps render is 32,400
-    /// frames, i.e. roughly 268GB of raw bytes hitting disk before a single
-    /// byte of that data was ever compressed — reported as "hundreds of
-    /// gigabytes of writes" and confirmed to match this arithmetic almost
-    /// exactly, not a leak or a runaway loop. Frame rendering now writes
-    /// directly into the SAME ffmpeg process's stdin pipe that does the real
-    /// mux/encode (mirroring how SourceDecoder already pipes raw frames IN
-    /// from an ffmpeg decode process — this is the same pattern on the encode
-    /// side), so raw video never touches disk at all: ffmpeg compresses each
-    /// frame into the target codec as it arrives instead of after the whole
-    /// timeline has already been written out losslessly. Disk usage for the
-    /// video side of a render is now effectively just the size of the final
-    /// encoded output file.
-    ///
-    /// AUDIO STILL GOES THROUGH A SMALL TEMP FILE, DELIBERATELY: the mixed
-    /// master PCM (see AudioMixer.ComposeAsync) is orders of magnitude
-    /// smaller than raw video (48kHz stereo f32 is 384,000 bytes/sec, so an
-    /// 18-minute timeline is ~414MB, not hundreds of gigabytes) and ffmpeg
-    /// needs it as a real, complete, seekable input at process-start time —
-    /// unlike the video side, it isn't produced incrementally by anything
-    /// this class does. A second OS pipe/named-pipe could avoid even that,
-    /// but isn't pursued here: it would need real cross-platform machinery
-    /// (named pipes on Windows, a FIFO on Unix) for a temp file that was
-    /// never the actual disk-usage problem.
-    ///
-    /// ONE CONSEQUENCE OF STREAMING WORTH FLAGGING: because AudioMixer.
-    /// ComposeAsync's result has to be written to that temp file and handed
-    /// to ffmpeg as an -i argument BEFORE ffmpeg can be spawned — and frame
-    /// rendering can't start streaming into ffmpeg's stdin until ffmpeg
-    /// exists — audio composition is now awaited before frame rendering
-    /// begins, rather than run concurrently with it the way this used to
-    /// work. It still overlaps content preparation and GPU/decoder setup
-    /// above it, which is normally the larger win of the two; audio mixing
-    /// itself is a one-shot in-memory computation, not a per-frame cost, so
-    /// this is expected to be a minor, not a proportional, regression versus
-    /// however long the frame-by-frame render itself takes.
-    ///
-    /// "CLIPS ARE GRAPHS" REWRITE: ContentPreparation's
-    /// nativeSizes/decodePlans/decodeSourcePaths dictionaries are now keyed
-    /// by InputNode Id (Guid), not by Clip — a VideoClip's graph can contain
-    /// more than one VideoSourceNode. staticImagePaths and the tempFiles bag
-    /// PrepareContentAsync used to take are both gone from that call — text
-    /// rasterization now happens lazily inside ClipContentSource itself,
-    /// which owns cleaning up its own temp files on Dispose (this file's own
-    /// tempFiles bag is now used only for the render's OWN raw audio PCM temp
-    /// file — the raw video accumulator described above is gone entirely,
-    /// see the STREAMING REWRITE remarks). FrameStateResolver.Resolve no
-    /// longer takes a nativeSizes parameter at all — see its own remarks.
-    ///
-    /// REWRITE ("channels split by kind"): the SurfacePool seed count below
-    /// now uses timeline.VideoChannels.Count specifically (only a
-    /// VideoChannel's clips ever need a GPU-backed canvas surface — see
-    /// SurfacePool's own remarks on this being a warm-start heuristic, not
-    /// a hard cap) instead of the old mixed timeline.Channels.Count. Validate's
-    /// FadeToColorTransition check below also now walks timeline.VideoChannels
-    /// specifically — that check is fundamentally about VIDEO channel
-    /// stacking (an opaque transition blacking out whatever composites
-    /// beneath it), which AudioChannels were never actually part of; walking
-    /// VideoChannels directly says what the check means instead of relying on
-    /// AudioChannel transitions happening to never trip it.
-    /// </summary>
+    /// <summary>Renders a timeline to a video file.</summary>
+    /// <remarks>
+    /// One ffmpeg process encodes the whole render. Frames are composited in
+    /// order on the GPU and written straight into ffmpeg's stdin as raw RGBA;
+    /// audio is rendered by the streaming audio engine at the same time and
+    /// written into a named pipe ffmpeg reads as its second input. Neither ever
+    /// touches disk before it's encoded. Sources are read ahead of the frame
+    /// being composited, and each clip's decoder is closed once the clip has
+    /// passed.
+    /// </remarks>
     public static class Renderer
     {
-        //Standard, plenty for any of AudioCodec's targets (AAC/MP3/FLAC all
-        //happily accept 48kHz stereo) — matches PlaybackAudioEngine's own
-        //SampleRate/ChannelCount constants, so a render and a live preview of
-        //the same timeline are mixed identically.
+        //48 kHz stereo, the same format live playback mixes in
         private const int AudioSampleRate = 48000;
         private const int AudioChannelCount = 2;
 
-        /// <summary>
-        /// Renders `blueprint` to its output file. A source that can't provide
-        /// a frame doesn't abort the render: it's drawn as a labeled
-        /// placeholder, and the returned report says which sources failed,
-        /// why, and where on the timeline.
-        /// </summary>
+        /// <summary>Renders <paramref name="blueprint"/> to its output file.</summary>
+        /// <remarks>A source that can't provide content doesn't stop the render: it's drawn as a labelled placeholder (or plays as silence), and the report says which sources failed, why, and where.</remarks>
+        /// <param name="blueprint">What to render, how, and where.</param>
+        /// <returns>The sources that failed, if any.</returns>
+        /// <exception cref="ArgumentException">The blueprint is invalid: an empty timeline, a non-positive size or frame rate, a negative GPU index, no output path, or a fade-to-colour transition above the bottom channel.</exception>
+        /// <exception cref="InvalidOperationException">ffmpeg failed, or streaming the audio failed.</exception>
         public static async Task<RenderReport> RenderAsync(Blueprint blueprint)
         {
             Validate(blueprint);
@@ -185,8 +102,7 @@ namespace EditSharp.Rendering
 
             EditSharpConfig.Logger.Log(
                 $"Rendering {totalFrames} frame(s) at {width}x{height}@{fps}fps " +
-                "(sequential, in-process Skia compositor, streamed directly into ffmpeg — " +
-                "no raw video temp file).");
+                "(sequential, in-process Skia compositor, streamed straight into ffmpeg).");
 
             var renderSw = Stopwatch.StartNew();
             await RenderAndEncodeAsync(
@@ -197,15 +113,7 @@ namespace EditSharp.Rendering
             return report.Build();
         }
 
-        /// <summary>
-        /// Spawns the render's single ffmpeg mux/encode process up front, with
-        /// its stdin left open as a raw-video pipe (`-i pipe:0`), then renders
-        /// every output frame directly into that pipe as it's composited —
-        /// see this class's STREAMING REWRITE remarks for why. ffmpeg
-        /// compresses each frame into the target codec as it arrives rather
-        /// than waiting for the whole timeline to be written out losslessly
-        /// first, so raw video never touches disk.
-        /// </summary>
+        //starts the one ffmpeg process with stdin open for raw frames (and a named pipe for audio), then feeds both
         private static async Task RenderAndEncodeAsync(
             Timeline timeline, int fps, int width, int height,
             ClipContentSource contentSource,
@@ -232,12 +140,7 @@ namespace EditSharp.Rendering
                 "-pix_fmt", OutputFormat.FfmpegPixelFormat,
                 "-s", $"{width}x{height}",
                 "-r", fps.ToString(CultureInfo.InvariantCulture),
-                //STREAMED, NOT A TEMP FILE — this process's own stdin. Frame
-                //rendering below writes directly into this pipe as each frame
-                //is composited; ffmpeg's rawvideo demuxer just reads
-                //sequentially off it exactly like it would a file, and
-                //closing the pipe (below) is what tells it input has ended,
-                //the same way reaching EOF on a file would.
+                //frames arrive on stdin; closing it ends the input like EOF on a file
                 "-i", "pipe:0",
             ]);
 
@@ -282,7 +185,7 @@ namespace EditSharp.Rendering
                 args.Add("yuv420p");
             }
 
-            args.Add(blueprint.OutputDirectory);
+            args.Add(blueprint.OutputPath);
 
             var psi = new ProcessStartInfo
             {
@@ -338,11 +241,7 @@ namespace EditSharp.Rendering
                 throw new InvalidOperationException("Streaming the render's audio failed.", audioError);
         }
 
-        /// <summary>
-        /// The whole timeline's audio, rendered block by block through the
-        /// streaming engine (sources are waited for; failures are silence and
-        /// go to the report) and written to ffmpeg's audio pipe as f32le.
-        /// </summary>
+        //the whole timeline's audio, block by block, as f32le into ffmpeg's audio pipe; sources are waited for and failures go to the report
         private static async Task StreamAudioAsync(
             Timeline timeline, NamedPipeServerStream pipe, RenderReportBuilder report, CancellationToken ct)
         {
@@ -416,10 +315,10 @@ namespace EditSharp.Rendering
                 throw new ArgumentException("Blueprint.Timeline contains no clips on any channel.");
 
             if ((int)blueprint.RenderSettings.Resolution.X <= 0 || (int)blueprint.RenderSettings.Resolution.Y <= 0)
-                throw new ArgumentException("Blueprint.Resolution must have positive width and height.");
+                throw new ArgumentException("Blueprint.RenderSettings.Resolution must have positive width and height.");
 
             if (blueprint.RenderSettings.Framerate <= 0)
-                throw new ArgumentException("Blueprint.Framerate must be positive.");
+                throw new ArgumentException("Blueprint.RenderSettings.Framerate must be positive.");
 
             if (blueprint.RenderSettings.GpuAdapterIndex is < 0)
                 throw new ArgumentException(
@@ -427,18 +326,11 @@ namespace EditSharp.Rendering
                     "DXGI adapter index. Valid indices for this machine are listed in the log at the " +
                     "start of every GPU session.");
 
-            if (string.IsNullOrWhiteSpace(blueprint.OutputDirectory))
-                throw new ArgumentException("Blueprint.OutputDirectory must be a full output file path.");
+            if (string.IsNullOrWhiteSpace(blueprint.OutputPath))
+                throw new ArgumentException("Blueprint.OutputPath must be a full output file path.");
 
-            //A transition that does not preserve alpha punches an opaque
-            //rectangle through everything beneath it for the length of the
-            //transition. FadeToColorTransition is the only kind that's
-            //alpha-unsafe by construction (it deliberately fills the whole
-            //canvas with a colour partway through) — a direct type check,
-            //reasoned from construction rather than re-measured. Walks
-            //VideoChannels specifically (not the mixed Channels view) — this
-            //is a video-compositing concern, about what draws on top of what;
-            //see this class's own remarks.
+            //a fade to colour fills the whole canvas partway through, so above the
+            //bottom video channel it would black out everything beneath it
             foreach (Channel channel in blueprint.Timeline.VideoChannels.Skip(1))
             {
                 foreach (Transition transition in channel.Transitions)
