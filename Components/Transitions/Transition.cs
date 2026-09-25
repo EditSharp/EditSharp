@@ -5,35 +5,25 @@ using EditSharp.Editing;
 
 namespace EditSharp.Components.Transitions
 {
-    /// <summary>
-    /// One channel-level transition between two adjacent clips. Abstract —
-    /// the CLASS is the type, no separate TransitionType enum, matching
-    /// Effect/EffectNode's own "the class is the type" convention elsewhere
-    /// in this schema.
-    ///
-    /// NEW in this rewrite: carries its own From/To directly (previously a
-    /// Channel held a separate (Clip, Transition) tuple list) — see the
-    /// schema doc's Channel section. This is what lets Channel.Transitions
-    /// simply be a List&lt;Transition&gt;.
-    /// </summary>
+    /// <summary>A change from one clip to the next on a channel, over the time the two overlap.</summary>
+    /// <remarks>Attach one with <see cref="Channels.Channel.AddTransition"/>. It's removed when an edit leaves its clips no longer overlapping by its duration.</remarks>
     public abstract class Transition
     {
         Clip _from = null!;
+        /// <summary>The clip the transition leaves; set by <see cref="Channels.Channel.AddTransition"/>.</summary>
         public Clip From { get => _from; internal set => Transaction.Set(this, ref _from, value, static (o, v) => o._from = v); }
         Clip _to = null!;
+        /// <summary>The clip the transition arrives at; set by <see cref="Channels.Channel.AddTransition"/>.</summary>
         public Clip To { get => _to; internal set => Transaction.Set(this, ref _to, value, static (o, v) => o._to = v); }
 
-        //the transition's length — see Channel's overlap invariant for the
-        //carve-out this creates and how it's actually achieved (extending
-        //into each clip's own trim-handle material, not destructive trimming)
         TimeSpan _duration;
+        /// <summary>How long the transition lasts: the time its two clips overlap.</summary>
         [Editable("Duration")]
         public TimeSpan Duration { get => _duration; set => Transaction.Set(this, ref _duration, value, static (o, v) => o._duration = v); }
 
-        //deep copy — clip fragments produced by a split must not share
-        //Transition instances. From/To are NOT copied here — see
-        //Channel.SplitClip, which drops any Transition referencing a clip
-        //that no longer exists rather than trying to re-point it
+        /// <summary>A copy with the same settings, not attached to any clips.</summary>
+        /// <remarks>Nothing is recorded in history.</remarks>
+        /// <returns>The copy.</returns>
         public abstract Transition Duplicate();
     }
 }
