@@ -338,15 +338,15 @@ namespace EditSharp.Components.Channels
         /// these two clips overlap — every OTHER neighbor on the channel
         /// still gets the normal overwrite treatment.
         /// </summary>
-        public Transition AddTransition(Transition transition)
+        public Transition AddTransition(Clip from, Clip to, Transition transition)
         {
-            Clip from = transition.From;
-            Clip to = transition.To;
-
             if (from.Channel != this || to.Channel != this)
                 throw new ArgumentException("Both clips must already be placed on this channel.");
             if (to.Start != from.End)
-                throw new ArgumentException("Transition.From and Transition.To must be adjacent (To.Start == From.End).");
+                throw new ArgumentException("The clips must be adjacent: `to` starts where `from` ends.");
+
+            transition.From = from;
+            transition.To = to;
 
             TimeSpan requestedHalf = TimeSpan.FromTicks(transition.Duration.Ticks / 2);
 

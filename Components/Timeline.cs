@@ -104,15 +104,23 @@ namespace EditSharp.Components
 
         public VideoChannel AddChannel(VideoChannel channel)
         {
+            foreach (Clip clip in channel.Clips) ValidateNoCycle(clip);
+
             Transaction.Apply(() => _videoChannels.Add(channel), () => _videoChannels.Remove(channel), "add channel");
             channel.Timeline = this;
+
+            foreach (Clip clip in channel.Clips) RegisterEmbeddedTimelines(clip);
             return channel;
         }
 
         public AudioChannel AddChannel(AudioChannel channel)
         {
+            foreach (Clip clip in channel.Clips) ValidateNoCycle(clip);
+
             Transaction.Apply(() => _audioChannels.Add(channel), () => _audioChannels.Remove(channel), "add channel");
             channel.Timeline = this;
+
+            foreach (Clip clip in channel.Clips) RegisterEmbeddedTimelines(clip);
             return channel;
         }
 
@@ -142,6 +150,7 @@ namespace EditSharp.Components
                     $"Unknown channel type {channel.GetType().Name}.", nameof(channel));
             }
 
+            foreach (Clip clip in channel.Clips) UnregisterEmbeddedTimelines(clip);
             channel.Timeline = null;
         }
 

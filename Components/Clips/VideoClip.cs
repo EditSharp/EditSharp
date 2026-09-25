@@ -84,6 +84,6 @@ namespace EditSharp.Components.Clips
             return Transaction.Suppressed(() => new VideoClip(graph) { Start = start, Duration = duration });
         }
 
-        public override VideoClip Duplicate() => Transaction.Suppressed(() => new VideoClip(Graph.Duplicate()) { Start = Start, Duration = Duration, Speed = Speed });
+        public override VideoClip Duplicate() => Transaction.Suppressed(() => new VideoClip(Graph.Duplicate()) { Name = Name, Start = Start, Duration = Duration, Speed = Speed });
     }
 }
