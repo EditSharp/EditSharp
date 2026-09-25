@@ -20,6 +20,7 @@ namespace EditSharp.Components.Nodes.Effects
 
     /// <summary>Combines two masks into one.</summary>
     /// <remarks>Inputs: A and B. Output: Result.</remarks>
+    [NodeKind("mask-combine", DisplayName = "Mask combine")]
     public sealed class MaskCombineNode : Node
     {
         MaskCombineMode _mode = MaskCombineMode.Add;

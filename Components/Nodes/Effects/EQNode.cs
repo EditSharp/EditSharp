@@ -37,6 +37,7 @@ namespace EditSharp.Components.Nodes.Effects
 
     /// <summary>An equalizer: peaking bands applied one after another.</summary>
     /// <remarks>Input: Audio. Output: Audio. With no bands it passes the audio through unchanged.</remarks>
+    [NodeKind("eq", DisplayName = "EQ")]
     public sealed class EQNode : Node
     {
         List<EQBand> _bands = [];

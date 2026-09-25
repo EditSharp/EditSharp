@@ -1,6 +1,7 @@
+using EditSharp.Components.Media;
+using EditSharp.Components;
 using System;
 using System.Numerics;
-using EditSharp.Components.Sources;
 using EditSharp.Video;
 
 namespace EditSharp.Rendering;

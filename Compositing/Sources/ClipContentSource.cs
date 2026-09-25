@@ -1,18 +1,16 @@
+using EditSharp.Components.Media;
+using EditSharp.Components.Nodes;
+using EditSharp.Components.Nodes.Input;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using SkiaSharp;
 using EditSharp.Components;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
-using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources;
-using EditSharp.Components.Sources;
-using EditSharp.Components.Sources.Video;
 using EditSharp.Compositing.Gpu;
 using EditSharp.Compositing.Transforms;
 using EditSharp.History;
@@ -76,11 +74,13 @@ namespace EditSharp.Compositing.Sources
     /// </remarks>
     internal sealed class ClipContentSource : IClipContentSource, IDisposable
     {
-        private sealed class MediaInput(VideoClip clip, VideoSourceNode node, VideoSource source)
+        private sealed class MediaInput(VideoClip clip, VideoInputNode node)
         {
             public VideoClip Clip { get; } = clip;
-            public VideoSourceNode Node { get; } = node;
-            public VideoSource Source { get; } = source;
+            public VideoInputNode Node { get; } = node;
+
+            //what the node was reading when this was made; see InputNode.ContentIdentity
+            public object Identity { get; } = node.ContentIdentity;
 
             public Task<IPreparedVideoSource>? Preparing { get; set; }
             public IPreparedVideoSource? Prepared { get; set; }
@@ -116,7 +116,7 @@ namespace EditSharp.Compositing.Sources
 
             foreach ((VideoClip clip, Graph graph) in clips)
             {
-                foreach (VideoSourceNode node in graph.Nodes.OfType<VideoSourceNode>().Where(n => n.Enabled))
+                foreach (VideoInputNode node in graph.Nodes.OfType<VideoInputNode>().Where(n => n.Enabled))
                 {
                     if (StartPreparing(Input(clip, node)) is { } task) pending.Add(task);
                 }
@@ -152,7 +152,7 @@ namespace EditSharp.Compositing.Sources
 
                     if (!upcoming) continue;
 
-                    foreach (VideoSourceNode node in video.Graph.AllNodes.OfType<VideoSourceNode>().Where(n => n.Enabled))
+                    foreach (VideoInputNode node in video.Graph.AllNodes.OfType<VideoInputNode>().Where(n => n.Enabled))
                     {
                         MediaInput input = Input(video, node);
                         live.Add(node.Id);
@@ -186,7 +186,7 @@ namespace EditSharp.Compositing.Sources
             {
                 if (frameClip.Clip is not VideoClip clip) continue;
 
-                foreach (VideoSourceNode node in frameClip.Graph.Nodes.OfType<VideoSourceNode>().Where(n => n.Enabled))
+                foreach (VideoInputNode node in frameClip.Graph.Nodes.OfType<VideoInputNode>().Where(n => n.Enabled))
                 {
                     MediaInput input = Input(clip, node);
                     if (input.Failure is not null) continue;
@@ -243,7 +243,7 @@ namespace EditSharp.Compositing.Sources
                     continue;
                 }
 
-                result[node.Id] = node is VideoSourceNode media
+                result[node.Id] = node is VideoInputNode media
                     ? ResolveMedia(clip, graph, media, clipSeconds, frameIndex, canvasWidth, canvasHeight, pool)
                     : throw new NotSupportedException($"ClipContentSource has no dispatch for {node.GetType().Name}.");
             }
@@ -253,7 +253,7 @@ namespace EditSharp.Compositing.Sources
 
         /// <summary>
         /// Every media input of `clip` at `clipSeconds` through a one-shot
-        /// VideoSource.GetFrameAtAsync; nothing is kept open, so a caller
+        /// VideoInputNode.GetFrameAtAsync; nothing is kept open, so a caller
         /// touching many clips (thumbnails) holds no readers. Failures become
         /// placeholders; Complete is false if any was something still on its
         /// way (Opening, ProxyPending, ProxyMissing). Compositor-bound sources
@@ -264,13 +264,13 @@ namespace EditSharp.Compositing.Sources
             Graph graph, double clipSeconds, int width, int height, CancellationToken ct = default)
         {
             TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
-            VideoSourceNode[] nodes = graph.Nodes.OfType<VideoSourceNode>().Where(n => n.Enabled).ToArray();
+            VideoInputNode[] nodes = graph.Nodes.OfType<VideoInputNode>().Where(n => n.Enabled).ToArray();
 
             var frames = await Task.WhenAll(nodes.Select(async node =>
             {
                 try
                 {
-                    IPreparedVideoSource prepared = await node.Source.PrepareAsync(new VideoPrepareContext(_options.HwAccel, _options.SourceMode), ct);
+                    IPreparedVideoSource prepared = await node.PrepareAsync(new VideoPrepareContext(_options.HwAccel, _options.SourceMode), ct);
                     if (prepared is ICompositorBound)
                     {
                         lock (_oneShot) _oneShot[node.Id] = prepared;
@@ -278,7 +278,7 @@ namespace EditSharp.Compositing.Sources
                     }
                     prepared.Dispose();
 
-                    SKImage image = await node.Source.GetFrameAtAsync(content, _options.SourceMode, width, height, ct);
+                    SKImage image = await node.GetFrameAtAsync(content, _options.SourceMode, width, height, ct);
                     return (Id: node.Id, Image: (SKImage?)image, Transient: true, Pending: false);
                 }
                 catch (SourceUnavailableException ex)
@@ -318,7 +318,7 @@ namespace EditSharp.Compositing.Sources
             }
         }
 
-        private (SKImage, bool) ResolveMedia(VideoClip clip, Graph graph, VideoSourceNode node, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool)
+        private (SKImage, bool) ResolveMedia(VideoClip clip, Graph graph, VideoInputNode node, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool)
         {
             MediaInput input = Input(clip, node);
             TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
@@ -385,7 +385,7 @@ namespace EditSharp.Compositing.Sources
                         Release(input);
 
                         if (_options.Failures == ContentFailurePolicy.Preview)
-                            EditSharpConfig.Logger.LogWarning($"{Describe(input.Source)}: {ex.Message} Showing a placeholder.");
+                            EditSharpConfig.Logger.LogWarning($"{input.Node.Description}: {ex.Message} Showing a placeholder.");
                     }
 
                     RecordProblem(input, ex, frameIndex);
@@ -400,26 +400,26 @@ namespace EditSharp.Compositing.Sources
             if (_options.Report is not { } report) return;
 
             TimeSpan at = FrameStateResolver.TimeOfFrame(frameIndex, _options.Fps);
-            if (report.Record(input.Node.Id, Describe(input.Source), ex.Reason, ex.Message, at))
-                EditSharpConfig.Logger.LogWarning($"{Describe(input.Source)}: {ex.Message} Rendering a placeholder from {at}.");
+            if (report.Record(input.Node.Id, input.Node.Description, ex.Reason, ex.Message, at))
+                EditSharpConfig.Logger.LogWarning($"{input.Node.Description}: {ex.Message} Rendering a placeholder from {at}.");
         }
 
         private bool RetryDue(MediaInput input) =>
             _options.Failures == ContentFailurePolicy.Preview &&
-            input.Failure!.Reason is SourceUnavailableReason.MediaOffline or SourceUnavailableReason.DecodeError &&
+            input.Failure!.Reason is SourceUnavailableReason.MediaOffline or SourceUnavailableReason.DecodeError or SourceUnavailableReason.NoMedia or SourceUnavailableReason.NoTimeline &&
             Environment.TickCount64 - input.FailedAt >= EditSharpConfig.SourceRetryInterval.TotalMilliseconds;
 
         // ---- inputs ----
 
         //the node's current source; swapping it mid-session drops everything held for the old one
-        private MediaInput Input(VideoClip clip, VideoSourceNode node)
+        private MediaInput Input(VideoClip clip, VideoInputNode node)
         {
-            if (_media.TryGetValue(node.Id, out MediaInput? known) && ReferenceEquals(known.Source, node.Source) && ReferenceEquals(known.Clip, clip))
+            if (_media.TryGetValue(node.Id, out MediaInput? known) && ReferenceEquals(known.Identity, node.ContentIdentity) && ReferenceEquals(known.Clip, clip))
                 return known;
 
             if (known is not null) Release(known);
 
-            var input = new MediaInput(clip, node, node.Source);
+            var input = new MediaInput(clip, node);
             _media[node.Id] = input;
             return input;
         }
@@ -429,7 +429,7 @@ namespace EditSharp.Compositing.Sources
         {
             if (input.Prepared is not null || input.Failure is not null) return null;
 
-            input.Preparing ??= Task.Run(() => input.Source.PrepareAsync(new VideoPrepareContext(_options.HwAccel, _options.SourceMode)));
+            input.Preparing ??= Task.Run(() => input.Node.PrepareAsync(new VideoPrepareContext(_options.HwAccel, _options.SourceMode)));
             return input.Preparing.IsCompleted ? null : input.Preparing;
         }
 
@@ -443,7 +443,7 @@ namespace EditSharp.Compositing.Sources
 
             if (done.IsCompletedSuccessfully) return input.Prepared = done.Result;
 
-            input.Failure = AsUnavailable(done.Exception?.InnerException, input.Source);
+            input.Failure = AsUnavailable(done.Exception?.InnerException, input.Node);
             input.FailedAt = Environment.TickCount64;
             return null;
         }
@@ -460,7 +460,7 @@ namespace EditSharp.Compositing.Sources
             Task<IPreparedVideoSource> preparing = input.Preparing ?? StartPreparing(input) ?? input.Preparing!;
 
             if (!preparing.IsCompleted && _options.Buffered && _options.Failures == ContentFailurePolicy.Preview)
-                throw new SourceUnavailableException(SourceUnavailableReason.Opening, $"{Describe(input.Source)} is still opening.");
+                throw new SourceUnavailableException(SourceUnavailableReason.Opening, $"{input.Node.Description} is still opening.");
 
             WaitQuietly(preparing, Timeout.InfiniteTimeSpan);
 
@@ -558,15 +558,9 @@ namespace EditSharp.Compositing.Sources
             catch (AggregateException) { return true; } //finished, by failing; TryTakePrepared records it
         }
 
-        private static SourceUnavailableException AsUnavailable(Exception? ex, Source source) => ex as SourceUnavailableException
-            ?? new SourceUnavailableException(SourceUnavailableReason.DecodeError, $"{Describe(source)} could not be prepared.", ex);
+        private static SourceUnavailableException AsUnavailable(Exception? ex, VideoInputNode node) => ex as SourceUnavailableException
+            ?? new SourceUnavailableException(SourceUnavailableReason.DecodeError, $"{node.Description} could not be prepared.", ex);
 
-        /// <summary>A person-readable name for a source: its kind id, and its file if it has one.</summary>
-        private static string Describe(Source source)
-        {
-            string kind = source.GetType().GetCustomAttribute<SourceKindAttribute>()?.Id ?? source.GetType().Name;
-            return source is IFileBackedSource file ? $"{kind}: {file.FilePath}" : kind;
-        }
 
         public void Dispose()
         {

@@ -10,6 +10,7 @@ namespace EditSharp.Components.Nodes.Effects
 {
     /// <summary>Changes the volume.</summary>
     /// <remarks>Input: Audio, plus an optional Value input, Modulation, that multiplies <see cref="Gain"/>. Output: Audio. A new audio clip's graph has one.</remarks>
+    [NodeKind("gain", DisplayName = "Gain")]
     public sealed class GainNode : Node
     {
         Animatable<float> _gain = new(1f);

@@ -10,6 +10,7 @@ namespace EditSharp.Components.Nodes.Effects
 {
     /// <summary>Reduces the level of loud passages: a peak-sensing, feed-forward compressor.</summary>
     /// <remarks>Input: Audio. Output: Audio.</remarks>
+    [NodeKind("compressor", DisplayName = "Compressor")]
     public sealed class CompressorNode : Node
     {
         Animatable<float> _threshold = new(-18f);

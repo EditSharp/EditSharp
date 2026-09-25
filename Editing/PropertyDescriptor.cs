@@ -1,3 +1,4 @@
+using EditSharp.Components.Media;
 using System;
 using System.Collections;
 using System.Collections.Concurrent;
@@ -8,7 +9,6 @@ using System.Numerics;
 using System.Reflection;
 using System.Text;
 using EditSharp.Components;
-using EditSharp.Components.Sources;
 using EditSharp.Components.Clips;
 using EditSharp.History;
 using SkiaSharp;
@@ -443,7 +443,7 @@ namespace EditSharp.Editing
             if (valueType == typeof(SKColor)) return PropertyEditor.Color;
             if (valueType == typeof(Vector2)) return PropertyEditor.Vector;
             if (valueType == typeof(TimeSpan)) return PropertyEditor.Time;
-            if (typeof(Source).IsAssignableFrom(valueType)) return PropertyEditor.Source;
+            if (typeof(IMedia).IsAssignableFrom(valueType)) return PropertyEditor.Media;
             if (valueType == typeof(Timeline)) return PropertyEditor.Timeline;
 
             //an object with editable properties of its own opens up in place

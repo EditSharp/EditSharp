@@ -15,9 +15,11 @@ namespace EditSharp.Compositing.Transforms
 
         public readonly record struct ContentPlacement(int Width, int Height, int X, int Y);
 
-        //about the pixels the content covers on screen at its largest keyframed scale, so a zoom stays sharp
+        //about the pixels the content covers on screen at its largest keyframed scale, so a zoom stays sharp;
+        //no larger than `limitWidth` x `limitHeight`, which default to the canvas
         public static (int Width, int Height) ComputeContentSize(
-            ClipTransform transform, int nativeWidth, int nativeHeight, int canvasWidth, int canvasHeight)
+            ClipTransform transform, int nativeWidth, int nativeHeight, int canvasWidth, int canvasHeight,
+            int limitWidth = 0, int limitHeight = 0)
         {
             var (baseW, baseH) = BaseFitSize(nativeWidth, nativeHeight, canvasWidth, canvasHeight);
             var (maxScaleX, maxScaleY) = MaxScale(transform);
@@ -25,7 +27,9 @@ namespace EditSharp.Compositing.Transforms
             double desiredW = baseW * maxScaleX;
             double desiredH = baseH * maxScaleY;
 
-            double fit = Math.Min(1.0, Math.Min(canvasWidth / desiredW, canvasHeight / desiredH));
+            double limitW = limitWidth > 0 ? limitWidth : canvasWidth;
+            double limitH = limitHeight > 0 ? limitHeight : canvasHeight;
+            double fit = Math.Min(1.0, Math.Min(limitW / desiredW, limitH / desiredH));
 
             return (EvenAtLeast2((int)Math.Round(desiredW * fit)),
                     EvenAtLeast2((int)Math.Round(desiredH * fit)));

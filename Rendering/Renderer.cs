@@ -1,3 +1,4 @@
+using EditSharp.Components.Media;
 using System;
 using EditSharp.Audio.Engine;
 using System.Threading;
@@ -21,7 +22,6 @@ using EditSharp.Components.Transitions;
 using EditSharp.Compositing;
 using EditSharp.Compositing.Gpu;
 using EditSharp.Compositing.Sources;
-using EditSharp.Components.Sources.Video;
 using EditSharp.Video;
 
 namespace EditSharp.Rendering

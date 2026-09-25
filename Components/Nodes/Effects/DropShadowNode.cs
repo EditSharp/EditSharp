@@ -10,6 +10,7 @@ namespace EditSharp.Components.Nodes.Effects
 {
     /// <summary>Draws a blurred, coloured copy of the image's shape behind it.</summary>
     /// <remarks>Inputs: Image, and an optional Mask; with a mask, the shadow applies only where the mask is. Output: Image.</remarks>
+    [NodeKind("drop-shadow", DisplayName = "Drop shadow")]
     public sealed class DropShadowNode : Node
     {
         Animatable<Vector2> _offset = new(new(0.01f, 0.01f));

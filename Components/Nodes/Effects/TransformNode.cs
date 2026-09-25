@@ -8,6 +8,7 @@ namespace EditSharp.Components.Nodes.Effects
 {
     /// <summary>Places the image in the frame: moves, scales and rotates it.</summary>
     /// <remarks>Input: Image. Output: Image. A new video clip's graph has one. Effects before it work on the image before it's placed, effects after it on the placed image; a graph can have several, such as one per branch before a merge.</remarks>
+    [NodeKind("transform", DisplayName = "Transform")]
     public sealed class TransformNode : Node
     {
         ClipTransform _transform = new();

@@ -1,11 +1,11 @@
+using EditSharp.Components.Nodes;
+using EditSharp.Components.Nodes.Input;
+using EditSharp.Components;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
-using EditSharp.Components.Nodes.Sources;
-using EditSharp.Components.Sources.Video;
-using EditSharp.Components.Sources.Audio;
 using EditSharp.History;
 
 namespace EditSharp.Components
@@ -15,7 +15,7 @@ namespace EditSharp.Components
     /// Video and audio channels are kept in two lists, each indexed from 0 at the
     /// bottom, so a linked video and audio clip can move up or down by the same
     /// number of channels. A timeline can be embedded in another through a
-    /// <see cref="Sources.Video.TimelineVideoSource"/> or <see cref="Sources.Audio.TimelineAudioSource"/>;
+    /// <see cref="Nodes.Input.TimelineVideoNode"/> or <see cref="Nodes.Input.TimelineAudioNode"/>;
     /// an edit that would make a timeline contain itself is refused with
     /// InvalidOperationException.
     /// </remarks>
@@ -282,16 +282,9 @@ namespace EditSharp.Components
         //the timelines a node embeds, through any composite
         internal static IEnumerable<Timeline> EmbeddedIn(Nodes.Node node) => node switch
         {
-            VideoSourceNode video => EmbeddedIn(video.Source),
-            AudioSourceNode audio => EmbeddedIn(audio.Source),
+            TimelineVideoNode { Timeline: { } embedded } => [embedded],
+            TimelineAudioNode { Timeline: { } embedded } => [embedded],
             Nodes.CompositeNode composite => composite.Inner.AllNodes.SelectMany(EmbeddedIn),
-            _ => [],
-        };
-
-        internal static IEnumerable<Timeline> EmbeddedIn(Components.Sources.Source? source) => source switch
-        {
-            TimelineVideoSource { Timeline: { } embedded } => [embedded],
-            TimelineAudioSource { Timeline: { } embedded } => [embedded],
             _ => [],
         };
 

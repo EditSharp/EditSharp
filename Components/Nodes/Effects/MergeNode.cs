@@ -14,6 +14,7 @@ namespace EditSharp.Components.Nodes.Effects
     /// combine two sources in one clip, or to recombine two branches of a graph
     /// that were affected differently.
     /// </remarks>
+    [NodeKind("merge", DisplayName = "Merge")]
     public sealed class MergeNode : Node
     {
         ChannelBlendMode _blendMode = ChannelBlendMode.SrcOver;

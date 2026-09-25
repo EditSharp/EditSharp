@@ -1,15 +1,14 @@
+using EditSharp.Components.Media;
 using System;
 using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Nodes.Input;
 using EditSharp.Editing;
 using EditSharp.History;
-using EditSharp.Components;
-using EditSharp.Components.Sources.Audio;
 
 namespace EditSharp.Components.Clips
 {
     /// <summary>A clip that plays sound: its graph's inputs, through its effects.</summary>
-    /// <remarks>It goes on an <see cref="Channels.AudioChannel"/>. The factories build the usual graph: the source, then a gain.</remarks>
+    /// <remarks>It goes on an <see cref="Channels.AudioChannel"/>. The factories build the usual graph: the input, then a gain.</remarks>
     public sealed class AudioClip : Clip
     {
         private readonly Graph _graph;
@@ -27,15 +26,25 @@ namespace EditSharp.Components.Clips
             graph.Clip = this;
         }
 
-        /// <summary>A clip playing a source.</summary>
+        /// <summary>A clip playing a media.</summary>
         /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
-        /// <param name="source">What the clip plays.</param>
+        /// <param name="media">What the clip plays.</param>
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
-        public static AudioClip CreateFromSource(AudioSource source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(new AudioSourceNode { Source = source })) { Start = start, Duration = duration });
+        public static AudioClip CreateFromMedia(AudioMedia media, TimeSpan start, TimeSpan duration) =>
+            CreateFromInput(Transaction.Suppressed(() => new AudioMediaNode { Media = media }), start, duration);
 
-        /// <summary>A clip playing a synthesized tone; see <see cref="ToneAudioSource"/>.</summary>
+        /// <summary>A clip playing an input node of any kind, such as a generator you've set up.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="input">Where the sound comes from.</param>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <returns>The clip.</returns>
+        public static AudioClip CreateFromInput(AudioInputNode input, TimeSpan start, TimeSpan duration) =>
+            Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(input)) { Start = start, Duration = duration });
+
+        /// <summary>A clip playing a synthesized tone; see <see cref="ToneNode"/>.</summary>
         /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
@@ -46,7 +55,7 @@ namespace EditSharp.Components.Clips
         public static AudioClip CreateTone(
             TimeSpan start, TimeSpan duration, Waveform waveform = Waveform.Sine,
             float frequencyHz = 440f, float amplitude = 1f) =>
-            CreateFromSource(Transaction.Suppressed(() => new ToneAudioSource { Waveform = waveform, Frequency = new(frequencyHz), Amplitude = new(amplitude) }), start, duration);
+            CreateFromInput(Transaction.Suppressed(() => new ToneNode { Waveform = waveform, Frequency = new(frequencyHz), Amplitude = new(amplitude) }), start, duration);
 
         /// <summary>A clip playing another timeline's mixed audio.</summary>
         /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
@@ -55,7 +64,7 @@ namespace EditSharp.Components.Clips
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
         public static AudioClip CreateTimelineEmbed(Timeline timeline, TimeSpan start, TimeSpan duration) =>
-            CreateFromSource(Transaction.Suppressed(() => new TimelineAudioSource { Timeline = timeline }), start, duration);
+            CreateFromInput(Transaction.Suppressed(() => new TimelineAudioNode { Timeline = timeline }), start, duration);
 
         /// <summary>A clip with a graph you've built, such as one with several inputs mixed together.</summary>
         /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>

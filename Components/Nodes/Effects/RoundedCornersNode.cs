@@ -8,6 +8,7 @@ namespace EditSharp.Components.Nodes.Effects
 {
     /// <summary>Rounds the image's corners, leaving them transparent.</summary>
     /// <remarks>Input: Image. Output: Image.</remarks>
+    [NodeKind("rounded-corners", DisplayName = "Rounded corners")]
     public sealed class RoundedCornersNode : Node
     {
         Animatable<float> _radius = new(0.1f);

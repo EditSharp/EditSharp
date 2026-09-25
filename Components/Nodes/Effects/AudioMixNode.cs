@@ -15,6 +15,7 @@ namespace EditSharp.Components.Nodes.Effects
     /// to combine two sources in one clip, or for parallel processing, such as
     /// mixing a heavily compressed copy under the dry signal.
     /// </remarks>
+    [NodeKind("audio-mix", DisplayName = "Audio mix")]
     public sealed class AudioMixNode : Node
     {
         Animatable<float> _mixA = new(1f);

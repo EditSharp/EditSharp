@@ -9,6 +9,7 @@ namespace EditSharp.Components.Nodes.Effects
 {
     /// <summary>Multiplies the image by a colour; the colour's alpha sets the image's opacity.</summary>
     /// <remarks>Input: Image. Output: Image. A new video clip's graph has one.</remarks>
+    [NodeKind("tint", DisplayName = "Tint")]
     public sealed class TintNode : Node
     {
         Animatable<SKColor> _color = new(SKColors.White);

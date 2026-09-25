@@ -35,6 +35,7 @@ namespace EditSharp.Components.Nodes.Math
     /// AudioMixNode's MixAModulation and MixBModulation, MergeNode's
     /// MixModulation), which multiplies the node's own value by it.
     /// </remarks>
+    [NodeKind("math", DisplayName = "Math")]
     public sealed class MathNode : Node
     {
         MathOperation _operation = MathOperation.Add;

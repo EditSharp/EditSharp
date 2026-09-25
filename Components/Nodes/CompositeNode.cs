@@ -54,6 +54,7 @@ namespace EditSharp.Components.Nodes
     /// exposes, each under its own name. Evaluation never sees a composite:
     /// <see cref="Graph.Flattened"/> replaces it with the nodes inside it first.
     /// </remarks>
+    [NodeKind("composite", DisplayName = "Custom node", Listed = false)]
     public sealed class CompositeNode : Node, IInspectable
     {
         string _name;
@@ -197,6 +198,42 @@ namespace EditSharp.Components.Nodes
         {
             if (!Inner.Nodes.Contains(node))
                 throw new ArgumentException("That node is not inside this composite.", nameof(node));
+        }
+
+        //an inner node was replaced (see Graph.ReplaceNode): its exposures follow the replacement where it has
+        //the port or property, and are hidden where it doesn't, along with any outer wire into a hidden input
+        internal void RemapExposures(Node old, Node replacement)
+        {
+            foreach (ExposedPort exposed in _inputs.Where(p => p.Node == old.Id).ToList())
+            {
+                bool has = replacement.Ports.Any(p => p.Name == exposed.Port && p.Direction == PortDirection.Input);
+
+                if (!has)
+                {
+                    foreach (Connection wire in Graph?.Connections.Where(c => c.ToNodeId == Id && c.ToPort == exposed.Name).ToList() ?? [])
+                        Graph!.Disconnect(wire);
+
+                    HideInput(exposed);
+                    continue;
+                }
+
+                int index = _inputs.IndexOf(exposed);
+                ExposedPort moved = new(replacement.Id, exposed.Port, exposed.Name);
+                Transaction.Apply(() => _inputs[index] = moved, () => _inputs[index] = exposed, "remap exposed input");
+            }
+
+            foreach (ExposedProperty exposed in _properties.Where(p => p.Node == old.Id).ToList())
+            {
+                if (Inspect.Find(replacement, exposed.Property) is null)
+                {
+                    HideProperty(exposed);
+                    continue;
+                }
+
+                int index = _properties.IndexOf(exposed);
+                ExposedProperty moved = new(replacement.Id, exposed.Property, exposed.Name);
+                Transaction.Apply(() => _properties[index] = moved, () => _properties[index] = exposed, "remap exposed property");
+            }
         }
 
         // ---- IInspectable ----

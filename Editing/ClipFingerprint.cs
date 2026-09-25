@@ -1,9 +1,9 @@
+using EditSharp.Components.Media;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using EditSharp.Components;
-using EditSharp.Components.Sources;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
 
@@ -45,7 +45,7 @@ namespace EditSharp.Editing
         /// <param name="clip">The clip.</param>
         /// <returns>The first trimmable input's in-point (they all shift together), or zero when the clip has none.</returns>
         public static TimeSpan Anchor(Clip clip)
-            => clip.Graph.AllNodes.OfType<ITrimmableInput>().FirstOrDefault()?.InPoint ?? TimeSpan.Zero;
+            => clip.Graph.AllNodes.OfType<InputNode>().FirstOrDefault()?.InPoint ?? TimeSpan.Zero;
 
         private static void AddGraph(ref HashCode hash, Graph graph, TimeSpan anchor, int depth)
         {
@@ -56,7 +56,12 @@ namespace EditSharp.Editing
                 hash.Add(node.Enabled);
 
                 foreach (PropertyDescriptor descriptor in Inspect.Of(node))
+                {
+                    //an input's in-point is the anchor, not content
+                    if (node is InputNode && descriptor.Name == nameof(InputNode.Start)) continue;
+
                     AddDescriptor(ref hash, descriptor, node, anchor, depth);
+                }
 
                 foreach (IAnimatable animatable in node.Animatables)
                     AddAnimatable(ref hash, animatable, anchor);
@@ -105,8 +110,8 @@ namespace EditSharp.Editing
                     break;
 
                 //the in-point is the anchor, not content; the rest is
-                case Source source:
-                    source.AddFingerprint(ref hash);
+                case IMedia media:
+                    media.AddFingerprint(ref hash);
                     break;
 
                 case string s:

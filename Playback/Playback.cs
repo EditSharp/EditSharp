@@ -1,3 +1,4 @@
+using EditSharp.Components.Media;
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
@@ -12,12 +13,9 @@ using EditSharp.Components;
 using EditSharp.Components.Channels;
 using EditSharp.Components.Clips;
 using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources;
 using EditSharp.History;
 using EditSharp.Audio;
 using EditSharp.Audio.Engine;
-using EditSharp.Components.Sources;
-using EditSharp.Components.Sources.Video;
 using EditSharp.Compositing;
 using EditSharp.Compositing.Gpu;
 using EditSharp.Compositing.Sources;

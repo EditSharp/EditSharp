@@ -43,8 +43,8 @@ namespace EditSharp.Editing
         /// <summary>A time.</summary>
         Time,
 
-        /// <summary>A source of any kind, shown with the source's own properties.</summary>
-        Source,
+        /// <summary>A media of any kind, shown with the media's own properties.</summary>
+        Media,
 
         /// <summary>A file path.</summary>
         Path,

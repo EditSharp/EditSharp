@@ -1,3 +1,4 @@
+using EditSharp.Components.Media;
 using System;
 using System.Buffers;
 using System.IO;

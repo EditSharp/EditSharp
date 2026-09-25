@@ -1,3 +1,7 @@
+using EditSharp.Components.Media;
+using EditSharp.Components.Nodes;
+using EditSharp.Components.Nodes.Input;
+using EditSharp.Components;
 using EditSharp;
 using System;
 using System.Collections.Generic;
@@ -5,9 +9,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
-using EditSharp.Components.Sources;
-using EditSharp.Components.Sources.Audio;
-using EditSharp.Components.Sources.Video;
 using EditSharp.History;
 
 namespace EditSharp.Video
@@ -23,18 +24,18 @@ namespace EditSharp.Video
         /// <returns>A source for the new file.</returns>
         /// <exception cref="FileNotFoundException">Either input doesn't exist.</exception>
         /// <exception cref="InvalidOperationException">ffmpeg failed.</exception>
-        public static async Task<MediaVideoSource> MuxAudioVideoAsync(MediaVideoSource video, MediaAudioSource audio, string outputPath)
+        public static async Task<VideoMedia> MuxAudioVideoAsync(VideoMediaNode video, AudioMediaNode audio, string outputPath)
         {
-            if (!File.Exists(video.Path))
-                throw new FileNotFoundException($"Video input not found: {video.Path}", video.Path);
+            if (!File.Exists(Require(video.Media).Path))
+                throw new FileNotFoundException($"Video input not found: {Require(video.Media).Path}", Require(video.Media).Path);
 
-            if (!File.Exists(audio.Path))
-                throw new FileNotFoundException($"Audio input not found: {audio.Path}", audio.Path);
+            if (!File.Exists(Require(audio.Media).Path))
+                throw new FileNotFoundException($"Audio input not found: {Require(audio.Media).Path}", Require(audio.Media).Path);
 
             var args = new List<string> { "-y", "-v", "error" };
 
-            AddTrimmedInput(args, video, video.Path);
-            AddTrimmedInput(args, audio, audio.Path);
+            AddTrimmedInput(args, video, Require(video.Media).Path);
+            AddTrimmedInput(args, audio, Require(audio.Media).Path);
 
             args.AddRange(new[]
             {
@@ -69,7 +70,7 @@ namespace EditSharp.Video
                 throw new InvalidOperationException(
                     $"ffmpeg exited with code {process.ExitCode}:\n{stderr}");
 
-            return Transaction.Suppressed(() => new MediaVideoSource { Path = outputPath });
+            return Transaction.Suppressed(() => new VideoMedia { Path = outputPath });
         }
 
         /// <summary>Re-encodes a source's video to another codec, optionally resized, with no audio.</summary>
@@ -82,10 +83,10 @@ namespace EditSharp.Video
         /// <exception cref="NotSupportedException"><paramref name="codec"/> has no encoder.</exception>
         /// <exception cref="InvalidOperationException">ffmpeg failed.</exception>
         public static async Task<string> ReencodeVideoAsync(
-            MediaVideoSource source, VideoCodec codec, (int Width, int Height)? scaleTo = null)
+            VideoMediaNode source, VideoCodec codec, (int Width, int Height)? scaleTo = null)
         {
-            if (!File.Exists(source.Path))
-                throw new FileNotFoundException($"Input not found: {source.Path}", source.Path);
+            if (!File.Exists(Require(source.Media).Path))
+                throw new FileNotFoundException($"Input not found: {Require(source.Media).Path}", Require(source.Media).Path);
 
             if (!CodecNames.VideoCodecNames.TryGetValue(codec, out string? encoderName))
                 throw new NotSupportedException($"ReencodeVideoAsync has no encoder mapping for {codec}.");
@@ -98,7 +99,7 @@ namespace EditSharp.Video
             //global options, so before -i; see EditSharpConfig.FilterThreads
             args.AddRange(FfmpegArgs.FilterThreadingArgs());
 
-            AddTrimmedInput(args, source, source.Path);
+            AddTrimmedInput(args, source, Require(source.Media).Path);
 
             if (scaleTo is { } size)
             {
@@ -135,7 +136,7 @@ namespace EditSharp.Video
             var stderr = new StringBuilder();
             process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
 
-            EditSharpConfig.Logger.LogVerbose($"ReencodeVideoAsync starting for '{source.Path}'...");
+            EditSharpConfig.Logger.LogVerbose($"ReencodeVideoAsync starting for '{Require(source.Media).Path}'...");
 
             var spawnSw = Stopwatch.StartNew();
             process.Start();
@@ -153,7 +154,7 @@ namespace EditSharp.Video
                     $"ffmpeg exited with code {process.ExitCode}:\n{stderr}");
 
             EditSharpConfig.Logger.LogVerbose(
-                $"ReencodeVideoAsync for '{source.Path}' done: spawn {spawnMs}ms, " +
+                $"ReencodeVideoAsync for '{Require(source.Media).Path}' done: spawn {spawnMs}ms, " +
                 $"run {runMs}ms -> {outputPath}");
 
             return outputPath;
@@ -197,15 +198,17 @@ namespace EditSharp.Video
             _ => "mp4",
         };
 
+        private static IMedia Require(IMedia? media) => media ?? throw new InvalidOperationException("The node has no media selected.");
+
         //-ss and -t before -i, so ffmpeg seeks in the demuxer instead of decoding from the start
-        private static void AddTrimmedInput(List<string> args, Source source, string path)
+        private static void AddTrimmedInput(List<string> args, InputNode source, string path)
         {
             args.AddRange(TrimArgsFor(source));
             args.Add("-i");
             args.Add(path);
         }
 
-        internal static string[] TrimArgsFor(Source source)
+        internal static string[] TrimArgsFor(InputNode source)
         {
             var args = new List<string>();
 

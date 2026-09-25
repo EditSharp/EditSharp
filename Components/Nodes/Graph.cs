@@ -347,6 +347,97 @@ namespace EditSharp.Components.Nodes
 
         private Node? Find(Guid id) => _nodes.FirstOrDefault(n => n.Id == id);
 
+        /// <summary>Puts another node in a node's place, keeping its wires.</summary>
+        /// <remarks>
+        /// Every wire into or out of the old node moves to the port of the same name,
+        /// type and direction on the replacement. A wired port the replacement lacks is
+        /// opened through <see cref="IPortOpener"/> when the replacement can open one;
+        /// otherwise the replacement is refused before anything changes. A composite
+        /// around this graph that exposes the old node's ports or properties exposes
+        /// the replacement's instead, and stops exposing any it lacks. The replacement
+        /// takes the old node's place in <see cref="Nodes"/>; the old node is left
+        /// unwired and out of the graph. Each change is recorded in the current History
+        /// transaction.
+        /// </remarks>
+        /// <param name="node">The node to replace.</param>
+        /// <param name="replacement">The node to put in its place; a node with only Value ports goes in either kind of graph.</param>
+        /// <returns><paramref name="replacement"/>.</returns>
+        /// <exception cref="ArgumentException"><paramref name="node"/> isn't in this graph, or <paramref name="replacement"/> is already in a graph.</exception>
+        /// <exception cref="InvalidOperationException"><paramref name="node"/> is the <see cref="OutputNode"/>; <paramref name="replacement"/> is an output node, or its ports are for the other kind of graph; a wired port has no counterpart on the replacement and it can't open one; or the replacement would embed a timeline in itself.</exception>
+        public Node ReplaceNode(Node node, Node replacement)
+        {
+            int index = _nodes.IndexOf(node);
+            if (index < 0) throw new ArgumentException("node is not in this graph.", nameof(node));
+            if (replacement.Graph is not null) throw new ArgumentException("replacement is already in a graph.", nameof(replacement));
+
+            if (ReferenceEquals(node, OutputNode))
+                throw new InvalidOperationException("OutputNode cannot be replaced.");
+            if (replacement is OutputNode)
+                throw new InvalidOperationException("An output node can't take another node's place.");
+
+            NodeDomain? domain = InferDomain(replacement);
+            if (domain != null && domain != Domain)
+                throw new InvalidOperationException($"Cannot put a {domain} node in a {Domain} Graph.");
+
+            //every wire the old node has, and the port on the replacement it should go to; a missing one
+            //must be openable, and is only opened once nothing else can refuse the replacement
+            List<Connection> wires = _connections.Where(c => c.FromNodeId == node.Id || c.ToNodeId == node.Id).ToList();
+            var targets = new List<(Connection Wire, NodePort? Port, string Name, PortType Type, PortDirection Direction)>();
+
+            foreach (Connection wire in wires)
+            {
+                bool outgoing = wire.FromNodeId == node.Id;
+                string name = outgoing ? wire.FromPort : wire.ToPort;
+                PortDirection direction = outgoing ? PortDirection.Output : PortDirection.Input;
+                PortType type = node.Ports.First(p => p.Name == name && p.Direction == direction).Type;
+
+                NodePort? port = replacement.Ports.FirstOrDefault(p => p.Name == name && p.Direction == direction && p.Type == type);
+
+                if (port is null && replacement is not IPortOpener)
+                    throw new InvalidOperationException(
+                        $"{replacement.GetType().Name} has no {direction.ToString().ToLowerInvariant()} port for the {type} wire on '{name}', and can't open one.");
+
+                targets.Add((wire, port, name, type, direction));
+            }
+
+            Timeline.Reembed(OwnerClip, Timeline.EmbeddedIn(node), Timeline.EmbeddedIn(replacement));
+
+            var opener = replacement as IPortOpener;
+            var rewired = new List<(Connection Old, Connection New)>();
+
+            foreach ((Connection wire, NodePort? known, string name, PortType type, PortDirection direction) in targets)
+            {
+                NodePort port = known
+                    ?? opener!.TryOpenPort(name, type, direction)
+                    ?? throw new InvalidOperationException(
+                        $"{replacement.GetType().Name} could not open a {direction.ToString().ToLowerInvariant()} port for the {type} wire on '{name}'.");
+
+                Connection moved = direction == PortDirection.Output
+                    ? new Connection(replacement.Id, port.Name, wire.ToNodeId, wire.ToPort)
+                    : new Connection(wire.FromNodeId, wire.FromPort, replacement.Id, port.Name);
+
+                rewired.Add((wire, moved));
+            }
+
+            replacement.Graph = this;
+
+            Transaction.Apply(
+                () =>
+                {
+                    _nodes[index] = replacement;
+                    foreach ((Connection old, Connection moved) in rewired) _connections[_connections.IndexOf(old)] = moved;
+                },
+                () =>
+                {
+                    _nodes[index] = node;
+                    foreach ((Connection old, Connection moved) in rewired) _connections[_connections.IndexOf(moved)] = old;
+                },
+                "replace node");
+
+            Composite?.RemapExposures(node, replacement);
+            return replacement;
+        }
+
         //from the node's ports: an Audio port makes it Audio, an Image or Mask port Image, and only Value ports
         //(or none) null, so it goes in either
         private static NodeDomain? InferDomain(Node node)

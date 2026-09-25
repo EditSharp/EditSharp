@@ -1,3 +1,5 @@
+using EditSharp.Components.Nodes;
+using EditSharp.Components.Nodes.Input;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -5,7 +7,6 @@ using System.Linq;
 using System.Numerics;
 using SkiaSharp;
 using EditSharp.Components;
-using EditSharp.Components.Sources.Video;
 
 namespace EditSharp.Compositing.Generators
 {

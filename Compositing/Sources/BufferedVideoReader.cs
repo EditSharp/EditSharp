@@ -1,8 +1,8 @@
+using EditSharp.Components.Media;
+using EditSharp.Components;
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using EditSharp.Components.Sources;
-using EditSharp.Components.Sources.Video;
 
 namespace EditSharp.Compositing.Sources
 {

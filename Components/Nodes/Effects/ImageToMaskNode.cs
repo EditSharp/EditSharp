@@ -17,6 +17,7 @@ namespace EditSharp.Components.Nodes.Effects
 
     /// <summary>Makes a mask from an image's brightness or opacity.</summary>
     /// <remarks>Input: Image. Output: Mask.</remarks>
+    [NodeKind("image-to-mask", DisplayName = "Image to mask")]
     public sealed class ImageToMaskNode : Node
     {
         MaskChannelSource _channel = MaskChannelSource.Alpha;

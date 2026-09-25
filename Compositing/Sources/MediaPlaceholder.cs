@@ -1,7 +1,8 @@
+using EditSharp.Components.Media;
+using EditSharp.Components;
 using System;
 using System.Collections.Generic;
 using SkiaSharp;
-using EditSharp.Components.Sources;
 
 namespace EditSharp.Compositing.Sources
 {
@@ -27,6 +28,8 @@ namespace EditSharp.Compositing.Sources
             SourceUnavailableReason.MediaOffline => "MEDIA OFFLINE",
             SourceUnavailableReason.DecodeError => "CAN'T DECODE",
             SourceUnavailableReason.EndOfSource => "",
+            SourceUnavailableReason.NoMedia => "NO MEDIA SELECTED",
+            SourceUnavailableReason.NoTimeline => "NO TIMELINE SELECTED",
             _ => "UNAVAILABLE",
         };
 

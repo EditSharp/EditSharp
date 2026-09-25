@@ -8,6 +8,7 @@ namespace EditSharp.Components.Nodes.Effects
 {
     /// <summary>A Gaussian blur.</summary>
     /// <remarks>Inputs: Image, and an optional Mask; with a mask, the blur applies only where the mask is. Output: Image.</remarks>
+    [NodeKind("blur", DisplayName = "Blur")]
     public sealed class BlurNode : Node
     {
         Animatable<float> _radius = new(0f);

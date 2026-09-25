@@ -90,9 +90,11 @@ namespace EditSharp.Compositing.Graphs
 
                         ResolvedTransform literalTransform = transformNode.Transform.Evaluate(clipRelativeTime);
 
+                        //an upstream larger than the canvas (text drawn oversized) keeps its detail when scaled up
                         (int contentWidth, int contentHeight) = TransformProjection.ComputeContentSize(
                             transformNode.Transform, nativeWidth, nativeHeight,
-                            context.CanvasWidth, context.CanvasHeight);
+                            context.CanvasWidth, context.CanvasHeight,
+                            Math.Max(context.CanvasWidth, nativeWidth), Math.Max(context.CanvasHeight, nativeHeight));
 
                         SKImage sized = TransformMatrix.Resize(upstream, contentWidth, contentHeight, pool);
                         if (!ReferenceEquals(sized, upstream)) owned.Add(sized);

@@ -22,6 +22,7 @@ namespace EditSharp.Components.Nodes.Effects
 
     /// <summary>A mask in the shape of a rectangle, an ellipse or a polygon.</summary>
     /// <remarks>Output: Mask. It's drawn at frame size and scaled to the image it masks, so its geometry is measured against the frame.</remarks>
+    [NodeKind("shape-mask", DisplayName = "Shape mask")]
     public sealed class ShapeMaskNode : Node
     {
         ShapeType _shape = ShapeType.Rectangle;

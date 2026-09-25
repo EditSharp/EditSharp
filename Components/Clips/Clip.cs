@@ -11,7 +11,7 @@ namespace EditSharp.Components.Clips
     /// <summary>A span of a channel that shows or plays its <see cref="Graph"/>.</summary>
     /// <remarks>
     /// What a clip shows or plays comes from the input nodes in its graph, so the kind
-    /// of content is the kind of source, not the kind of clip; <see cref="VideoClip"/>
+    /// of content is the kind of input, not the kind of clip; <see cref="VideoClip"/>
     /// and <see cref="AudioClip"/> are the only two. Edits that can reach neighbouring
     /// clips (moving, extending, stretching, splitting, deleting) go through the
     /// clip's <see cref="Channel"/>, which keeps clips from overlapping.
@@ -68,6 +68,16 @@ namespace EditSharp.Components.Clips
         /// <summary>The clip's content and effects.</summary>
         public abstract Graph Graph { get; }
 
+        /// <summary>A video clip and an audio clip for one media: its picture, and its soundtrack when it has one.</summary>
+        /// <remarks>Neither clip is placed; add each to a channel, and link them with <see cref="Timeline.Link"/> to move as one. Nothing is recorded in history.</remarks>
+        /// <param name="media">What the clips show and play.</param>
+        /// <param name="start">Where the clips start on the timeline.</param>
+        /// <param name="duration">How long they last.</param>
+        /// <returns>The video clip, and the audio clip or null when the media has no audio.</returns>
+        public static (VideoClip Video, AudioClip? Audio) CreateClipsFromMedia(Media.VideoMedia media, TimeSpan start, TimeSpan duration) => (
+            VideoClip.CreateFromMedia(media, start, duration),
+            media.Audio is { } audio ? AudioClip.CreateFromMedia(audio, start, duration) : null);
+
         /// <summary>A deep copy with the same name, times and speed, not placed and not linked.</summary>
         /// <remarks>Nothing is recorded in history.</remarks>
         /// <returns>The copy.</returns>
@@ -78,7 +88,7 @@ namespace EditSharp.Components.Clips
         /// <param name="amount">How far the in-points move, in content time: positive for a trim, negative for an extend.</param>
         protected internal virtual void OnHeadInPointShift(TimeSpan amount)
         {
-            foreach (ITrimmableInput trimmable in Graph.AllNodes.OfType<ITrimmableInput>())
+            foreach (InputNode trimmable in Graph.AllNodes.OfType<InputNode>())
                 trimmable.InPoint += amount;
 
             //the head moving later puts every keyframe that much earlier relative to the new start;
@@ -92,7 +102,7 @@ namespace EditSharp.Components.Clips
         {
             TimeSpan min = TimeSpan.MaxValue;
 
-            foreach (ITrimmableInput trimmable in Graph.AllNodes.OfType<ITrimmableInput>())
+            foreach (InputNode trimmable in Graph.AllNodes.OfType<InputNode>())
             {
                 if (trimmable.MaxHeadroom < min) min = trimmable.MaxHeadroom;
             }
@@ -121,7 +131,7 @@ namespace EditSharp.Components.Clips
         {
             TimeSpan? room = null;
 
-            foreach (ITrimmableInput trimmable in Graph.AllNodes.OfType<ITrimmableInput>())
+            foreach (InputNode trimmable in Graph.AllNodes.OfType<InputNode>())
             {
                 if (trimmable.ContentLength is not { } length) continue;
                 TimeSpan left = length - ContentDuration;

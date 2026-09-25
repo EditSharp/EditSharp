@@ -8,6 +8,7 @@ namespace EditSharp.Components.Nodes.Math
 {
     /// <summary>A keyframeable number, for a <see cref="MathNode"/> or a modulation input.</summary>
     /// <remarks>Output: Value. It has only Value ports, so it goes in video and audio graphs alike.</remarks>
+    [NodeKind("value-constant", DisplayName = "Value")]
     public sealed class ValueConstantNode : Node
     {
         Animatable<float> _value = new(0f);

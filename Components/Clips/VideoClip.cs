@@ -1,14 +1,14 @@
+using EditSharp.Components.Media;
 using System;
 using SkiaSharp;
 using EditSharp.Components.Nodes;
-using EditSharp.Components.Nodes.Sources;
+using EditSharp.Components.Nodes.Input;
 using EditSharp.History;
-using EditSharp.Components.Sources.Video;
 
 namespace EditSharp.Components.Clips
 {
     /// <summary>A clip that shows an image: its graph's inputs, through its effects.</summary>
-    /// <remarks>It goes on a <see cref="Channels.VideoChannel"/>. The factories build the usual graph: the source, then a tint, then a transform.</remarks>
+    /// <remarks>It goes on a <see cref="Channels.VideoChannel"/>. The factories build the usual graph: the input, then a tint, then a transform.</remarks>
     public sealed class VideoClip : Clip
     {
         private readonly Graph _graph;
@@ -21,15 +21,25 @@ namespace EditSharp.Components.Clips
             graph.Clip = this;
         }
 
-        /// <summary>A clip showing a source.</summary>
+        /// <summary>A clip showing a media.</summary>
         /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
-        /// <param name="source">What the clip shows.</param>
+        /// <param name="media">What the clip shows.</param>
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
-        public static VideoClip CreateFromSource(VideoSource source, TimeSpan start, TimeSpan duration) => Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(new VideoSourceNode { Source = source })) { Start = start, Duration = duration });
+        public static VideoClip CreateFromMedia(VideoMedia media, TimeSpan start, TimeSpan duration) =>
+            CreateFromInput(Transaction.Suppressed(() => new VideoMediaNode { Media = media }), start, duration);
 
-        /// <summary>A clip showing text; see <see cref="TextVideoSource"/>.</summary>
+        /// <summary>A clip showing an input node of any kind, such as a generator you've set up.</summary>
+        /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
+        /// <param name="input">Where the frames come from.</param>
+        /// <param name="start">Where the clip starts on the timeline.</param>
+        /// <param name="duration">How long it lasts.</param>
+        /// <returns>The clip.</returns>
+        public static VideoClip CreateFromInput(VideoInputNode input, TimeSpan start, TimeSpan duration) =>
+            Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(input)) { Start = start, Duration = duration });
+
+        /// <summary>A clip showing text; see <see cref="TextNode"/>.</summary>
         /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
         /// <param name="content">The text.</param>
         /// <param name="start">Where the clip starts on the timeline.</param>
@@ -43,7 +53,8 @@ namespace EditSharp.Components.Clips
         public static VideoClip CreateText(
             string content, TimeSpan start, TimeSpan duration,
             string font = "Comic Sans MS", int weight = 400, bool italic = false,
-            HorizontalTextAlignment align = HorizontalTextAlignment.Center, float size = 0.05f) => CreateFromSource(new TextVideoSource
+            HorizontalTextAlignment align = HorizontalTextAlignment.Center, float size = 0.05f) =>
+            CreateFromInput(Transaction.Suppressed(() => new TextNode
             {
                 Content = content,
                 Font = font,
@@ -51,7 +62,7 @@ namespace EditSharp.Components.Clips
                 Italic = italic,
                 HorizontalAlignment = align,
                 Size = size,
-            }, start, duration);
+            }), start, duration);
 
         /// <summary>A clip filling the frame with one colour.</summary>
         /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
@@ -60,9 +71,9 @@ namespace EditSharp.Components.Clips
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
         public static VideoClip CreateColorGenerator(SKColor color, TimeSpan start, TimeSpan duration) =>
-            CreateFromSource(Transaction.Suppressed(() => new ColorVideoSource { Color = new(color) }), start, duration);
+            CreateFromInput(Transaction.Suppressed(() => new ColorNode { Color = new(color) }), start, duration);
 
-        /// <summary>A clip filling the frame with changing noise; see <see cref="NoiseVideoSource"/>.</summary>
+        /// <summary>A clip filling the frame with changing noise; see <see cref="NoiseNode"/>.</summary>
         /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
@@ -71,7 +82,7 @@ namespace EditSharp.Components.Clips
         /// <param name="seetheRate">How fast it changes, from 0 (still) to 1.</param>
         /// <returns>The clip.</returns>
         public static VideoClip CreateNoise(TimeSpan start, TimeSpan duration, int? seed = null, float detail = 0.03f, float seetheRate = 0.03f) =>
-            CreateFromSource(Transaction.Suppressed(() => new NoiseVideoSource
+            CreateFromInput(Transaction.Suppressed(() => new NoiseNode
             {
                 Seed = seed ?? Random.Shared.Next(),
                 Detail = detail,
@@ -85,7 +96,7 @@ namespace EditSharp.Components.Clips
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
         public static VideoClip CreateTimelineEmbed(Timeline timeline, TimeSpan start, TimeSpan duration) =>
-            CreateFromSource(Transaction.Suppressed(() => new TimelineVideoSource { Timeline = timeline }), start, duration);
+            CreateFromInput(Transaction.Suppressed(() => new TimelineVideoNode { Timeline = timeline }), start, duration);
 
         /// <summary>A clip with a graph you've built, such as one with several inputs merged together.</summary>
         /// <remarks>The clip isn't placed; add it to a channel. Nothing is recorded in history.</remarks>
