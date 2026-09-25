@@ -4,27 +4,20 @@ using System.Runtime.CompilerServices;
 
 namespace EditSharp.History
 {
-    /// <summary>
-    /// One reversible step. The model produces these itself, at every
-    /// primitive write — a property set, an entry placed in or taken out
-    /// of a collection — while a Transaction is open, so an undo needs no
-    /// knowledge of what operation the writes added up to. See
-    /// Transaction's remarks for the whole design.
-    /// </summary>
+    /// <summary>One reversible step, recorded by the model at each write while a transaction is open.</summary>
     public interface IChange
     {
+        /// <summary>What was written, for display and logs.</summary>
         string Description { get; }
+
+        /// <summary>Puts back what was there before.</summary>
         void Undo();
+
+        /// <summary>Writes the change again.</summary>
         void Redo();
     }
 
-    /// <summary>
-    /// A property write, undone by writing the old value straight back
-    /// into the backing field on the SAME object — never a copy, so every
-    /// reference anything else holds to that object stays good across an
-    /// undo. `write` is a static lambda over the owner so recording a
-    /// change allocates nothing but this record.
-    /// </summary>
+    /// <summary>A property write, undone by writing the old value back into the same object.</summary>
     internal sealed class PropertyChange<TOwner, T>(TOwner owner, Action<TOwner, T> write, T oldValue, T newValue, string name) : IChange
         where TOwner : class
     {
@@ -33,7 +26,7 @@ namespace EditSharp.History
         public void Redo() => write(owner, newValue);
     }
 
-    /// <summary>A paired do/undo for anything that is not a plain property write — a collection entry, say.</summary>
+    /// <summary>A paired do and undo for anything that isn't a property write, such as a collection edit.</summary>
     internal sealed class ActionChange(Action redo, Action undo, string description) : IChange
     {
         public string Description => description;
@@ -41,63 +34,48 @@ namespace EditSharp.History
         public void Redo() => redo();
     }
 
-    /// <summary>
-    /// Everything one user action wrote, in the order it wrote it. Undone
-    /// back to front, redone front to back — each step is self-contained,
-    /// so replaying them in order reproduces the exact state either way.
-    /// </summary>
+    /// <summary>Everything one user action wrote, in order: one <see cref="History"/> entry.</summary>
+    /// <param name="description">The entry's name, shown for undo and redo.</param>
     public sealed class ChangeSet(string description) : IChange
     {
         private readonly List<IChange> _steps = [];
 
+        /// <summary>The entry's name, shown for undo and redo.</summary>
         public string Description { get; } = description;
+
+        /// <summary>The recorded writes, in the order they happened.</summary>
         public IReadOnlyList<IChange> Steps => _steps;
+
+        /// <summary>How many writes were recorded.</summary>
         public int Count => _steps.Count;
 
         internal void Add(IChange step) => _steps.Add(step);
 
+        /// <summary>Reverses every step, last first.</summary>
         public void Undo()
         {
             for (int i = _steps.Count - 1; i >= 0; i--) _steps[i].Undo();
         }
 
+        /// <summary>Reapplies every step, first first.</summary>
         public void Redo()
         {
             foreach (IChange step in _steps) step.Redo();
         }
     }
 
-    /// <summary>
-    /// The ambient recorder every mutation in the model reports to.
-    ///
-    /// THE DESIGN: rather than an inverse written by hand for each editing
-    /// operation — which would have to know every neighbour an extend
-    /// overwrites, every fragment a split produces, every keyframe a trim
-    /// shifts, and stay correct as those rules change — the model records
-    /// each primitive write as it happens (Set for a property, Apply for a
-    /// collection edit). Whoever runs a user action opens a transaction
-    /// with a name, does the operation however it likes, and commits; the
-    /// steps that landed in between become one History entry. Undo replays
-    /// them in reverse on the same objects. Anything new the model does
-    /// tomorrow is undoable the day it is written, provided it writes
-    /// through Set/Apply like everything else.
-    ///
-    /// NO TRANSACTION OPEN: a write with a History.Active but no open
-    /// transaction is not lost — it becomes an entry of its own, named
-    /// after what was written. That is a safety net, not the intended
-    /// path; a user action should always be wrapped, so it reads as one
-    /// entry with one name. With no active history at all (building the
-    /// initial project, tests) nothing is recorded.
-    ///
-    /// SUPPRESSED: constructing objects — a factory building a clip, a
-    /// Duplicate deep-copying a graph — writes plenty of properties on
-    /// things that are not part of the project yet. Those writes go
-    /// through Suppress so they neither pollute a transaction nor fall
-    /// into the safety net.
-    ///
-    /// THREADING: main thread only. Playback and rendering only ever read
-    /// the model; nothing here is made safe for concurrent writers.
-    /// </summary>
+    /// <summary>Records the model's writes so a user action can be undone as one entry.</summary>
+    /// <remarks>
+    /// The model reports each primitive write as it happens (<see cref="Set"/>
+    /// for a property, <see cref="Apply"/> for anything else). A user action
+    /// opens a transaction with <see cref="History.Begin"/>, makes its edits and
+    /// commits; the writes in between become one entry, and undo replays them
+    /// backwards on the same objects. A write with no transaction open becomes
+    /// an entry of its own in <see cref="History.Active"/>, or goes unrecorded
+    /// when there is no active history. Writes made while building objects
+    /// that aren't in the project yet go through <see cref="Suppress"/>.
+    /// Write from the main thread only.
+    /// </remarks>
     public static class Transaction
     {
         private static ChangeSet? _current;
@@ -107,17 +85,20 @@ namespace EditSharp.History
         private static int _suppressed;
         private static bool _replaying;
 
+        /// <summary>Whether a transaction is open.</summary>
         public static bool IsOpen => _current is not null;
+
+        /// <summary>Whether an undo or redo is being replayed right now.</summary>
         public static bool IsReplaying => _replaying;
+
+        /// <summary>Whether recording is switched off by <see cref="Suppress"/>.</summary>
         public static bool IsSuppressed => _suppressed > 0;
 
-        /// <summary>
-        /// Opens a transaction that commits into `history`, or joins the one
-        /// already open — a nested Begin shares the outer entry and the
-        /// outer description. Dispose the scope without Commit to roll
-        /// back everything recorded since the outermost Begin: an operation
-        /// that throws halfway leaves no half-applied entry behind.
-        /// </summary>
+        /// <summary>Opens a transaction, or joins the one already open.</summary>
+        /// <remarks>A nested call shares the outer entry and its description. Disposing any scope without committing it rolls back everything since the outermost call.</remarks>
+        /// <param name="history">Where the entry is committed.</param>
+        /// <param name="description">The entry's name, shown for undo and redo.</param>
+        /// <returns>The scope; call <see cref="Scope.Commit"/> before disposing it to keep the writes.</returns>
         public static Scope Begin(History history, string description)
         {
             if (_current is null)
@@ -131,13 +112,16 @@ namespace EditSharp.History
             return new Scope();
         }
 
+        /// <summary>One opening of a transaction; the entry is committed when the outermost scope is disposed.</summary>
         public sealed class Scope : IDisposable
         {
             private bool _committed;
             private bool _disposed;
 
+            /// <summary>Marks this scope's work as finished, so disposing it keeps the writes.</summary>
             public void Commit() => _committed = true;
 
+            /// <summary>Closes the scope. The outermost scope commits the entry, or rolls it back if any scope wasn't committed.</summary>
             public void Dispose()
             {
                 if (_disposed) return;
@@ -163,14 +147,18 @@ namespace EditSharp.History
             }
         }
 
-        /// <summary>Nothing written until the returned scope is disposed is recorded — see the class remarks, SUPPRESSED.</summary>
+        /// <summary>Stops recording until the returned object is disposed.</summary>
+        /// <returns>Dispose it to resume recording.</returns>
         public static IDisposable Suppress()
         {
             _suppressed++;
             return new Suppression();
         }
 
-        /// <summary>Runs `make` with recording suppressed — the shape every factory and Duplicate wants.</summary>
+        /// <summary>Runs <paramref name="make"/> with recording off; for factories and Duplicate.</summary>
+        /// <typeparam name="T">What <paramref name="make"/> builds.</typeparam>
+        /// <param name="make">Builds the object.</param>
+        /// <returns>What <paramref name="make"/> returned.</returns>
         public static T Suppressed<T>(Func<T> make)
         {
             using (Suppress()) return make();
@@ -188,12 +176,14 @@ namespace EditSharp.History
             }
         }
 
-        /// <summary>
-        /// The property-setter helper. Writes `value` into `field` and, when
-        /// something is listening, records how to put the old value back.
-        /// `write` must assign the backing field directly — never the
-        /// property — so replaying a change cannot re-enter recording.
-        /// </summary>
+        /// <summary>Writes a property's backing field and records how to put the old value back.</summary>
+        /// <typeparam name="TOwner">The object the property belongs to.</typeparam>
+        /// <typeparam name="T">The property's type.</typeparam>
+        /// <param name="owner">The object the property belongs to.</param>
+        /// <param name="field">The backing field.</param>
+        /// <param name="value">The new value. Nothing happens if it equals the current one.</param>
+        /// <param name="write">Assigns the backing field on an owner. It must not call the property, so replaying can't record again.</param>
+        /// <param name="name">The property's name, filled in by the compiler.</param>
         public static void Set<TOwner, T>(TOwner owner, ref T field, T value, Action<TOwner, T> write, [CallerMemberName] string name = "")
             where TOwner : class
         {
@@ -207,7 +197,10 @@ namespace EditSharp.History
             Record(new PropertyChange<TOwner, T>(owner, write, old, value, name));
         }
 
-        /// <summary>Performs `redo` now and records `undo` as its reverse — for collection edits and anything else that is not a property.</summary>
+        /// <summary>Runs <paramref name="redo"/> now and records <paramref name="undo"/> as its reverse; for collection edits and anything else that isn't a property.</summary>
+        /// <param name="redo">Makes the change.</param>
+        /// <param name="undo">Reverses it.</param>
+        /// <param name="description">What was changed, for logs.</param>
         public static void Apply(Action redo, Action undo, string description)
         {
             using (ModelLock.Write()) redo();
@@ -227,12 +220,12 @@ namespace EditSharp.History
                 return;
             }
 
-            // the safety net — see the class remarks, NO TRANSACTION OPEN
+            //no transaction open: the write becomes an entry of its own
             EditSharpConfig.Logger.LogVerbose($"History: '{change.Description}' was written outside a transaction and became its own entry.");
             History.Active!.CommitStray(change);
         }
 
-        /// <summary>Runs an undo or redo with recording switched off, so replaying writes does not record them again.</summary>
+        //runs an undo or redo with recording off, so the replayed writes aren't recorded again
         internal static void Replay(Action action)
         {
             bool was = _replaying;

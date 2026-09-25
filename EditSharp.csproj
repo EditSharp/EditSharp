@@ -8,6 +8,9 @@
     <RootNamespace>EditSharp</RootNamespace>
     <AssemblyName>EditSharp</AssemblyName>
 
+    <!-- EditSharp.xml beside the dll for doc tools; a public member without a summary warns (CS1591) -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
     <!-- Packable from day one so "publish to a feed" is a `dotnet pack` away
          once there's a second consumer, without touching the project file. -->
     <IsPackable>true</IsPackable>

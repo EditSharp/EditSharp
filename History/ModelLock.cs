@@ -3,16 +3,15 @@ using System.Threading;
 
 namespace EditSharp.History
 {
-    /// <summary>
-    /// Keeps playback threads from reading the model while it is mid-change.
-    /// Every mutation (Transaction.Set, Transaction.Apply, undo/redo replay)
-    /// holds the write side for that one change only. Session loops hold the
-    /// read side just long enough to snapshot the structure they need for a
-    /// tick (which clips are live, each graph's nodes and connections), then
-    /// work from the snapshot. Parameter values are read without the lock.
-    ///
-    /// A thread holding the read side must not write to the model.
-    /// </summary>
+    /// <summary>Keeps playback threads from reading the model while it's mid-change.</summary>
+    /// <remarks>
+    /// Every write (Transaction.Set, Transaction.Apply, undo and redo) holds the
+    /// write side for that one change. Playback and render loops hold the read
+    /// side only while they snapshot what a tick needs (the live clips, each
+    /// graph's nodes and connections), then work from the snapshot. Parameter
+    /// values are read without the lock. A thread holding the read side must
+    /// not write to the model.
+    /// </remarks>
     internal static class ModelLock
     {
         private static readonly ReaderWriterLockSlim Lock = new(LockRecursionPolicy.SupportsRecursion);

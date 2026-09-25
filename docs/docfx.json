@@ -1,0 +1,22 @@
+{
+  "metadata": [
+    {
+      "src": [ { "src": "..", "files": [ "EditSharp.csproj" ] } ],
+      "dest": "api",
+      "namespaceLayout": "nested"
+    }
+  ],
+  "build": {
+    "content": [
+      { "files": [ "api/**.yml", "api/index.md" ] },
+      { "files": [ "*.md", "toc.yml" ] }
+    ],
+    "output": "_site",
+    "template": [ "default", "modern" ],
+    "globalMetadata": {
+      "_appTitle": "EditSharp",
+      "_appName": "EditSharp",
+      "_enableSearch": true
+    }
+  }
+}
