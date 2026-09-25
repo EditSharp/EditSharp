@@ -1,6 +1,7 @@
 # Builds the API reference with DocFX and pushes it to EditSharp/editsharp.github.io,
 # which GitHub Pages serves at https://editsharp.github.io.
-# DOCS_DEPLOY_KEY is the private half of an SSH key added as a write deploy key on that repo.
+# The push uses a one-hour token from the organization's docs GitHub App, installed on
+# that repo only (repository variable DOCS_APP_ID, secret DOCS_APP_PRIVATE_KEY).
 name: Docs
 
 on:
@@ -26,10 +27,21 @@ jobs:
       - run: dotnet tool install -g docfx
       - run: docfx docs/docfx.json
 
+      - name: Docs repo token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.DOCS_APP_ID }}
+          private-key: ${{ secrets.DOCS_APP_PRIVATE_KEY }}
+          owner: EditSharp
+          repositories: editsharp.github.io
+
       - uses: peaceiris/actions-gh-pages@v4
         with:
-          deploy_key: ${{ secrets.DOCS_DEPLOY_KEY }}
+          personal_token: ${{ steps.app-token.outputs.token }}
           external_repository: EditSharp/editsharp.github.io
           publish_branch: main
           publish_dir: docs/_site
+          user_name: editsharp-docs[bot]
+          user_email: editsharp-docs[bot]@users.noreply.github.com
           commit_message: Docs for ${{ github.sha }}
