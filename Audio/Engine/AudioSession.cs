@@ -6,14 +6,14 @@ using EditSharp.Rendering;
 
 namespace EditSharp.Audio
 {
-    /// <summary>
-    /// One block of audio seen at a tap: interleaved float samples (valid only
-    /// during the callback), their format, and the timeline position of the
-    /// block's first frame.
-    /// </summary>
+    /// <summary>One block of audio seen at a tap.</summary>
+    /// <param name="Samples">Interleaved float samples; valid only during the callback, so copy them to keep them.</param>
+    /// <param name="SampleRate">Frames per second.</param>
+    /// <param name="Channels">Samples per frame.</param>
+    /// <param name="Position">The timeline time of the block's first frame.</param>
     public readonly record struct AudioTapBlock(ReadOnlyMemory<float> Samples, int SampleRate, int Channels, TimeSpan Position);
 
-    /// <summary>Well-known tap points besides node and channel ids.</summary>
+    /// <summary>Tap points that aren't a node or channel id.</summary>
     public static class AudioTap
     {
         /// <summary>The master output, after every channel is summed.</summary>

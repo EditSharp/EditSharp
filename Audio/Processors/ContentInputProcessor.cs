@@ -6,7 +6,7 @@ namespace EditSharp.Audio.Processors
     /// <summary>
     /// The processor behind every audio input node: reads the node's content
     /// stream through a ContentWarp at the clip's speed and pitch mode. `identity` is what the
-    /// stream was made from (a node's Source, a nested timeline reference);
+    /// stream was made from (the node's Source);
     /// when it changes the stream is rebuilt.
     /// </summary>
     internal sealed class ContentInputProcessor(Func<object> identity, Func<IContentAudio> create, AudioSession session) : IAudioProcessor
