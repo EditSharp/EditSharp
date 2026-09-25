@@ -3,172 +3,20 @@ using System.Collections.Generic;
 
 namespace EditSharp.Caching.Proxy
 {
-    /// <summary>
-    /// Encoder/decoder for EsrpPixelFormat.IndexedDelta7 — DIRECT
-    /// IMPLEMENTATION OF A USER-PROPOSED PSEUDOCODE DESIGN: every pixel is
-    /// stored as ONE control byte that is EITHER "the nearest color in this
-    /// file's own small palette" OR "a small modulation of the pixel
-    /// immediately to my left," whichever one lands closer to the real
-    /// source color — chosen per-pixel, not per-frame.
-    ///
-    /// NO DITHERING IS APPLIED ANYWHERE IN THIS CODEC — a deliberate
-    /// omission, not an oversight: a pixel that's close to, but not
-    /// exactly, a palette color doesn't need a faked-in neighboring
-    /// variation to read as smooth — it can instead land on an exact small
-    /// delta from its own already-chosen left neighbor, which (a) is
-    /// visually more accurate than a dithered approximation and (b) is
-    /// dramatically more compression-friendly, since a flat OR smoothly-
-    /// gradient region now tends to produce long runs of identical or
-    /// near-identical control bytes instead of a deliberately noisy dither
-    /// pattern.
-    ///
-    /// PALETTE IS 128 ENTRIES, RGB-ONLY — a direct consequence of the byte
-    /// layout below, not an independent choice: the mode bit consumes 1 of
-    /// the 8 bits, leaving only 7 for a palette index, hence at most 128
-    /// distinct palette colors. RGB-only (no alpha channel in the palette
-    /// or the delta math) because this format is used EXCLUSIVELY for
-    /// Video-type VideoSourceNode frames (see
-    /// ProxyCache.EncodeFramePixels/the scrub content source — Image/Text
-    /// input nodes never go through a scrub proxy at all), and
-    /// SourceDecoder's raw pipe always decodes video fully opaque — an
-    /// alpha channel would cost real bits for a value that's always 255 in
-    /// practice. Decode always writes A=255 accordingly (see Decode below).
-    ///
-    /// BYTE LAYOUT (one control byte per pixel), EXACTLY AS SPECIFIED:
-    ///   bit 7 (MSB):  mode — 0 = PALETTE, 1 = DELTA.
-    ///   PALETTE mode: bits 6-0 — a palette index, 0-127.
-    ///   DELTA mode:   bits 6-5 — signed R modulation level (2 bits, 4
-    ///                            steps: the eye is least sensitive to red
-    ///                            among the three, so it gets the fewest
-    ///                            bits along with blue).
-    ///                 bits 4-2 — signed G modulation level (3 bits, 8
-    ///                            steps: the eye is most sensitive to
-    ///                            green, so it gets the most bits).
-    ///                 bits 1-0 — signed B modulation level (2 bits, 4
-    ///                            steps).
-    /// Each level is stored as an unsigned field but represents a SIGNED
-    /// delta centered on zero (level - halfRange), which is then scaled by
-    /// a fixed per-channel step size (RStep/GStep/BStep below) and added to
-    /// the corresponding channel of the PREVIOUS pixel (see ApplyDelta).
-    ///
-    /// STEP SIZES ARE TUNABLE STARTING POINTS, NOT VALIDATED AGAINST REAL
-    /// CONTENT — flagged honestly: this environment has no compiler and no
-    /// way to render/inspect a real frame, so RStep/GStep/BStep below were
-    /// chosen by reasoning about plausible pixel-to-pixel deltas in
-    /// low-resolution proxy video, not measured. If real-hardware testing
-    /// shows visible banding within delta runs (steps too coarse) or a
-    /// worse-than-expected palette-mode fallback rate (steps too fine to
-    /// usefully cover typical deltas), these three constants are the first
-    /// thing to retune — nothing else about the format needs to change to
-    /// do that, since ApplyDelta is the only place step size is used. Noted
-    /// but NOT acted on this round: a luma-weighted re-split of the delta
-    /// bit budget, and a larger/alternate palette size, are both real
-    /// levers still on the table for the 720p30 size target — see
-    /// EditSharpConfig.ProxyFormat's own remarks.
-    ///
-    /// THE ENCODER MUST MIRROR THE DECODER'S OWN RECONSTRUCTED STATE, NOT
-    /// THE ORIGINAL SOURCE PIXELS — the single most important correctness
-    /// property of this codec, and NOT something the user's own pseudocode
-    /// spelled out explicitly (its EncodePixel signature takes a `previous`
-    /// Color without saying which one). A delta is only meaningful if the
-    /// encoder computes it against the EXACT color the decoder will have
-    /// already reconstructed for the pixel to the left — if the encoder
-    /// instead used the ORIGINAL (pre-quantization) left pixel, the two
-    /// sides would silently drift apart, compounding error every pixel
-    /// along a row with no way for a decoder to ever detect or correct it.
-    /// The row loop therefore tracks its own "previous" as the actual
-    /// chosen PALETTE or DELTA color for the pixel just written
-    /// (`prevR/G/B`) — never the source's own left-neighbor value — and
-    /// ApplyDelta (the one piece of arithmetic that turns a previous color
-    /// + levels into a new color) is the SAME method the encode-side
-    /// search and Decode both call, so the two can never drift apart by
-    /// construction.
-    ///
-    /// ROW-START BOOTSTRAP (a boundary case the user's pseudocode didn't
-    /// address): column 0 of every row has no left-neighbor to delta from
-    /// at all — encode/decode both treat x=0 as PALETTE mode
-    /// unconditionally, which needs no previous-pixel state to be
-    /// well-defined. This also matches the user's own stated goal for the
-    /// left-only dependency ("you could calculate every row all at once"):
-    /// every row is independently decodable from nothing but its own
-    /// bytes, so a parallel pass could in principle process every row of a
-    /// frame independently. NO GPU PATH ACTUALLY EXISTS IN THIS CODEBASE
-    /// FOR EITHER DIRECTION, THOUGH, BOTH TRIED AND BOTH REMOVED: an
-    /// earlier GPU decode attempt was removed as unneeded complexity,
-    /// since a proxy read is already a cheap, single positioned file read
-    /// regardless of pixel format (see the scrub content source's own remarks);
-    /// and a later GPU encode attempt (the GPU encoder, since
-    /// deleted) was measured to be dramatically slower than this plain
-    /// CPU path — its own per-column sequential draw-call structure ended
-    /// up dominated by GPU submission overhead, not the actual math — and
-    /// also produced visibly incorrect output, so it was reverted entirely
-    /// (see ProxyCache's own class remarks). Every row of every frame
-    /// is encoded and decoded on the CPU now.
-    ///
-    /// PER-PIXEL SEARCH IS EXACT, NOT A PER-CHANNEL APPROXIMATION: for each
-    /// pixel needing a delta candidate, FindBestDelta evaluates ALL
-    /// 4 * 8 * 4 = 128 reachable (R, G, B) combinations against the SAME
-    /// redmean-style distance metric FindNearestPaletteIndex uses for
-    /// palette candidates (see DistanceSquared) — not an independent
-    /// per-channel minimization, which would be cheaper but could pick a
-    /// combination that isn't actually the closest under the metric that
-    /// decides palette-vs-delta in the first place. 128 evaluations is
-    /// trivial next to a real frame's own pixel count, and — like every
-    /// cost in this codec — is paid exactly ONCE per proxy BUILD, never
-    /// per scrub tick (see ProxyCache.EncodeAsync's own remarks: a
-    /// one-time linear pass, not a per-tick cost). A zero-delta EXACT match
-    /// (this pixel's real color already equals its own left-neighbor's
-    /// reconstructed color) is special-cased as an immediate, distance-0
-    /// return before the full search runs at all — the extremely common
-    /// case for flat regions and slow gradients, and the case that most
-    /// directly produces the long identical-byte runs a byte-level or
-    /// general-purpose compressor handles best.
-    ///
-    /// SHARED/GLOBAL PALETTE (V6, DECIDED IN CONVERSATION) — every stored
-    /// frame USED TO carry its own freshly-built 384-byte palette (v4/v5
-    /// shape); as of format version 6, IndexedDelta7 files instead store
-    /// ONE palette for the WHOLE FILE (built from a sample of frames across
-    /// the source — see ProxyCache.BuildAsync's sampling pass), kept
-    /// once in the file's own layout (see EsrpFormat's VERSION 6
-    /// remarks) and read once by EsrpReader at Open() time, exactly
-    /// like the frame index table already is. This is a genuine ARCHITECTURE
-    /// change to this codec's public surface, split into three pieces so
-    /// each can be tested/reasoned about independently:
-    ///   - AccumulateHistogram: the exact same per-pixel color-counting
-    ///     loop Encode always ran internally, now exposed so a caller can
-    ///     run it across MULTIPLE sampled frames into one shared histogram
-    ///     before building a palette from it — nothing about the counting
-    ///     logic itself changed, it's just no longer scoped to one frame.
-    ///   - BuildPaletteFromHistogram: the exact same median-cut BuildPalette
-    ///     + WritePalette pair Encode always ran internally, now exposed
-    ///     directly so the caller can build ONE palette from the merged
-    ///     multi-frame histogram instead of Encode building a fresh one
-    ///     per frame.
-    ///   - EncodeWithPalette: the exact same per-pixel PALETTE-vs-DELTA row
-    ///     loop Encode always ran, factored out into the shared EncodeRows
-    ///     helper so it can run against an EXTERNALLY SUPPLIED palette
-    ///     (the shared one) instead of building its own. Encode (below)
-    ///     still exists, unchanged in behavior, and still calls EncodeRows
-    ///     too — it's simply no longer what ProxyCache actually calls
-    ///     for a new build; kept as a simple, still-correct, self-contained
-    ///     one-shot entry point (useful for testing this codec against a
-    ///     single frame in isolation, or for any future caller that
-    ///     genuinely wants a fresh per-frame palette again).
-    /// Decode itself needed ZERO changes for this — it already took an
-    /// explicit `palette` parameter rather than assuming a per-frame one,
-    /// so handing it the shared palette (read once, reused for every
-    /// frame) instead of a freshly-read per-frame one is exactly what its
-    /// existing signature was already built to support.
-    ///
-    /// THE DEFAULT PIXEL FORMAT (see EditSharpConfig.ProxyFormat)
-    /// — CONFIRMED ON REAL HARDWARE to deliver a dramatic size reduction
-    /// with correct behavior and good visual quality. The earlier Indexed8
-    /// format it replaced as the default was removed entirely (decided in
-    /// conversation: unnecessary complexity once IndexedDelta7 proved
-    /// better). See EsrpPixelFormat.IndexedDelta7's own remarks for
-    /// the on-disk shape this feeds and EditSharpConfig for the build-time
-    /// knob.
-    /// </summary>
+    /// <summary>The IndexedDelta7 pixel format: palette building and decoding. <see cref="IndexedDelta7Encoder"/> encodes.</summary>
+    /// <remarks>
+    /// Each pixel is one byte. With the top bit clear, the low 7 bits index the
+    /// file's shared 128-colour RGB palette. With it set, the byte is a small
+    /// change from the pixel to its left: 2 bits of red level, 3 of green and 2
+    /// of blue (green gets the most because the eye is most sensitive to it),
+    /// each a signed level scaled by RStep, GStep or BStep. The first pixel of a
+    /// row is always a palette index, so every row decodes on its own. Deltas
+    /// apply to the colour the decoder reconstructed for the left pixel, never
+    /// the source's, so encoder and decoder can't drift apart; <see cref="ApplyDelta"/>
+    /// is the one place that math happens. There is no alpha: video proxies are
+    /// opaque, and decoding writes 255. The palette is built once per proxy by
+    /// median cut over colours counted from sampled frames.
+    /// </remarks>
     internal static class IndexedDelta7Codec
     {
         private const int PaletteSize = EsrpFormat.Delta7PaletteEntryCount; // 128
@@ -185,23 +33,12 @@ namespace EditSharp.Caching.Proxy
         private const int ZeroGLevel = GLevelCount / 2; // 4 -> level 0
         private const int ZeroBLevel = BLevelCount / 2; // 2 -> level 0
 
-        // See class remarks, STEP SIZES ARE TUNABLE STARTING POINTS.
+        //how far one delta level moves each channel; chosen by reasoning about proxy footage, not measured
         private const int RStep = 6;
         private const int GStep = 4;
         private const int BStep = 6;
 
-        /// <summary>
-        /// Counts every pixel's (R,G,B) color in `source` (one frame, same
-        /// shape as Encode's own `source`) into `histogram`, ADDING to
-        /// whatever counts it already holds rather than replacing them —
-        /// see class remarks, SHARED/GLOBAL PALETTE (V6). Calling this
-        /// once per sampled frame (against the SAME dictionary instance)
-        /// is exactly how ProxyCache.BuildAsync's sampling pass builds
-        /// a histogram representative of the whole source, not just one
-        /// frame, before calling BuildPaletteFromHistogram on the result.
-        /// Alpha is read but never used, same as everywhere else in this
-        /// codec (see class remarks on why this format carries no alpha).
-        /// </summary>
+        //adds every pixel's RGB colour in one frame to `histogram`; called once per sampled frame
         public static void AccumulateHistogram(
             ReadOnlySpan<byte> source, int width, int height, Dictionary<uint, int> histogram)
         {
@@ -218,15 +55,7 @@ namespace EditSharp.Caching.Proxy
             }
         }
 
-        /// <summary>
-        /// Median-cuts `histogram` (built by one or more AccumulateHistogram
-        /// calls) down to a 128-entry RGB palette and writes it to
-        /// `paletteOut` — the exact same BuildPalette+WritePalette pair
-        /// Encode always ran internally, just exposed directly so
-        /// ProxyCache can build ONE shared palette from a multi-frame
-        /// histogram instead of Encode building a fresh one per frame. See
-        /// class remarks, SHARED/GLOBAL PALETTE (V6).
-        /// </summary>
+        //median-cuts `histogram` down to the 128-entry palette and writes it to `paletteOut`
         public static void BuildPaletteFromHistogram(Dictionary<uint, int> histogram, Span<byte> paletteOut)
         {
             if (paletteOut.Length != EsrpFormat.Delta7PaletteByteSize)
@@ -237,18 +66,7 @@ namespace EditSharp.Caching.Proxy
             WritePalette(palette, paletteOut);
         }
 
-        /// <summary>
-        /// Expands one IndexedDelta7 frame back to full RGBA8888 — the
-        /// read-side counterpart to Encode/EncodeWithPalette, used by
-        /// EsrpReader.GetFrameAt. `palette` is whatever palette this
-        /// file actually uses for every frame — as of V6, the ONE shared/
-        /// global palette read once at Open() time (see class remarks,
-        /// SHARED/GLOBAL PALETTE (V6)) — this method needed no change at
-        /// all for that: it always took an explicit palette parameter
-        /// rather than assuming a per-frame one. Alpha is always written
-        /// as 255 (opaque) — see class remarks on why this format carries
-        /// no alpha information at all.
-        /// </summary>
+        //expands one frame to RGBA8888 against the file's palette; alpha is always 255
         public static void Decode(
             ReadOnlySpan<byte> palette, ReadOnlySpan<byte> pixels, int width, int height, Span<byte> destination)
         {
@@ -300,18 +118,7 @@ namespace EditSharp.Caching.Proxy
             }
         }
 
-        /// <summary>
-        /// The ONE place previous-color + signed levels turns into an
-        /// actual channel value — called by BOTH the encode-side search
-        /// (via FindBestDelta) and Decode, so the two can never compute the
-        /// delta math differently. See class remarks, THE ENCODER MUST
-        /// MIRROR THE DECODER'S OWN RECONSTRUCTED STATE.
-        ///
-        /// A GPU re-implementation of this exact clamp/offset formula was
-        /// tried once (the GPU encoder, since deleted — see
-        /// ProxyCache's own class remarks on why) but is gone now;
-        /// this CPU version is the only place this math runs.
-        /// </summary>
+        /// <summary>The left pixel's colour moved by signed levels; the only place delta math happens, for encoding and decoding alike.</summary>
         private static void ApplyDelta(
             byte prevR, byte prevG, byte prevB, int rLevel, int gLevel, int bLevel,
             out byte r, out byte g, out byte b)
@@ -321,16 +128,7 @@ namespace EditSharp.Caching.Proxy
             b = (byte)Math.Clamp(prevB + bLevel * BStep, 0, 255);
         }
 
-        /// <summary>
-        /// Median-cut over `histogram`'s distinct (color, count) entries in
-        /// RGB (3D) space, splitting buckets until PaletteSize (128)
-        /// buckets exist or every bucket is down to one distinct color.
-        /// UNCHANGED FOR V6 — the only thing that changed is WHICH
-        /// histogram gets handed in (one frame's worth, vs. several sampled
-        /// frames' worth accumulated together — see AccumulateHistogram);
-        /// this method has no notion of "how many frames" at all, it just
-        /// median-cuts whatever counts the histogram already holds.
-        /// </summary>
+        //median cut in RGB space until there are 128 buckets or every bucket is one colour
         private static (uint Color, int Count)[] BuildPalette(Dictionary<uint, int> histogram)
         {
             var initial = new List<(uint Color, int Count)>(histogram.Count);

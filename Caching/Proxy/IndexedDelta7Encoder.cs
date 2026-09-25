@@ -2,17 +2,16 @@ using System;
 
 namespace EditSharp.Caching.Proxy
 {
-    /// <summary>
-    /// Encodes frames to IndexedDelta7 control bytes against one shared
-    /// palette, for a whole proxy build. Produces exactly the bytes
-    /// IndexedDelta7Codec.EncodeWithPalette does, faster: the nearest palette
-    /// entry for each colour is remembered for the whole build (a 16 MiB
-    /// table, filled on first sight of a colour) instead of per frame, and the
-    /// delta search picks the green and blue levels separately for each red
-    /// level (48 distance checks per pixel instead of 128).
-    ///
-    /// Thread-safe: frames may be encoded concurrently.
-    /// </summary>
+    /// <summary>Encodes frames to IndexedDelta7 against one shared palette, for a whole proxy build.</summary>
+    /// <remarks>
+    /// Each pixel becomes whichever of the nearest palette colour or the closest
+    /// delta from its left neighbour is nearer the source under the redmean
+    /// distance, ties going to the palette. The nearest palette entry for each
+    /// colour is remembered for the whole build (a 16 MiB table, filled on first
+    /// sight), and the delta search picks green and blue separately for each red
+    /// level: 48 distance checks per pixel instead of 128. Frames may be encoded
+    /// on several threads at once.
+    /// </remarks>
     internal sealed class IndexedDelta7Encoder
     {
         private const byte ModeBit = 0x80;
@@ -70,7 +69,7 @@ namespace EditSharp.Caching.Proxy
                         {
                             (int deltaCode, int dr, int dg, int db, long deltaDistance) = BestDelta(prevR, prevG, prevB, r, g, b);
 
-                            //ties go to the palette, as in the reference encoder
+                            //ties go to the palette
                             if (deltaDistance < paletteDistance)
                             {
                                 code = (byte)(ModeBit | deltaCode);
@@ -112,12 +111,8 @@ namespace EditSharp.Caching.Proxy
             return best;
         }
 
-        /// <summary>
-        /// The delta code closest to the target, first in (r, g, b) level
-        /// order among equals, matching the reference encoder's nested search.
-        /// With the red level fixed the distance's weights are fixed, so the
-        /// green and blue levels are chosen independently.
-        /// </summary>
+        //the delta code closest to the target, first in (r, g, b) level order among equals;
+        //with the red level fixed the distance's weights are too, so green and blue are chosen independently
         private static (int Code, int R, int G, int B, long Distance) BestDelta(int prevR, int prevG, int prevB, int r, int g, int b)
         {
             if (prevR == r && prevG == g && prevB == b)

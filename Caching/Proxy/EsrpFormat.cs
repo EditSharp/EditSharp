@@ -31,12 +31,9 @@ namespace EditSharp.Caching.Proxy
         IndexedDelta7 = 1,
     }
 
-    /// <summary>
-    /// The .esrp proxy file: a fixed header, an embedded JSON meta blob, an
-    /// optional shared palette, a preallocated frame index, then frame data.
-    ///
-    /// PROGRESSIVE (version 8): the file is readable while it's being
-    /// written. The index is preallocated for Capacity frames (the probed
+    /// <summary>The .esrp proxy file: a fixed header, an embedded JSON meta blob, an optional shared palette, a preallocated frame index, then frame data.</summary>
+    /// <remarks>
+    /// The file is readable while it's being written (since version 8). The index is preallocated for Capacity frames (the probed
     /// duration's worth) and zero-filled; the writer appends a frame's data,
     /// flushes, and only then fills that frame's index entry, so a non-zero
     /// entry always points at complete data. Frames are written strictly in
@@ -44,8 +41,7 @@ namespace EditSharp.Caching.Proxy
     /// the writer sets the Complete flag and the ACTUAL frame count (the
     /// container's duration can overstate it); readers then know that any
     /// frame past FrameCount is past the end rather than still pending.
-    ///
-    /// LAYOUT
+    /// <code>
     ///   [0..52)   header, little-endian:
     ///               magic u32, version i32, width i32, height i32,
     ///               pixelFormat i32, compression i32, frameRate f64,
@@ -55,7 +51,8 @@ namespace EditSharp.Caching.Proxy
     ///   palette   IndexedDelta7 only (Delta7PaletteByteSize bytes)
     ///   index     capacity * 12 bytes: offset i64, length i32 (0 = not written)
     ///   data      frame blobs, in frame order
-    /// </summary>
+    /// </code>
+    /// </remarks>
     internal static class EsrpFormat
     {
         public const uint Magic = 0x50525345; // "ESRP"

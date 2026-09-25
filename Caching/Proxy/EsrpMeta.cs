@@ -9,7 +9,7 @@ namespace EditSharp.Caching.Proxy
     /// <summary>
     /// The JSON blob embedded in every .esrp file (see EsrpFormat): which
     /// original it was built from and at what settings. Progress is not
-    /// here; it's the index itself (see EsrpFormat's PROGRESSIVE remarks).
+    /// here; it's the index itself (see EsrpFormat).
     /// </summary>
     internal sealed class EsrpMeta
     {

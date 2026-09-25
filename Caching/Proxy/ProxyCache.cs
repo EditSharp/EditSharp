@@ -9,44 +9,32 @@ using EditSharp.Video;
 
 namespace EditSharp.Caching.Proxy
 {
-    /// <summary>
-    /// The one proxy per original media file; shared by scrubbing, playback
-    /// and paused editing alike. An entry remembers its original (by content
-    /// hash, so a renamed, moved or duplicated file finds the same proxy), its
-    /// format, and how far it has been built.
-    ///
-    /// NOTHING BUILDS AUTOMATICALLY. A consumer calls BuildAsync (typically
-    /// on import) and watches StatusChanged; everything that reads media only
-    /// ever looks proxies up. Builds queue behind
-    /// EditSharpConfig.MaxConcurrentProxyBuilds; concurrent requests for the
-    /// same file share one build, which is cancelled only once every caller
-    /// has cancelled.
-    ///
-    /// PARTIAL PROXIES ARE FIRST-CLASS: a proxy is readable from its start up
-    /// to AvailableUpTo while it builds, stays readable if the build is
-    /// interrupted (ProxyState.Partial), and the next BuildAsync resumes from
-    /// there. Building a different format than the one on disk replaces it:
-    /// the old proxy keeps serving reads until the new one completes, then is
-    /// deleted.
-    ///
-    /// ON DISK (EditSharpConfig.ProxyDirectory/&lt;hash[..2]&gt;/), one stem per
-    /// format (&lt;hash&gt;.delta7, .rgba, .dnxhr, .prores) so a replacement never
-    /// collides with the proxy it replaces:
-    ///   &lt;stem&gt;.esrp                 an .esrp proxy (progress lives in its index)
-    ///   &lt;stem&gt;.mov.json             a MOV proxy's sidecar (segments/progress)
-    ///   &lt;stem&gt;.seg&lt;n&gt;.mov, &lt;stem&gt;.mov   its segments while building, its final file once complete
-    /// </summary>
+    /// <summary>Builds and finds proxies: one per original media file, used for scrubbing, playback and editing.</summary>
+    /// <remarks>
+    /// An original is identified by a hash of its content, so a renamed, moved
+    /// or copied file finds the same proxy. Nothing builds automatically: call
+    /// <see cref="BuildAsync"/> (typically on import) and watch
+    /// <see cref="StatusChanged"/>; everything that reads media only looks
+    /// proxies up. A proxy can be read up to <see cref="ProxyStatus.AvailableUpTo"/>
+    /// while it builds, stays readable if the build is interrupted, and the next
+    /// build resumes it. Building a different format replaces the proxy: the old
+    /// one serves reads until the new one completes, then is deleted.
+    /// <para>
+    /// Proxies live under <see cref="EditSharpConfig.ProxyDirectory"/>, in a folder
+    /// named after the first two characters of the hash. Each format has its own
+    /// file stem (hash.delta7, .rgba, .dnxhr, .prores): .esrp proxies are one
+    /// .esrp file, and MOV proxies are a .mov.json sidecar plus numbered segments
+    /// while building and one .mov once complete.
+    /// </para>
+    /// </remarks>
     public static class ProxyCache
     {
         internal const int SchemaVersion = 1;
 
         private static readonly TimeSpan EventInterval = TimeSpan.FromMilliseconds(250);
 
-        /// <summary>
-        /// Raised whenever a file's proxy status changes; queued, started,
-        /// progressed (at most ~4 times a second per file), finished, failed or
-        /// cancelled. Raised on a background thread.
-        /// </summary>
+        /// <summary>Raised when a file's proxy is queued, starts, progresses, finishes, fails or is cancelled.</summary>
+        /// <remarks>Progress is reported at most four times a second per file. Raised on a background thread.</remarks>
         public static event EventHandler<ProxyStatusChangedEventArgs>? StatusChanged;
 
         private sealed class Job(string hash, string sourcePath, ProxyFormat format, HardwareAccelerator hwAccel)
@@ -74,18 +62,17 @@ namespace EditSharp.Caching.Proxy
         private static readonly ConcurrentDictionary<string, ProxyStatus> Failures = new();
         private static readonly ConcurrentDictionary<(string Path, long Length, long LastWriteTicks), string> Hashes = new();
 
-        // ---------------------------------------------------------------
-        // Public API
-        // ---------------------------------------------------------------
 
-        /// <summary>
-        /// Builds `sourcePath`'s proxy in `format` (EditSharpConfig.ProxyFormat
-        /// when null), resuming a partial one of the same format, and returns
-        /// once it's complete. Returns at once if a complete proxy in that
-        /// format already exists. Cancelling only detaches this caller; the
-        /// build itself stops when no caller is left waiting on it, and what it
-        /// wrote stays usable and resumable.
-        /// </summary>
+        /// <summary>Builds a file's proxy, resuming a partial one of the same format, and finishes when it's complete.</summary>
+        /// <remarks>Finishes at once if a complete proxy in that format exists. Several callers asking for the same file share one build. Cancelling only detaches this caller; the build stops when no caller is left, and what it wrote stays readable and resumable.</remarks>
+        /// <param name="sourcePath">The original media file.</param>
+        /// <param name="format">The format to build; null for <see cref="EditSharpConfig.ProxyFormat"/>.</param>
+        /// <param name="progress">Receives the build's progress, 0 to 1.</param>
+        /// <param name="hwAccel">Whether decoding the original may use the GPU.</param>
+        /// <param name="ct">Detaches this caller from the build.</param>
+        /// <returns>The complete proxy.</returns>
+        /// <exception cref="FileNotFoundException"><paramref name="sourcePath"/> doesn't exist.</exception>
+        /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
         public static async Task<ProxyEntry> BuildAsync(
             string sourcePath, ProxyFormat? format = null, IProgress<double>? progress = null,
             HardwareAccelerator hwAccel = HardwareAccelerator.GPU, CancellationToken ct = default)
@@ -129,7 +116,11 @@ namespace EditSharp.Caching.Proxy
             }
         }
 
-        /// <summary>Where `sourcePath`'s proxy stands, looking at running builds first and then the disk.</summary>
+        /// <summary>Where a file's proxy stands, from running builds first and then the disk.</summary>
+        /// <param name="sourcePath">The original media file.</param>
+        /// <param name="ct">Cancels hashing the file.</param>
+        /// <returns>The proxy's status; <see cref="ProxyStatus.NotCached"/> when there is none.</returns>
+        /// <exception cref="FileNotFoundException"><paramref name="sourcePath"/> doesn't exist.</exception>
         public static async Task<ProxyStatus> GetStatusAsync(string sourcePath, CancellationToken ct = default)
         {
             string hash = await HashAsync(sourcePath, ct);
@@ -148,20 +139,20 @@ namespace EditSharp.Caching.Proxy
             return Failures.TryGetValue(hash, out ProxyStatus failure) ? failure : ProxyStatus.NotCached;
         }
 
-        /// <summary>
-        /// `sourcePath`'s proxy (complete or partial) if one is on disk, loading
-        /// what's needed to find it. After this, TryGetEntry answers
-        /// synchronously for the same unchanged file.
-        /// </summary>
+        /// <summary>Finds a file's proxy on disk, complete or partial.</summary>
+        /// <remarks>Afterwards <see cref="TryGetEntry"/> answers for the same unchanged file without waiting.</remarks>
+        /// <param name="sourcePath">The original media file.</param>
+        /// <param name="ct">Cancels hashing the file.</param>
+        /// <returns>The proxy, or null when there is none.</returns>
+        /// <exception cref="FileNotFoundException"><paramref name="sourcePath"/> doesn't exist.</exception>
         public static async Task<ProxyEntry?> TryGetAsync(string sourcePath, CancellationToken ct = default) =>
             await LoadAsync(await HashAsync(sourcePath, ct));
 
-        /// <summary>
-        /// Synchronous, memory-only lookup for per-frame callers: the proxy for
-        /// `sourcePath` if this process already knows it (via TryGetAsync, a
-        /// status query, or a build). Never hashes and never reads the cache
-        /// from disk; a miss only means "not known yet".
-        /// </summary>
+        /// <summary>A file's proxy, if this process already knows it; for per-frame callers that can't wait.</summary>
+        /// <remarks>Known means found by <see cref="TryGetAsync"/>, <see cref="GetStatusAsync"/> or a build. It never hashes the file or reads the disk, so false only means not known yet.</remarks>
+        /// <param name="sourcePath">The original media file.</param>
+        /// <param name="entry">The proxy, when known.</param>
+        /// <returns>Whether the proxy is known.</returns>
         public static bool TryGetEntry(string sourcePath, out ProxyEntry entry)
         {
             entry = null!;
@@ -172,10 +163,10 @@ namespace EditSharp.Caching.Proxy
             return Hashes.TryGetValue(IdentityOf(file), out string? hash) && Entries.TryGetValue(hash, out entry!);
         }
 
-        /// <summary>
-        /// Synchronous, memory-only: whether a build for `sourcePath` is queued
-        /// or running in this process right now.
-        /// </summary>
+        /// <summary>Whether a build of a file's proxy is queued or running in this process.</summary>
+        /// <remarks>Answers from memory without waiting; a file this process hasn't hashed yet reads as not building.</remarks>
+        /// <param name="sourcePath">The original media file.</param>
+        /// <returns>Whether a build is queued or running.</returns>
         public static bool IsBuilding(string sourcePath)
         {
             var file = new FileInfo(sourcePath);
@@ -184,9 +175,7 @@ namespace EditSharp.Caching.Proxy
             lock (Gate) return Jobs.ContainsKey(hash);
         }
 
-        // ---------------------------------------------------------------
-        // Queue
-        // ---------------------------------------------------------------
+        // ---- queue ----
 
         //called under Gate
         private static Job StartOrQueue(string hash, string sourcePath, ProxyFormat format, HardwareAccelerator hwAccel)
@@ -242,9 +231,7 @@ namespace EditSharp.Caching.Proxy
             }
         }
 
-        // ---------------------------------------------------------------
-        // Building
-        // ---------------------------------------------------------------
+        // ---- building ----
 
         private static async Task RunAsync(Job job)
         {
@@ -354,9 +341,7 @@ namespace EditSharp.Caching.Proxy
             static int Even(double value) => Math.Max(2, (int)Math.Round(value / 2) * 2);
         }
 
-        // ---------------------------------------------------------------
-        // Status
-        // ---------------------------------------------------------------
+        // ---- status ----
 
         private static void SetStatus(Job job, ProxyStatus status, bool force = false)
         {
@@ -417,9 +402,7 @@ namespace EditSharp.Caching.Proxy
             static int CapacityOf(string path) => EsrpReader.ReadHeaderAndMeta(path).Header.Capacity;
         }
 
-        // ---------------------------------------------------------------
-        // Identity and disk
-        // ---------------------------------------------------------------
+        // ---- identity and disk ----
 
         private static (string, long, long) IdentityOf(FileInfo file) =>
             (Path.GetFullPath(file.FullName).ToLowerInvariant(), file.Length, file.LastWriteTimeUtc.Ticks);

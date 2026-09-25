@@ -5,8 +5,7 @@ using Microsoft.Win32.SafeHandles;
 namespace EditSharp.Caching.Proxy
 {
     /// <summary>
-    /// Writes an .esrp proxy progressively (see EsrpFormat's PROGRESSIVE
-    /// remarks): every Append writes the frame's data, then its index entry,
+    /// Writes an .esrp proxy progressively (see EsrpFormat): every Append writes the frame's data, then its index entry,
     /// each as one positioned write straight to the OS, so a concurrent
     /// EsrpReader never sees an entry before its data. Complete stamps the
     /// actual frame count and the Complete flag last.

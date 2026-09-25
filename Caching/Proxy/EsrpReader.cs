@@ -18,21 +18,18 @@ namespace EditSharp.Caching.Proxy
         PastEnd,
     }
 
-    /// <summary>
-    /// Reads one .esrp proxy (see EsrpFormat) with no subprocess and no
-    /// decoder: a frame is one positioned read plus, depending on the file's
-    /// format, a Zstd decompression and/or a palette expansion.
-    ///
-    /// SAFE AGAINST A FILE STILL BEING WRITTEN: the file is opened sharing
+    /// <summary>Reads one .esrp proxy without ffmpeg: a frame is one positioned read, then Zstd decompression or palette expansion as the file's format needs.</summary>
+    /// <remarks>
+    /// Works on a file still being written: it's opened sharing
     /// write access, the index is cached only as far as it's known to be
     /// filled, and asking for a frame beyond that re-reads just the missing
     /// stretch of the index (and the header's Complete flag) from disk. A
     /// growing proxy therefore becomes readable frame by frame without ever
     /// reopening the reader.
     ///
-    /// One reader per consumer: the scratch buffers are reused across calls
-    /// and are not synchronized.
-    /// </summary>
+    /// Use one reader per consumer: the scratch buffers are reused across calls
+    /// and aren't synchronized.
+    /// </remarks>
     internal sealed class EsrpReader : IDisposable
     {
         private readonly SafeFileHandle _handle;
