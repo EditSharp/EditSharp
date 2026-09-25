@@ -4,74 +4,55 @@ using System.Text;
 
 namespace EditSharp.Video
 {
+    /// <summary>The video codec a render encodes with.</summary>
     public enum VideoCodec
     {
+        /// <summary>H.264 (AVC); hardware encoders are tried first when the GPU is allowed.</summary>
         H264,
+
+        /// <summary>H.265 (HEVC); hardware encoders are tried first when the GPU is allowed.</summary>
         H265,
+
+        /// <summary>AV1; hardware encoders are tried first when the GPU is allowed.</summary>
         AV1,
+
+        /// <summary>An animated GIF, with no audio; always encoded on the CPU.</summary>
         GIF,
+
+        /// <summary>FFV1, lossless; always encoded on the CPU.</summary>
         FFV1,
 
-        /// <summary>
-        /// Avid DNxHR — one of two codecs OptimizedMediaCache can build its
-        /// persistent optimized media with (see EditSharpConfig.
-        /// OptimizedMediaCodec), and the DEFAULT of the two: an open format
-        /// with no licensing friction, and ffmpeg's "dnxhd" encoder handles
-        /// it natively and cross-platform. All-intra, which is the entire
-        /// point for this use — see OptimizedMediaCache's class remarks.
-        /// CPU encode/decode only; no vendor has a hardware codec block for
-        /// this format — decided in conversation, see OptimizedMediaCache's
-        /// remarks on Vulkan Video's actual codec coverage (H.264/HEVC/AV1
-        /// only, nothing else, on any vendor).
-        /// </summary>
+        /// <summary>Avid DNxHR: every frame a keyframe, open, and read by most editors; always encoded on the CPU.</summary>
         DNxHR,
 
-        /// <summary>
-        /// Apple ProRes — the other codec OptimizedMediaCache can build
-        /// optimized media with. Common in pro NLE ecosystems; ffmpeg's
-        /// "prores_ks" encoder (not the older, lower-quality "prores") is
-        /// what this project uses for it. Same all-intra, CPU-only
-        /// reasoning as DNxHR — see its own remarks.
-        /// </summary>
+        /// <summary>Apple ProRes, through ffmpeg's prores_ks encoder: every frame a keyframe; always encoded on the CPU.</summary>
         ProRes,
     }
 
+    /// <summary>The audio codec a render encodes with.</summary>
     public enum AudioCodec
     {
+        /// <summary>AAC at 192 kb/s.</summary>
         AAC,
+
+        /// <summary>MP3 through LAME, at 192 kb/s.</summary>
         MP3,
+
+        /// <summary>FLAC, lossless.</summary>
         FLAC
     }
 
-    /// <summary>
-    /// A single top-level switch covering every stage of the pipeline that
-    /// has a hardware path at all: source DECODE (SourceDecoder's ffmpeg
-    /// subprocesses), in-process COMPOSITE (the Skia GRContext the
-    /// compositor's surfaces are backed by, see GpuContext/SurfacePool),
-    /// and final ENCODE (FfmpegRunner's mux/encode step). Replaces the old
-    /// Nvenc-only enum, which named one specific vendor encoder rather than
-    /// describing an intent — this one says "use hardware wherever it's
-    /// available" and leaves resolving that to the fastest option ACTUALLY
-    /// present on the machine at each of the three stages independently.
-    ///
-    /// None forces software at every single stage, deliberately and
-    /// unconditionally — not "prefer software", an absolute guarantee, since
-    /// this is the value a consumer reaches for specifically to get
-    /// deterministic, hardware-independent output (e.g. matching a
-    /// reference render, or working around a suspect driver).
-    ///
-    /// GPU attempts hardware at each stage independently, probes it before
-    /// committing, and falls back to software FOR THAT STAGE ONLY if the
-    /// probe fails — decided in conversation: a machine with working NVENC
-    /// but no GPU decode support shouldn't lose GPU encoding just because
-    /// decode fell back. Every fallback is logged loudly via
-    /// EditSharpConfig.Logger.Log (not LogVerbose) specifically so a sudden,
-    /// unexplained slowdown on GPU is never silent — see FfmpegRunner and
-    /// GpuContext for where each stage's probe and fallback actually happen.
-    /// </summary>
+    /// <summary>Whether decoding, compositing and encoding may use the GPU.</summary>
     public enum HardwareAccelerator
     {
+        /// <summary>Software at every stage, for output that doesn't depend on the machine's GPU or driver.</summary>
         None,
+
+        /// <summary>
+        /// The GPU at each stage where it works. Each stage (decode, composite,
+        /// encode) is probed on its own and falls back to software alone if its
+        /// probe fails; every fallback is logged.
+        /// </summary>
         GPU,
     }
 }

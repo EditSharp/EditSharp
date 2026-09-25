@@ -11,13 +11,7 @@ using System.Threading.Tasks;
 
 namespace EditSharp.Video
 {
-    /// <summary>
-    /// Everything the assembler needs to know about a media file, read in ONE
-    /// ffprobe call.
-    ///
-    /// Duration is null when the container reports none, which is normal for
-    /// still images.
-    /// </summary>
+    //what one ffprobe call says about a file; Duration is null for still images
     internal readonly record struct MediaInfo(
         bool HasVideo,
         int Width,
@@ -27,18 +21,7 @@ namespace EditSharp.Video
         bool IsStillImage,
         double? FrameRate);
 
-    /// <summary>
-    /// Thin wrapper around ffprobe (invoked directly via Process, no FFMpegCore
-    /// dependency). Resolves "ffprobe" from PATH, same as how FfmpegRunner
-    /// resolves "ffmpeg".
-    ///
-    /// ProbeAsync deliberately asks for everything at once. The assembler needs
-    /// three facts about most sources — pixel dimensions, duration, and whether
-    /// there is an audio stream at all — and fetching them separately meant
-    /// spawning three ffprobe processes per clip, which on a timeline of any size
-    /// is most of the time spent before ffmpeg even starts. One call with
-    /// -show_streams and -show_format answers all three.
-    /// </summary>
+    //runs ffprobe (EditSharpConfig.FfprobePath) once per file for streams and format together
     internal static class MediaProbe
     {
         private static string[] ProbeArgs(string path) =>
@@ -53,24 +36,9 @@ namespace EditSharp.Video
         public static async Task<MediaInfo> ProbeAsync(string path) =>
             Parse(await RunFfprobeAsync(ProbeArgs(path)));
 
-        /// <summary>
-        /// Blocking probe, for authoring code that has no async context to await
-        /// in — sizing a clip to its media from a property setter or constructor,
-        /// for instance.
-        ///
-        /// This is a real synchronous implementation rather than .Result on the
-        /// async one. Blocking on a Task that resumes on a captured
-        /// synchronization context deadlocks on a UI thread, which is precisely
-        /// where a synchronous overload is most likely to get called.
-        ///
-        /// It still launches a process and waits for it, so it is not free — do not
-        /// call it in a loop on a thread that has a window to keep repainting.
-        /// </summary>
-        public static MediaInfo Probe(string path) => Parse(RunFfprobe(ProbeArgs(path)));
-
         private static readonly ConcurrentDictionary<(string Path, long Length, long LastWriteTicks), Lazy<Task<MediaInfo>>> Cache = new();
 
-        /// <summary>A finished ProbeCachedAsync result for this file, if there is one; never starts a probe.</summary>
+        //a finished ProbeCachedAsync result for this file, if there is one; never starts a probe
         public static bool TryGetCached(string path, out MediaInfo info)
         {
             info = default!;
@@ -84,13 +52,8 @@ namespace EditSharp.Video
             return true;
         }
 
-        /// <summary>
-        /// ProbeAsync, remembered per file for as long as the file is unchanged
-        /// (keyed by full path, size and last-write time, so an edited file is
-        /// re-probed). Concurrent callers share one ffprobe. A missing file
-        /// throws FileNotFoundException rather than probing; a failed probe is
-        /// forgotten so the next call retries.
-        /// </summary>
+        //ProbeAsync, remembered while the file's path, size and write time are unchanged; concurrent
+        //callers share one ffprobe, a missing file throws FileNotFoundException, and a failed probe is retried next time
         public static Task<MediaInfo> ProbeCachedAsync(string path)
         {
             var file = new FileInfo(path);
@@ -127,8 +90,7 @@ namespace EditSharp.Video
 
                     switch (type.GetString())
                     {
-                        //only the FIRST video stream is measured, matching the
-                        //v:0 selection the separate calls used to make
+                        //only the first video stream is measured
                         case "video" when !hasVideo:
                             hasVideo = true;
                             if (stream.TryGetProperty("width", out JsonElement w)) width = w.GetInt32();
@@ -181,68 +143,6 @@ namespace EditSharp.Video
                 return null;
 
             return numerator / denominator;
-        }
-
-        /// <summary>
-        /// Native pixel dimensions. Prefer ProbeAsync when more than one fact about
-        /// the file is needed — this spawns a process of its own.
-        /// </summary>
-        public static async Task<(int Width, int Height)> GetDimensionsAsync(string path)
-        {
-            MediaInfo info = await ProbeAsync(path);
-
-            if (!info.HasVideo)
-                throw new InvalidOperationException(
-                    $"'{path}' has no video/image stream to read dimensions from.");
-
-            return (info.Width, info.Height);
-        }
-
-        /// <summary>
-        /// Total duration of the file. Prefer ProbeAsync when more than one fact
-        /// about the file is needed — this spawns a process of its own.
-        /// </summary>
-        public static async Task<TimeSpan> GetDurationAsync(string path)
-        {
-            MediaInfo info = await ProbeAsync(path);
-
-            return info.Duration
-                ?? throw new InvalidOperationException($"'{path}' has no readable duration.");
-        }
-
-        /// <summary>
-        /// Whether the file has at least one audio stream. A video file isn't
-        /// guaranteed to have one (e.g. a silent download) — the filter graph must
-        /// not reference [idx:a] on a source that has no audio stream at all, or
-        /// ffmpeg fails to bind the graph outright.
-        /// </summary>
-        public static async Task<bool> HasAudioStreamAsync(string path) =>
-            (await ProbeAsync(path)).HasAudio;
-
-        /// <summary>
-        /// Synchronous ffprobe.
-        ///
-        /// stderr is drained on a background task while stdout is read on this
-        /// thread. Reading them one after the other on a single thread can deadlock
-        /// if the pipe the process is writing to fills up while nothing is
-        /// consuming it.
-        /// </summary>
-        private static string RunFfprobe(params string[] args)
-        {
-            using var process = new Process { StartInfo = BuildStartInfo(args) };
-
-            process.Start();
-
-            Task<string> stderrTask = process.StandardError.ReadToEndAsync();
-            string stdout = process.StandardOutput.ReadToEnd();
-
-            process.WaitForExit();
-
-            if (process.ExitCode != 0)
-                throw new InvalidOperationException(
-                    $"ffprobe exited with code {process.ExitCode}:\n{stderrTask.GetAwaiter().GetResult()}");
-
-            return stdout;
         }
 
         private static ProcessStartInfo BuildStartInfo(string[] args)
