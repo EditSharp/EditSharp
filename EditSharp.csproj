@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -15,7 +15,7 @@
          once there's a second consumer, without touching the project file. -->
     <IsPackable>true</IsPackable>
     <PackageId>EditSharp</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Description>C#/ffmpeg timeline video (and, eventually, image) editing pipeline.</Description>
     <Authors>CoolBeansStudio</Authors>
     <RepositoryUrl>https://github.com/EditSharp/EditSharp</RepositoryUrl>
@@ -29,7 +29,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="SkiaSharp" Version="4.151.1" />
+    <PackageReference Include="SkiaSharp" Version="4.152.1" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
     <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
   </ItemGroup>
