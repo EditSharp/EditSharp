@@ -1,12 +1,12 @@
 # Packs EditSharp and pushes it to nuget.org with Trusted Publishing: no stored API key.
 # nuget.org exchanges this run's GitHub identity token for a short-lived key, per the
 # trusted publishing policy on the CoolBean64 account (owner EditSharp, repo EditSharp, workflow nuget.yml).
-# A tag like v0.2.0 publishes 0.2.0; a push to main publishes <Version>-ci.<run number> as a prerelease.
+# Only a pushed tag like v0.2.0 publishes a release (0.2.0); ordinary commits publish nothing.
+# Running the workflow by hand from the Actions tab publishes <Version>-ci.<run number> as a prerelease.
 name: NuGet
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
