@@ -10,7 +10,7 @@ namespace EditSharp.Components.Media
     {
         public override VstInstrumentMedia Duplicate() => (VstInstrumentMedia)base.Duplicate();
 
-        public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default)
+        public override Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default)
         {
             throw new NotImplementedException();
         }

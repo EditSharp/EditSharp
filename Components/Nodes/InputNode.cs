@@ -32,15 +32,15 @@ namespace EditSharp.Components.Nodes
     /// </remarks>
     public abstract class InputNode : Node
     {
-        TimeSpan? _start;
+        Time? _start;
         /// <summary>How far into the content to start; null starts at the beginning.</summary>
         [Editable("In point")]
-        public TimeSpan? Start { get => _start; set { Transaction.Set(this, ref _start, value, static (o, v) => o._start = v); EndMayHaveMoved(); } }
+        public Time? Start { get => _start; set { Transaction.Set(this, ref _start, value, static (o, v) => o._start = v); EndMayHaveMoved(); } }
 
-        TimeSpan? _duration;
+        Time? _duration;
         /// <summary>How much of the content to use from <see cref="Start"/>; null uses everything there is.</summary>
         [Editable("Duration")]
-        public TimeSpan? Duration { get => _duration; set { Transaction.Set(this, ref _duration, value, static (o, v) => o._duration = v); EndMayHaveMoved(); } }
+        public Time? Duration { get => _duration; set { Transaction.Set(this, ref _duration, value, static (o, v) => o._duration = v); EndMayHaveMoved(); } }
 
         bool _loop;
         /// <summary>Whether the trimmed window repeats instead of ending.</summary>
@@ -55,25 +55,25 @@ namespace EditSharp.Components.Nodes
         /// <param name="ct">Cancels finding the length.</param>
         /// <returns>The length, or null when the content has no end of its own (a still image, a generator).</returns>
         /// <exception cref="SourceUnavailableException">The content can't be read.</exception>
-        public abstract Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default);
+        public abstract Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default);
 
         /// <summary>How much content the input offers from <see cref="Start"/>: <see cref="Duration"/>, cut short by the end of the content.</summary>
         /// <param name="ct">Cancels finding the length.</param>
         /// <returns>The length; null when there's neither a Duration nor a natural length, zero when Start is at or past the end.</returns>
         /// <exception cref="SourceUnavailableException">The content can't be read.</exception>
         /// <exception cref="InvalidOperationException"><see cref="Start"/> is negative.</exception>
-        public async Task<TimeSpan?> GetUsableLengthAsync(CancellationToken ct = default)
+        public async Task<Time?> GetUsableLengthAsync(CancellationToken ct = default)
         {
-            TimeSpan? length = ResolveWindow(await GetNaturalLengthAsync(ct)).Length;
-            return length < TimeSpan.Zero ? TimeSpan.Zero : length;
+            Time? length = ResolveWindow(await GetNaturalLengthAsync(ct)).Length;
+            return length < Time.Zero ? Time.Zero : length;
         }
 
         /// <summary><see cref="GetNaturalLengthAsync"/>'s answer, if it's known right away.</summary>
         /// <param name="length">The natural length when known; otherwise null.</param>
         /// <returns>False while the length still has to be found, such as for a file not probed yet.</returns>
-        public virtual bool TryGetNaturalLength(out TimeSpan? length)
+        public virtual bool TryGetNaturalLength(out Time? length)
         {
-            Task<TimeSpan?> task = GetNaturalLengthAsync();
+            Task<Time?> task = GetNaturalLengthAsync();
             length = task.IsCompletedSuccessfully ? task.Result : null;
             return task.IsCompletedSuccessfully;
         }
@@ -82,28 +82,28 @@ namespace EditSharp.Components.Nodes
         /// <param name="length">The usable length when known; otherwise null.</param>
         /// <returns>False while the natural length still has to be found.</returns>
         /// <exception cref="InvalidOperationException"><see cref="Start"/> is negative.</exception>
-        public bool TryGetUsableLength(out TimeSpan? length)
+        public bool TryGetUsableLength(out Time? length)
         {
             length = null;
-            if (!TryGetNaturalLength(out TimeSpan? natural)) return false;
+            if (!TryGetNaturalLength(out Time? natural)) return false;
 
             length = ResolveWindow(natural).Length;
-            if (length < TimeSpan.Zero) length = TimeSpan.Zero;
+            if (length < Time.Zero) length = Time.Zero;
             return true;
         }
 
         /// <summary><see cref="Start"/>, zero when unset; how far into the content the clip starts.</summary>
-        public TimeSpan InPoint
+        public Time InPoint
         {
-            get => Start ?? TimeSpan.Zero;
+            get => Start ?? Time.Zero;
             set => Start = value;
         }
 
         /// <summary>How far the in-point can move earlier: back to the start of the content.</summary>
-        public TimeSpan MaxHeadroom => Start ?? TimeSpan.Zero;
+        public Time MaxHeadroom => Start ?? Time.Zero;
 
         /// <summary>The usable length; null when the input loops, has no end, or isn't known yet.</summary>
-        public TimeSpan? ContentLength => !Loop && TryGetUsableLength(out TimeSpan? length) ? length : null;
+        public Time? ContentLength => !Loop && TryGetUsableLength(out Time? length) ? length : null;
 
         /// <summary>A deep copy with a new <see cref="Node.Id"/>, made by saving and loading this node.</summary>
         /// <remarks>History is suppressed: the copy has nothing to undo. A media or a nested timeline is shared, not copied.</remarks>
@@ -131,16 +131,16 @@ namespace EditSharp.Components.Nodes
         /// <param name="naturalLength">The content's length; null if it has no end.</param>
         /// <returns>Where the window starts, and its length; a null length has no end, a negative one starts past the end.</returns>
         /// <exception cref="InvalidOperationException"><see cref="Start"/> is negative.</exception>
-        protected internal (TimeSpan Start, TimeSpan? Length) ResolveWindow(TimeSpan? naturalLength)
+        protected internal (Time Start, Time? Length) ResolveWindow(Time? naturalLength)
         {
-            TimeSpan start = Start ?? TimeSpan.Zero;
+            Time start = Start ?? Time.Zero;
 
-            if (start < TimeSpan.Zero)
+            if (start < Time.Zero)
                 throw new InvalidOperationException($"{GetType().Name}: Start ({start}) is negative.");
 
-            TimeSpan? remaining = naturalLength - start;
+            Time? remaining = naturalLength - start;
 
-            TimeSpan? length = (Duration, remaining) switch
+            Time? length = (Duration, remaining) switch
             {
                 ({ } d, { } r) => d < r ? d : r,
                 ({ } d, null) => d,
@@ -159,17 +159,17 @@ namespace EditSharp.Components.Nodes
         /// <exception cref="ArgumentOutOfRangeException"><paramref name="contentTime"/> is negative.</exception>
         /// <exception cref="SourceUnavailableException"><see cref="SourceUnavailableReason.EndOfSource"/>: the time is past the end of the window and Loop is off, or Start is at or past the end of the content.</exception>
         /// <exception cref="InvalidOperationException"><see cref="Start"/> is negative.</exception>
-        protected internal TimeSpan ToMaterialTime(TimeSpan contentTime, TimeSpan? naturalLength)
+        protected internal Time ToMaterialTime(Time contentTime, Time? naturalLength)
         {
-            if (contentTime < TimeSpan.Zero)
+            if (contentTime < Time.Zero)
                 throw new ArgumentOutOfRangeException(nameof(contentTime), contentTime, "Content time cannot be negative.");
 
-            (TimeSpan start, TimeSpan? length) = ResolveWindow(naturalLength);
+            (Time start, Time? length) = ResolveWindow(naturalLength);
 
             if (length is not { } window)
                 return start + contentTime;
 
-            if (window <= TimeSpan.Zero)
+            if (window <= Time.Zero)
                 throw new SourceUnavailableException(SourceUnavailableReason.EndOfSource,
                     $"{GetType().Name}: Start ({start}) is at or past the end of the content ({naturalLength}).");
 
@@ -180,7 +180,7 @@ namespace EditSharp.Components.Nodes
                 throw new SourceUnavailableException(SourceUnavailableReason.EndOfSource,
                     $"{GetType().Name}: {contentTime} is past the end of its {window} window.");
 
-            return start + TimeSpan.FromTicks(contentTime.Ticks % window.Ticks);
+            return start + contentTime % window;
         }
     }
 }

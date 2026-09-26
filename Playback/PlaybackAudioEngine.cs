@@ -27,9 +27,17 @@ namespace EditSharp.Playback
 
         private AudioEngine? _engine;
         private Task? _pumpTask;
+        private double? _pace;
+
+        /// <summary>How fast to play from now on, without the sign; heard once the audio already rendered ahead has played.</summary>
+        public void SetPace(double pace)
+        {
+            _pace = pace;
+            _engine?.SetPace(pace);
+        }
 
         public async Task StartAsync(
-            Timeline timeline, TimeSpan startPosition, double speed, PitchPreservation pitch, AudioTaps taps,
+            Timeline timeline, Time startPosition, double speed, PitchPreservation pitch, AudioTaps taps,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
             PlaybackReferenceClock referenceClock, bool followsReferenceClock, bool dropsLateChunks,
             Action<AudioSampleEventArgs> onSample, CancellationToken token)
@@ -39,6 +47,7 @@ namespace EditSharp.Playback
                 var session = new AudioSession(new AudioFormat(SampleRate, ChannelCount), waitForSources: false, taps: taps);
                 var engine = new AudioEngine(timeline, session, startPosition, speed, pitch);
                 _engine = engine;
+                if (_pace is { } pace) engine.SetPace(pace);
 
                 //waits for the sources audible at the start, so playback doesn't open on a gap
                 await Task.Run(engine.Start, token);
@@ -67,7 +76,6 @@ namespace EditSharp.Playback
             EditSharpConfig.Logger.LogVerbose(followsReferenceClock ? "Audio now following the reference clock." : "Audio pacing clock started.");
 
             int direction = Math.Sign(speed);
-            double pace = Math.Abs(speed);
             long framesDelivered = 0;
             byte[] bytes = [];
 
@@ -81,9 +89,9 @@ namespace EditSharp.Playback
                 if (block is null) break;
 
                 //due when everything before it has played: real time, whatever the speed
-                TimeSpan target = TimeSpan.FromSeconds(framesDelivered / (double)SampleRate);
-                TimeSpan position = block.Position;
-                TimeSpan length = TimeSpan.FromSeconds(block.Frames / (double)SampleRate * pace);
+                Time target = Time.FromSamples(framesDelivered, SampleRate);
+                Time position = block.Position;
+                Time length = Time.FromSamples(block.Frames, SampleRate).Scale(block.Pace);
                 framesDelivered += block.Frames;
 
                 //FrameDropping: already a whole block behind the clock
@@ -95,25 +103,30 @@ namespace EditSharp.Playback
                     if (token.IsCancellationRequested) return;
                     if (!await WaitWhilePausedAsync(pauseGate, clock, token)) return;
 
-                    TimeSpan wait;
+                    Time wait;
                     if (followsReferenceClock)
                     {
                         //timeline time until the clock reaches this block, in wall time
-                        TimeSpan gap = (position - referenceClock.Position) * direction;
-                        wait = gap > TimeSpan.Zero ? Max(gap / pace, PlaybackReferenceClock.PollInterval) : TimeSpan.Zero;
+                        Time gap = (position - referenceClock.Position) * direction;
+                        wait = gap > Time.Zero ? Max(gap.Scale(1d / Math.Abs(referenceClock.Rate)), PlaybackReferenceClock.PollInterval) : Time.Zero;
                     }
                     else
                     {
-                        wait = target - clock!.Elapsed;
+                        wait = target - Time.FromTimeSpan(clock!.Elapsed);
                     }
 
-                    if (wait <= TimeSpan.Zero) break;
+                    if (wait <= Time.Zero) break;
 
-                    try { await Task.Delay(wait, token); }
+                    try { await Task.Delay(wait.ToTimeout(), token); }
                     catch (OperationCanceledException) { return; }
                 }
 
-                if (!followsReferenceClock) referenceClock.Report(position);
+                //the clock moves at the pace of the audio being heard, which lags a speed change by what was queued
+                if (!followsReferenceClock)
+                {
+                    referenceClock.SetRate(direction * block.Pace);
+                    referenceClock.Report(position);
+                }
 
                 int length16 = block.Samples.Length * 2;
                 if (bytes.Length < length16) bytes = new byte[length16];
@@ -144,7 +157,7 @@ namespace EditSharp.Playback
             }
         }
 
-        private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+        private static Time Max(Time a, Time b) => a > b ? a : b;
 
         public void Dispose()
         {

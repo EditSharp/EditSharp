@@ -35,14 +35,14 @@ namespace EditSharp.Components.Nodes.Input
         public bool TryGetDefault(string propertyName, out object? value)
         {
             value = null;
-            if (propertyName != nameof(Duration) || !TryGetNaturalLength(out TimeSpan? length) || length is null) return false;
+            if (propertyName != nameof(Duration) || !TryGetNaturalLength(out Time? length) || length is null) return false;
 
             value = length;
             return true;
         }
 
         /// <inheritdoc/>
-        public override bool TryGetNaturalLength(out TimeSpan? length)
+        public override bool TryGetNaturalLength(out Time? length)
         {
             if (Media is { } media) return media.TryGetNaturalLength(out length);
 
@@ -50,10 +50,6 @@ namespace EditSharp.Components.Nodes.Input
             return true;
         }
 
-        /// <summary>The media's length.</summary>
-        /// <param name="ct">Cancels finding it.</param>
-        /// <returns>The length; null if the media has none, or when no media is selected.</returns>
-        /// <exception cref="SourceUnavailableException">The media can't be read.</exception>
         /// <inheritdoc/>
         /// <remarks>Reads the media's <see cref="Audio.Analysis.AudioAnalysis"/> at the content time mapped through the in-point, duration and loop; silence when the analysis isn't in memory or the time is outside the media.</remarks>
         public override void DescribeSpectrum(in Audio.Analysis.SpectralContext context, ReadOnlySpan<Audio.Analysis.SpectralFrame> inputs, Audio.Analysis.SpectralFrame output, ref object? state)
@@ -62,12 +58,12 @@ namespace EditSharp.Components.Nodes.Input
 
             if (Media is not { } media || string.IsNullOrEmpty(media.Path) || !Audio.Analysis.AudioAnalysisCache.TryGet(media.Path, out Audio.Analysis.AudioAnalysis analysis)) return;
 
-            TimeSpan material;
-            if (context.ContentTime < TimeSpan.Zero)
+            Time material;
+            if (context.ContentTime < Time.Zero)
             {
                 //before the in-point: the room a head extend would reach into
-                material = (Start ?? TimeSpan.Zero) + context.ContentTime;
-                if (material < TimeSpan.Zero) return;
+                material = (Start ?? Time.Zero) + context.ContentTime;
+                if (material < Time.Zero) return;
             }
             else
             {
@@ -81,8 +77,8 @@ namespace EditSharp.Components.Nodes.Input
         }
 
         /// <inheritdoc/>
-        public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) =>
-            Media?.GetNaturalLengthAsync(ct) ?? Task.FromResult<TimeSpan?>(null);
+        public override Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default) =>
+            Media?.GetNaturalLengthAsync(ct) ?? Task.FromResult<Time?>(null);
 
         internal override async Task<IPreparedAudioSource> PrepareAsync(CancellationToken ct = default)
         {

@@ -13,7 +13,7 @@ namespace EditSharp.Caching.Proxy
     /// <summary>What a proxy build needs to know, resolved once by ProxyCache before any builder runs.</summary>
     internal sealed record ProxyBuildPlan(
         string SourcePath, string Hash, MediaInfo Info, ProxyFormat Format,
-        int Width, int Height, double FrameRate, int TotalFrames, HardwareAccelerator HwAccel);
+        int Width, int Height, Rational FrameRate, int TotalFrames, HardwareAccelerator HwAccel);
 
     /// <summary>
     /// Builds (or resumes) an .esrp proxy: one SourceDecoder pass at the
@@ -58,7 +58,7 @@ namespace EditSharp.Caching.Proxy
                 try
                 {
                     using SourceDecoder decoder = SourceDecoder.Start(
-                        plan.SourcePath, writer.FramesWritten / plan.FrameRate, plan.FrameRate, plan.Width, plan.Height, decode);
+                        plan.SourcePath, Time.FromFrame(writer.FramesWritten, plan.FrameRate), plan.FrameRate, plan.Width, plan.Height, decode);
 
                     for (int index = writer.FramesWritten; index < header.Capacity; index++)
                     {
@@ -158,7 +158,7 @@ namespace EditSharp.Caching.Proxy
             };
 
             EditSharpConfig.Logger.Log(
-                $"Building {plan.Format} proxy for '{plan.SourcePath}' ({plan.Width}x{plan.Height} @ {plan.FrameRate:0.###}fps, " +
+                $"Building {plan.Format} proxy for '{plan.SourcePath}' ({plan.Width}x{plan.Height} @ {plan.FrameRate}fps, " +
                 $"{plan.TotalFrames} frames).");
 
             return EsrpWriter.Create(
@@ -180,11 +180,13 @@ namespace EditSharp.Caching.Proxy
         /// </summary>
         private static byte[] BuildPalette(ProxyBuildPlan plan, DecodeHwAccelPlan decode)
         {
-            double seconds = Math.Max(plan.TotalFrames / plan.FrameRate, 1.0);
-            double sampleRate = Math.Min(PaletteSampleFrames / seconds, PaletteSampleFrames);
+            //PaletteSampleFrames over the source's length, at most that many per second
+            Rational seconds = new Rational(plan.TotalFrames) / plan.FrameRate;
+            if (seconds < Rational.One) seconds = Rational.One;
+            Rational sampleRate = new Rational(PaletteSampleFrames) / seconds;
             var histogram = new Dictionary<uint, int>();
 
-            using (SourceDecoder sampler = SourceDecoder.Start(plan.SourcePath, 0, sampleRate, plan.Width, plan.Height, decode))
+            using (SourceDecoder sampler = SourceDecoder.Start(plan.SourcePath, Time.Zero, sampleRate, plan.Width, plan.Height, decode))
             {
                 for (int i = 0; i < PaletteSampleFrames; i++)
                 {

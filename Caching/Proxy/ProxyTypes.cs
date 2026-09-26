@@ -48,13 +48,13 @@ namespace EditSharp.Caching.Proxy
     /// <param name="Error">Why the last build failed; null unless <paramref name="State"/> is Failed.</param>
     public readonly record struct ProxyStatus(
         ProxyState State,
-        TimeSpan AvailableUpTo,
+        Time AvailableUpTo,
         ProxyFormat? Format,
         double Progress,
         Exception? Error)
     {
         /// <summary>The status of a file with no proxy.</summary>
-        public static ProxyStatus NotCached => new(ProxyState.NotCached, TimeSpan.Zero, null, 0, null);
+        public static ProxyStatus NotCached => new(ProxyState.NotCached, Time.Zero, null, 0, null);
     }
 
     /// <summary>Details of a proxy status change.</summary>
@@ -76,7 +76,7 @@ namespace EditSharp.Caching.Proxy
     /// <param name="Width">The proxy's width in pixels.</param>
     /// <param name="Height">The proxy's height in pixels.</param>
     /// <param name="FrameRate">The proxy's frames per second.</param>
-    public sealed record ProxyEntry(string SourceHash, ProxyFormat Format, string Path, int Width, int Height, double FrameRate)
+    public sealed record ProxyEntry(string SourceHash, ProxyFormat Format, string Path, int Width, int Height, Rational FrameRate)
     {
         /// <summary>Whether the proxy is an .esrp file.</summary>
         public bool IsEsrp => Format is ProxyFormat.EsrpDelta7 or ProxyFormat.EsrpRgba;

@@ -11,7 +11,7 @@ namespace EditSharp.Audio
     /// <param name="SampleRate">Frames per second.</param>
     /// <param name="Channels">Samples per frame.</param>
     /// <param name="Position">The timeline time of the block's first frame.</param>
-    public readonly record struct AudioTapBlock(ReadOnlyMemory<float> Samples, int SampleRate, int Channels, TimeSpan Position);
+    public readonly record struct AudioTapBlock(ReadOnlyMemory<float> Samples, int SampleRate, int Channels, Time Position);
 
     /// <summary>Tap points that aren't a node or channel id.</summary>
     public static class AudioTap
@@ -37,9 +37,9 @@ namespace EditSharp.Audio.Engine
         public RenderReportBuilder? Report { get; } = report;
         public AudioTaps Taps { get; } = taps ?? new();
 
-        public long FrameOf(TimeSpan time) => (long)Math.Round(time.TotalSeconds * Format.SampleRate);
+        public long FrameOf(Time time) => time.ToSamples(Format.SampleRate, Rounding.Nearest);
 
-        public TimeSpan TimeOf(long frame) => TimeSpan.FromSeconds(frame / (double)Format.SampleRate);
+        public Time TimeOf(long frame) => Time.FromSamples(frame, Format.SampleRate);
     }
 
     /// <summary>Listeners on node, channel and master outputs; see Playback.TapAudio.</summary>
@@ -65,7 +65,7 @@ namespace EditSharp.Audio.Engine
             });
         }
 
-        public void Publish(Guid id, float[] samples, int count, AudioFormat format, TimeSpan position)
+        public void Publish(Guid id, float[] samples, int count, AudioFormat format, Time position)
         {
             if (!_listeners.TryGetValue(id, out var listeners)) return;
 

@@ -14,9 +14,9 @@ namespace EditSharp.Components.Nodes.Input
     {
         private readonly IPreparedVideoSource _inner;
         private readonly InputNode _node;
-        private readonly TimeSpan? _naturalLength;
+        private readonly Time? _naturalLength;
 
-        private WindowedVideo(IPreparedVideoSource inner, InputNode node, TimeSpan? naturalLength)
+        private WindowedVideo(IPreparedVideoSource inner, InputNode node, Time? naturalLength)
         {
             _inner = inner;
             _node = node;
@@ -24,7 +24,7 @@ namespace EditSharp.Components.Nodes.Input
         }
 
         /// <summary>Wraps a prepared media; one bound to the compositor stays bound.</summary>
-        public static IPreparedVideoSource Wrap(IPreparedVideoSource inner, InputNode node, TimeSpan? naturalLength) =>
+        public static IPreparedVideoSource Wrap(IPreparedVideoSource inner, InputNode node, Time? naturalLength) =>
             inner is ICompositorBound ? new Bound(inner, node, naturalLength) : new WindowedVideo(inner, node, naturalLength);
 
         public (int Width, int Height) NativeSize => _inner.NativeSize;
@@ -33,7 +33,7 @@ namespace EditSharp.Components.Nodes.Input
 
         public void Dispose() => _inner.Dispose();
 
-        private sealed class Bound(IPreparedVideoSource inner, InputNode node, TimeSpan? naturalLength)
+        private sealed class Bound(IPreparedVideoSource inner, InputNode node, Time? naturalLength)
             : WindowedVideo(inner, node, naturalLength), ICompositorBound;
 
         //the media's reader is opened at the first mapped time: right away when the start is inside the
@@ -43,11 +43,11 @@ namespace EditSharp.Components.Nodes.Input
         {
             private readonly IPreparedVideoSource _prepared;
             private readonly InputNode _node;
-            private readonly TimeSpan? _naturalLength;
+            private readonly Time? _naturalLength;
             private readonly VideoReaderOptions _options;
             private IVideoFrameReader? _inner;
 
-            public Reader(IPreparedVideoSource prepared, InputNode node, TimeSpan? naturalLength, VideoReaderOptions options)
+            public Reader(IPreparedVideoSource prepared, InputNode node, Time? naturalLength, VideoReaderOptions options)
             {
                 _prepared = prepared;
                 _node = node;
@@ -58,14 +58,14 @@ namespace EditSharp.Components.Nodes.Input
                 catch (SourceUnavailableException ex) when (ex.Reason == SourceUnavailableReason.EndOfSource) { }
             }
 
-            public VideoFrame GetFrame(TimeSpan contentTime)
+            public VideoFrame GetFrame(Time contentTime)
             {
-                TimeSpan time = _node.ToMaterialTime(contentTime, _naturalLength);
+                Time time = _node.ToMaterialTime(contentTime, _naturalLength);
                 if (_inner is null) Open(time);
                 return _inner!.GetFrame(time);
             }
 
-            private void Open(TimeSpan time) => _inner = _prepared.OpenReader(_options with { StartAt = time });
+            private void Open(Time time) => _inner = _prepared.OpenReader(_options with { StartAt = time });
 
             public void Dispose() => _inner?.Dispose();
         }
@@ -79,7 +79,7 @@ namespace EditSharp.Components.Nodes.Input
     /// a loop wrap). The window ends the stream, or loops it; the media running
     /// out before its probed length is its real end.
     /// </summary>
-    internal sealed class WindowedAudio(IPreparedAudioSource inner, InputNode node, TimeSpan? naturalLength) : IPreparedAudioSource
+    internal sealed class WindowedAudio(IPreparedAudioSource inner, InputNode node, Time? naturalLength) : IPreparedAudioSource
     {
         public IAudioSampleReader OpenReader(AudioReaderOptions options) => new Reader(inner, node, naturalLength, options);
 
@@ -89,7 +89,7 @@ namespace EditSharp.Components.Nodes.Input
         {
             private readonly IPreparedAudioSource _prepared;
             private readonly InputNode _node;
-            private readonly TimeSpan? _naturalLength;
+            private readonly Time? _naturalLength;
             private readonly AudioReaderOptions _options;
             private readonly int _rate;
             private readonly int _channels;
@@ -101,7 +101,7 @@ namespace EditSharp.Components.Nodes.Input
             private IAudioSampleReader? _reader;
             private long _readerFrame; //file frame the reader delivers next
 
-            public Reader(IPreparedAudioSource prepared, InputNode node, TimeSpan? naturalLength, AudioReaderOptions options)
+            public Reader(IPreparedAudioSource prepared, InputNode node, Time? naturalLength, AudioReaderOptions options)
             {
                 _prepared = prepared;
                 _node = node;
@@ -109,7 +109,7 @@ namespace EditSharp.Components.Nodes.Input
                 _options = options;
                 _rate = options.SampleRate;
                 _channels = options.Channels;
-                _position = (long)System.Math.Round(options.StartAt.TotalSeconds * _rate);
+                _position = options.StartAt.ToSamples(_rate, Rounding.Nearest);
             }
 
             public int Read(Span<float> destination)
@@ -122,9 +122,9 @@ namespace EditSharp.Components.Nodes.Input
 
                 while (written < wanted)
                 {
-                    (TimeSpan start, TimeSpan? length) = _node.ResolveWindow(_naturalLength);
-                    long startFrame = (long)System.Math.Round(start.TotalSeconds * _rate);
-                    long? windowFrames = length is { } l ? (long)System.Math.Floor(l.TotalSeconds * _rate) : null;
+                    (Time start, Time? length) = _node.ResolveWindow(_naturalLength);
+                    long startFrame = start.ToSamples(_rate, Rounding.Nearest);
+                    long? windowFrames = length is { } l ? l.ToSamples(_rate) : null;
 
                     if (windowFrames is { } frames && _position >= frames)
                     {
@@ -170,7 +170,7 @@ namespace EditSharp.Components.Nodes.Input
                 if (_reader is null || frame != _readerFrame)
                 {
                     _reader?.Dispose();
-                    _reader = _prepared.OpenReader(_options with { StartAt = TimeSpan.FromSeconds(frame / (double)_rate) });
+                    _reader = _prepared.OpenReader(_options with { StartAt = Time.FromSamples(frame, _rate) });
                     _readerFrame = frame;
                 }
 

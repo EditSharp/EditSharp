@@ -23,7 +23,7 @@ namespace EditSharp.Components.Media
 
         /// <inheritdoc/>
         /// <remarks>Answers from the probe cache; a file not probed yet starts its probe in the background.</remarks>
-        public override bool TryGetNaturalLength(out TimeSpan? length)
+        public override bool TryGetNaturalLength(out Time? length)
         {
             length = null;
 
@@ -41,7 +41,7 @@ namespace EditSharp.Components.Media
         /// <param name="ct">Cancels waiting for the probe.</param>
         /// <returns>The file's length; null if it has none.</returns>
         /// <exception cref="SourceUnavailableException"><see cref="SourceUnavailableReason.NoMedia"/> when no file is chosen; <see cref="SourceUnavailableReason.MediaOffline"/> when it's missing; <see cref="SourceUnavailableReason.DecodeError"/> when it can't be probed.</exception>
-        public override async Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) =>
+        public override async Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default) =>
             (await ProbeAsync(Path, ct)).Duration;
 
         /// <summary>The sample rate peaks are measured at.</summary>
@@ -56,18 +56,18 @@ namespace EditSharp.Components.Media
         /// <exception cref="ArgumentOutOfRangeException"><paramref name="duration"/> isn't positive, or <paramref name="buckets"/> isn't positive.</exception>
         /// <exception cref="SourceUnavailableException">The file can't provide samples.</exception>
         /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
-        public virtual async Task<AudioPeaks> GetPeaksAsync(TimeSpan start, TimeSpan duration, int buckets, CancellationToken ct = default)
+        public virtual async Task<AudioPeaks> GetPeaksAsync(Time start, Time duration, int buckets, CancellationToken ct = default)
         {
-            if (duration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(duration), "duration must be positive.");
+            if (duration <= Time.Zero) throw new ArgumentOutOfRangeException(nameof(duration), "duration must be positive.");
             if (buckets <= 0) throw new ArgumentOutOfRangeException(nameof(buckets), "buckets must be positive.");
 
             using IPreparedAudioSource prepared = await PrepareAsync(ct).ConfigureAwait(false);
 
             return await Task.Run(() =>
             {
-                using IAudioSampleReader reader = prepared.OpenReader(new AudioReaderOptions(PeakSampleRate, 1, start < TimeSpan.Zero ? TimeSpan.Zero : start));
+                using IAudioSampleReader reader = prepared.OpenReader(new AudioReaderOptions(PeakSampleRate, 1, start < Time.Zero ? Time.Zero : start));
 
-                long total = (long)Math.Round(duration.TotalSeconds * PeakSampleRate);
+                long total = duration.ToSamples(PeakSampleRate, Rounding.Nearest);
                 var peaks = new PeakAccumulator(buckets, total);
                 float[] block = new float[8192];
                 long read = 0;

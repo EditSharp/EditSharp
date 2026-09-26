@@ -12,7 +12,7 @@ namespace EditSharp.Compositing.Graphs
     {
         //null when nothing enabled is connected, so the caller uses the node's own value unmodulated
         public static float? TryEvaluateConnectedInput(
-            Graph graph, Node node, string inputPortName, TimeSpan time)
+            Graph graph, Node node, string inputPortName, Time time)
         {
             Connection? c = graph.Connections.FirstOrDefault(x => x.ToNodeId == node.Id && x.ToPort == inputPortName);
             if (c == null) return null;
@@ -24,7 +24,7 @@ namespace EditSharp.Compositing.Graphs
             return Evaluate(graph, source, c.FromPort, time);
         }
 
-        private static float Evaluate(Graph graph, Node node, string outputPortName, TimeSpan time)
+        private static float Evaluate(Graph graph, Node node, string outputPortName, Time time)
         {
             switch (node)
             {

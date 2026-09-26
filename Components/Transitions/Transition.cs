@@ -16,10 +16,10 @@ namespace EditSharp.Components.Transitions
         /// <summary>The clip the transition arrives at; set by <see cref="Channels.Channel.AddTransition"/>.</summary>
         public Clip To { get => _to; internal set => Transaction.Set(this, ref _to, value, static (o, v) => o._to = v); }
 
-        TimeSpan _duration;
+        Time _duration;
         /// <summary>How long the transition lasts: the time its two clips overlap.</summary>
         [Editable("Duration")]
-        public TimeSpan Duration { get => _duration; set => Transaction.Set(this, ref _duration, value, static (o, v) => o._duration = v); }
+        public Time Duration { get => _duration; set => Transaction.Set(this, ref _duration, value, static (o, v) => o._duration = v); }
 
         /// <summary>A copy with the same settings, not attached to any clips.</summary>
         /// <remarks>Nothing is recorded in history.</remarks>

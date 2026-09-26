@@ -24,8 +24,8 @@ namespace EditSharp.Components
     /// holds (a video's audio) written inside it under their own Ids. A node
     /// saves exactly its [Editable] properties: never its Id, which a loaded node
     /// gets fresh, nor a composite's inner graph, since graphs aren't saved yet.
-    /// Property names are camelCase and TimeSpans are "c"-format strings
-    /// (JsonSerializerDefaults.Web). Enums are saved as names, keyframed values
+    /// Property names are camelCase (JsonSerializerDefaults.Web), a Time is its
+    /// tick count and a Rational is "num/den". Enums are saved as names, keyframed values
     /// carry their whole track, colours are "#AARRGGBB", a nested Timeline is
     /// saved as its Id, and a media held by a node is saved as its Id.
     /// </para>

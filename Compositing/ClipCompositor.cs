@@ -9,11 +9,11 @@ using EditSharp.Components.Clips;
 namespace EditSharp.Compositing
 {
     //what evaluating a clip's graph needs besides the graph; content sizes come from each TransformNode's own input
-    internal readonly struct SkClipChainContext(int canvasWidth, int canvasHeight, int fps)
+    internal readonly struct SkClipChainContext(int canvasWidth, int canvasHeight, Rational fps)
     {
         public int CanvasWidth { get; } = canvasWidth;
         public int CanvasHeight { get; } = canvasHeight;
-        public int Fps { get; } = fps;
+        public Rational Fps { get; } = fps;
     }
 
     //evaluates a clip's graph with its sources' content and draws the result onto the canvas
@@ -23,14 +23,12 @@ namespace EditSharp.Compositing
             SKCanvas canvas,
             Graph graph,
             IReadOnlyDictionary<Guid, SKImage> resolvedInputs,
-            double clipSeconds,
+            Time contentTime,
             SkClipChainContext context,
             SurfacePool pool)
         {
-            var clipRelativeTime = TimeSpan.FromSeconds(clipSeconds);
-
             using SKImage final = ImageGraphEvaluator.Evaluate(
-                graph, resolvedInputs, clipRelativeTime, context, pool);
+                graph, resolvedInputs, contentTime, context, pool);
 
             canvas.DrawImage(final, 0, 0);
         }

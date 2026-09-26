@@ -30,11 +30,11 @@ namespace EditSharp.Components.Nodes.Input
         /// <summary>Always null: noise has no end of its own.</summary>
         /// <param name="ct">Unused.</param>
         /// <returns>Null.</returns>
-        public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult<TimeSpan?>(null);
+        public override Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult<Time?>(null);
 
         internal override Task<IPreparedVideoSource> PrepareAsync(VideoPrepareContext context, CancellationToken ct = default) =>
             Task.FromResult<IPreparedVideoSource>(new PreparedGenerator(this, (contentTime, size) =>
                 GeneratedFrames.Record(size, canvas =>
-                    NoiseGenerator.Draw(canvas, Seed, Detail, SeetheRate, contentTime.TotalSeconds, size.Width, size.Height))));
+                    NoiseGenerator.Draw(canvas, Seed, Detail, SeetheRate, contentTime.Seconds, size.Width, size.Height))));
     }
 }

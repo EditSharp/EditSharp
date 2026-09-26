@@ -6,7 +6,7 @@ namespace EditSharp.Components.Nodes.Input
 {
     /// <summary>A generator: each frame is drawn at canvas size into a recorded picture, which the compositor rasterizes on the GPU.</summary>
     /// <remarks>Nothing is prepared, and only the node's Duration ends it.</remarks>
-    internal sealed class PreparedGenerator(VideoInputNode node, Func<TimeSpan, SKSizeI, SKImage> render) : IPreparedVideoSource
+    internal sealed class PreparedGenerator(VideoInputNode node, Func<Time, SKSizeI, SKImage> render) : IPreparedVideoSource
     {
         public (int Width, int Height) NativeSize => (0, 0);
 
@@ -14,9 +14,9 @@ namespace EditSharp.Components.Nodes.Input
 
         public void Dispose() { }
 
-        private sealed class Reader(VideoInputNode node, Func<TimeSpan, SKSizeI, SKImage> render, VideoReaderOptions options) : IVideoFrameReader
+        private sealed class Reader(VideoInputNode node, Func<Time, SKSizeI, SKImage> render, VideoReaderOptions options) : IVideoFrameReader
         {
-            public VideoFrame GetFrame(TimeSpan contentTime)
+            public VideoFrame GetFrame(Time contentTime)
             {
                 node.ToMaterialTime(contentTime, null);
                 return new VideoFrame(render(contentTime, GeneratedFrames.Canvas(options)), Transient: true);

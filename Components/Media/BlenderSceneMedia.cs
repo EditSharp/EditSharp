@@ -13,7 +13,7 @@ namespace EditSharp.Components.Media
 
         public override BlenderSceneMedia Duplicate() => (BlenderSceneMedia)base.Duplicate();
 
-        public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default)
+        public override Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default)
         {
             throw new NotImplementedException();
         }

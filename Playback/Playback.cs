@@ -60,8 +60,35 @@ namespace EditSharp.Playback
         /// <summary>What playback gives up when it can't keep up. Read when a session starts.</summary>
         public PlaybackMode PlaybackMode = PlaybackMode.SyncToAudio;
 
-        /// <summary>Timeline seconds per second of real time: 1 is normal, 2 double speed, negative plays in reverse. Can't be 0. Read when a session starts.</summary>
-        public float Speed = 1f;
+        private float _speed = 1f;
+
+        /// <summary>Timeline seconds per second of real time: 1 is normal, 2 double speed, negative plays in reverse.</summary>
+        /// <remarks>
+        /// Takes effect at once. In the same direction a session carries on at the new speed (audio already rendered
+        /// ahead, up to <see cref="EditSharpConfig.AudioLatency"/>, plays out first); a change of direction restarts a
+        /// playing session where it is, and a paused one when it resumes. <see cref="Play"/> refuses 0.
+        /// </remarks>
+        public float Speed
+        {
+            get => Volatile.Read(ref _speed);
+            set
+            {
+                Volatile.Write(ref _speed, value);
+                if (value == 0f) return;
+
+                bool restart;
+                lock (_stateLock)
+                {
+                    if (!SessionActive) return;
+
+                    restart = (value < 0f) != _sessionReverse;
+                    if (!restart) _audioEngine?.SetPace(Math.Abs(value));
+                    restart &= _state == PlaybackState.Playing;
+                }
+
+                if (restart) Play(Position);
+            }
+        }
 
         /// <summary>How audio keeps its pitch when <see cref="Speed"/> isn't 1, reverse included. Read when a session starts.</summary>
         public PitchPreservation PreservePitch = PitchPreservation.WSOLA;
@@ -75,10 +102,11 @@ namespace EditSharp.Playback
         /// <returns>Dispose it to remove the tap.</returns>
         public IDisposable TapAudio(Guid id, Action<AudioTapBlock> onBlock) => _audioTaps.Add(id, onBlock);
 
-        private TimeSpan _lastKnownPosition = TimeSpan.Zero;
+        private Time _lastKnownPosition = Time.Zero;
         private PlaybackReferenceClock? _referenceClock;
         /// <summary>Where playback is on the timeline: moving while playing, or the last position played or scrubbed to.</summary>
-        public TimeSpan Position => _referenceClock?.Position ?? _lastKnownPosition;
+        /// <remarks>Always within the timeline; the clock reading ahead of the last frame at a high speed stops at the end.</remarks>
+        public Time Position => Time.Clamp(_referenceClock?.Position ?? _lastKnownPosition, Time.Zero, Timeline.Duration);
 
         /// <summary>What playback is doing.</summary>
         public PlaybackState State => _state;
@@ -133,6 +161,9 @@ namespace EditSharp.Playback
         private PlaybackAudioEngine? _audioEngine;
         private PlaybackPauseGate? _pauseGate;
 
+        //which way the current session reads; a Speed of the other sign needs a new session
+        private bool _sessionReverse;
+
         //bumped by each scrub and snapshotted by Pause, so resuming knows whether a scrub moved the
         //position; the open decoders can't jump there, so the session restarts from it
         private int _scrubGeneration;
@@ -165,7 +196,7 @@ namespace EditSharp.Playback
         /// <exception cref="NotSupportedException"><see cref="Speed"/> is 0.</exception>
         /// <exception cref="ArgumentException">The timeline has no channels.</exception>
         /// <exception cref="ArgumentOutOfRangeException"><paramref name="startPosition"/> is outside the timeline.</exception>
-        public void Play(TimeSpan? startPosition = null)
+        public void Play(Time? startPosition = null)
         {
             //before taking _stateLock, on both paths: a scrub allowed while paused would otherwise race the session
             EndScrubbing();
@@ -174,7 +205,7 @@ namespace EditSharp.Playback
             {
                 if (SessionActive && startPosition == null)
                 {
-                    if (_scrubGeneration == _scrubGenerationAtPause)
+                    if (_scrubGeneration == _scrubGenerationAtPause && (Speed < 0f) == _sessionReverse)
                     {
                         //no scrub since the pause: resume in place
                         _pauseGate?.Resume();
@@ -183,9 +214,9 @@ namespace EditSharp.Playback
                         return;
                     }
 
-                    //a scrub moved the position while paused and the open decoders can't jump there:
-                    //restart from the scrubbed position
-                    startPosition = _referenceClock?.Position;
+                    //a scrub moved the position while paused, or the direction changed, and the open decoders
+                    //can't follow: restart from where playback is
+                    if (_referenceClock is { } clock) startPosition = Time.Clamp(clock.Position, Time.Zero, Timeline.Duration);
                 }
             }
 
@@ -202,13 +233,14 @@ namespace EditSharp.Playback
                 if (Timeline.Channels.Count == 0)
                     throw new ArgumentException("Timeline must contain at least one Channel.");
 
-                TimeSpan resolvedStart = startPosition ?? Position;
+                Time resolvedStart = startPosition ?? Position;
 
-                if (resolvedStart < TimeSpan.Zero || resolvedStart > Timeline.Duration)
+                if (resolvedStart < Time.Zero || resolvedStart > Timeline.Duration)
                     throw new ArgumentOutOfRangeException(nameof(startPosition),
                         $"startPosition must be within [0, {Timeline.Duration}].");
 
                 bool reverse = Speed < 0f;
+                _sessionReverse = reverse;
 
                 _state = PlaybackState.Playing;
                 _cts = new CancellationTokenSource();
@@ -293,7 +325,7 @@ namespace EditSharp.Playback
                 _cts = null;
                 _pauseGate = null;
 
-                _lastKnownPosition = _referenceClock?.Position ?? _lastKnownPosition;
+                _lastKnownPosition = Position;
                 _referenceClock = null;
             }
 
@@ -334,7 +366,7 @@ namespace EditSharp.Playback
         /// <exception cref="InvalidOperationException">Called while playing.</exception>
         /// <exception cref="ArgumentOutOfRangeException"><paramref name="position"/> is outside the timeline.</exception>
         /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
-        public async Task ScrubToAsync(TimeSpan position, CancellationToken ct = default)
+        public async Task ScrubToAsync(Time position, CancellationToken ct = default)
         {
             lock (_stateLock)
             {
@@ -343,7 +375,7 @@ namespace EditSharp.Playback
                         "ScrubToAsync cannot be used while playing; Pause() first.");
             }
 
-            if (position < TimeSpan.Zero || position > Timeline.Duration)
+            if (position < Time.Zero || position > Timeline.Duration)
                 throw new ArgumentOutOfRangeException(nameof(position),
                     $"position must be within [0, {Timeline.Duration}].");
 
@@ -369,7 +401,7 @@ namespace EditSharp.Playback
 
             int width = (int)RenderSettings.Resolution.X;
             int height = (int)RenderSettings.Resolution.Y;
-            int fps = RenderSettings.Framerate;
+            Rational fps = RenderSettings.Framerate;
 
             try
             {
@@ -435,9 +467,9 @@ namespace EditSharp.Playback
         /// </summary>
         private async Task<(byte[] Buffer, int Length)> ComposeInstantFrameAsync(
             ClipContentSource contentSource, SurfacePool pool, GpuThreadDispatcher gpuThread,
-            TimeSpan position, int width, int height, int fps, CancellationToken ct = default)
+            Time position, int width, int height, Rational fps, CancellationToken ct = default)
         {
-            int frameIndex = (int)(position.TotalSeconds * fps);
+            int frameIndex = (int)position.ToFrame(fps);
             FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps);
 
             await contentSource.PrepareAsync(state, ct).ConfigureAwait(false);
@@ -446,7 +478,7 @@ namespace EditSharp.Playback
                 FrameCompositor.RenderFrame(state, contentSource, width, height, fps, pool)).ConfigureAwait(false);
         }
 
-        private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+        private static Time Max(Time a, Time b) => a > b ? a : b;
 
         private Task EnsureScrubSessionBaseAsync(int width, int height) =>
             _scrubSetupTask ??= BuildScrubSessionAsync(width, height);
@@ -488,7 +520,7 @@ namespace EditSharp.Playback
         /// <exception cref="ArgumentOutOfRangeException"><paramref name="width"/> or <paramref name="height"/> isn't positive.</exception>
         /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
         public async Task<ClipFrame> RenderClipFrameAsync(
-            VideoClip clip, TimeSpan contentTime, int width, int height, CancellationToken ct = default)
+            VideoClip clip, Time contentTime, int width, int height, CancellationToken ct = default)
         {
             ArgumentNullException.ThrowIfNull(clip);
             if (width <= 0 || height <= 0)
@@ -496,8 +528,8 @@ namespace EditSharp.Playback
 
             int canvasWidth = (int)RenderSettings.Resolution.X;
             int canvasHeight = (int)RenderSettings.Resolution.Y;
-            int fps = RenderSettings.Framerate;
-            double clipSeconds = Math.Max(0d, contentTime.TotalSeconds);
+            Rational fps = RenderSettings.Framerate;
+            contentTime = Time.Max(Time.Zero, contentTime);
 
             await _scrubGate.WaitAsync(ct).ConfigureAwait(false);
             try
@@ -511,12 +543,12 @@ namespace EditSharp.Playback
                 using (ModelLock.Read()) graph = clip.Graph.Snapshot();
 
                 (IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> media, bool mediaComplete) =
-                    await source.GetMediaFramesOnceAsync(graph, clipSeconds, width, height, ct).ConfigureAwait(false);
+                    await source.GetMediaFramesOnceAsync(graph, contentTime, width, height, ct).ConfigureAwait(false);
 
                 return await _scrubGpuThread!.RunAsync(() =>
                 {
                     IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> resolved =
-                        source.GetContent(clip, graph, clipSeconds, 0, width, height, pool, media);
+                        source.GetContent(clip, graph, contentTime, 0, width, height, pool, media);
                     bool complete = mediaComplete && !source.LastFrameIncomplete;
 
                     var plain = new Dictionary<Guid, SKImage>(resolved.Count);
@@ -531,7 +563,7 @@ namespace EditSharp.Playback
                         try
                         {
                             surface.Canvas.Clear(SKColors.Black);
-                            ClipCompositor.Composite(surface.Canvas, graph, plain, clipSeconds, context, pool);
+                            ClipCompositor.Composite(surface.Canvas, graph, plain, contentTime, context, pool);
 
                             using SKImage image = surface.Snapshot();
                             return new ClipFrame(ReadPixels(image, width, height), width, height, complete);
@@ -567,10 +599,10 @@ namespace EditSharp.Playback
         /// <exception cref="ArgumentNullException"><paramref name="clip"/> is null.</exception>
         /// <exception cref="ArgumentOutOfRangeException"><paramref name="contentDuration"/> isn't positive, or <paramref name="buckets"/> isn't positive.</exception>
         /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
-        public Task<AudioPeaks> RenderClipAudioPeaksAsync(AudioClip clip, TimeSpan contentStart, TimeSpan contentDuration, int buckets, CancellationToken ct = default)
+        public Task<AudioPeaks> RenderClipAudioPeaksAsync(AudioClip clip, Time contentStart, Time contentDuration, int buckets, CancellationToken ct = default)
         {
             ArgumentNullException.ThrowIfNull(clip);
-            if (contentDuration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(contentDuration), "contentDuration must be positive.");
+            if (contentDuration <= Time.Zero) throw new ArgumentOutOfRangeException(nameof(contentDuration), "contentDuration must be positive.");
             if (buckets <= 0) throw new ArgumentOutOfRangeException(nameof(buckets), "buckets must be positive.");
 
             return Task.Run(() =>
@@ -584,8 +616,8 @@ namespace EditSharp.Playback
 
                 network.Prepare(graph, wait: true);
 
-                long total = (long)Math.Round(contentDuration.TotalSeconds * format.SampleRate);
-                double startFrame = contentStart.TotalSeconds * format.SampleRate;
+                long total = contentDuration.ToSamples(format.SampleRate, Rounding.Nearest);
+                long startFrame = contentStart.ToSamples(format.SampleRate, Rounding.Nearest);
                 var peaks = new PeakAccumulator(buckets, total);
                 float[] mix = new float[session.BlockFrames * format.Channels];
 
@@ -598,9 +630,9 @@ namespace EditSharp.Playback
 
                     var tick = new AudioTick(
                         format, frame, frames,
-                        contentStart + TimeSpan.FromSeconds(frame / (double)format.SampleRate),
+                        contentStart + Time.FromSamples(frame, format.SampleRate),
                         startFrame + frame,
-                        1d / format.SampleRate,
+                        Rational.One,
                         graph,
                         PitchPreservation.Off);
 
@@ -670,16 +702,16 @@ namespace EditSharp.Playback
         /// A skipped frame isn't emitted; the previous one stays on screen.
         /// </summary>
         //how long a frame that missed its time is still waited for before it's skipped
-        private static readonly TimeSpan LateFrameGrace = TimeSpan.FromMilliseconds(400);
+        private static readonly Time LateFrameGrace = Time.FromMilliseconds(400);
 
         private async Task VideoLoopAsync(
-            CancellationToken token, TimeSpan startPosition,
+            CancellationToken token, Time startPosition,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
             PlaybackReferenceClock referenceClock, bool followsReferenceClock)
         {
             int width = (int)RenderSettings.Resolution.X;
             int height = (int)RenderSettings.Resolution.Y;
-            int fps = RenderSettings.Framerate;
+            Rational fps = RenderSettings.Framerate;
             PlaybackMode mode = PlaybackMode;
 
             try
@@ -690,8 +722,8 @@ namespace EditSharp.Playback
                         fps, width, height, RenderSettings.HardwareAccelerator, RenderSettings.SourceMode,
                         VideoReadMode.Sequential, ContentFailurePolicy.Preview, Buffered: true, Direction: 1));
 
-                    int startFrame = (int)(startPosition.TotalSeconds * fps);
-                    int totalFrames = Math.Max(1, (int)Math.Ceiling(Timeline.Duration.TotalSeconds * fps));
+                    int startFrame = (int)startPosition.ToFrame(fps);
+                    int totalFrames = Math.Max(1, (int)Timeline.Duration.ToFrame(fps, Rounding.Ceiling));
 
                     FrameState warmupState = FrameStateResolver.Resolve(Timeline, startFrame, fps);
                     await contentSource.PrepareAsync(warmupState, token);
@@ -709,7 +741,7 @@ namespace EditSharp.Playback
                         token.ThrowIfCancellationRequested();
 
                         //the first frame always waits: there's nothing on screen yet to keep showing
-                        await Task.Run(() => contentSource.WaitReady(warmupState, Timeout.InfiniteTimeSpan), token);
+                        await Task.Run(() => contentSource.WaitReady(warmupState, Time.MaxValue), token);
                         (byte[] warmupBuffer, int warmupLength) = await videoGpuThread.RunAsync(() =>
                             FrameCompositor.RenderFrame(warmupState, contentSource, width, height, fps, surfacePool));
                         EditSharpConfig.Logger.LogVerbose("Video warm-up frame rendered.");
@@ -731,16 +763,38 @@ namespace EditSharp.Playback
                             ArrayPool<byte>.Shared.Return(warmupBuffer);
                         }
 
+                        //this loop's own pace, when it leads: the position `paceAt` at wall time `paceElapsed`, moving at
+                        //`pace`. A speed change moves the anchor to where playback is, so the position carries on smoothly
+                        Time paceAt = startPosition, paceElapsed = Time.Zero;
+                        double pace = Speed;
+
+                        Time Elapsed() => Time.FromTimeSpan(clock!.Elapsed);
+
+                        void Repace()
+                        {
+                            double now = Speed;
+                            if (followsReferenceClock || now == pace || now <= 0) return;
+
+                            Time elapsed = Elapsed();
+                            paceAt += (elapsed - paceElapsed).Scale(pace);
+                            paceElapsed = elapsed;
+                            pace = now;
+                        }
+
                         //where the playhead really is right now, for the modes that can fall behind
-                        TimeSpan Now() => followsReferenceClock
+                        Time Now() => followsReferenceClock
                             ? referenceClock.Position
-                            : startPosition + TimeSpan.FromSeconds(clock!.Elapsed.TotalSeconds * Speed);
+                            : paceAt + (Elapsed() - paceElapsed).Scale(pace);
+
+                        //wall time per timeline time, at the speed playback is moving
+                        double WallPerTimeline() => 1d / Math.Max(Math.Abs(followsReferenceClock ? referenceClock.Rate : pace), 0.0001);
 
                         int skipped = 0;
 
                         for (int frameIndex = startFrame + 1; frameIndex < totalFrames; frameIndex++)
                         {
-                            TimeSpan framePosition = FrameStateResolver.TimeOfFrame(frameIndex, fps);
+                            Repace();
+                            Time framePosition = FrameStateResolver.TimeOfFrame(frameIndex, fps);
 
                             while (true)
                             {
@@ -757,14 +811,13 @@ namespace EditSharp.Playback
 
                                 if (followsReferenceClock)
                                 {
-                                    TimeSpan gap = framePosition - referenceClock.Position;
+                                    Time gap = framePosition - referenceClock.Position;
 
-                                    if (gap > TimeSpan.Zero)
+                                    if (gap > Time.Zero)
                                     {
-                                        TimeSpan wait = gap > PlaybackReferenceClock.PollInterval
-                                            ? gap : PlaybackReferenceClock.PollInterval;
+                                        Time wait = Max(gap.Scale(WallPerTimeline()), PlaybackReferenceClock.PollInterval);
 
-                                        try { await Task.Delay(wait, token); }
+                                        try { await Task.Delay(wait.ToTimeout(), token); }
                                         catch (OperationCanceledException) { return; }
                                         continue;
                                     }
@@ -773,12 +826,12 @@ namespace EditSharp.Playback
                                 break;
                             }
 
-                            TimeSpan readyWait = Timeout.InfiniteTimeSpan;
+                            Time readyWait = Time.MaxValue;
 
                             if (mode != PlaybackMode.EveryFrame)
                             {
                                 //already behind: go straight to the frame that's due now
-                                int due = Math.Min(totalFrames - 1, (int)(Now().TotalSeconds * fps));
+                                int due = Math.Min(totalFrames - 1, (int)Now().ToFrame(fps));
                                 if (due > frameIndex)
                                 {
                                     skipped += due - frameIndex;
@@ -787,8 +840,8 @@ namespace EditSharp.Playback
                                 }
 
                                 //this frame may take until the next one is due, and no longer
-                                TimeSpan untilNext = FrameStateResolver.TimeOfFrame(frameIndex + 1, fps) - Now();
-                                readyWait = Max(TimeSpan.Zero, TimeSpan.FromSeconds(untilNext.TotalSeconds / Math.Max(Speed, 0.0001f)));
+                                Time untilNext = FrameStateResolver.TimeOfFrame(frameIndex + 1, fps) - Now();
+                                readyWait = Max(Time.Zero, untilNext.Scale(WallPerTimeline()));
                             }
 
                             contentSource.Anticipate(Timeline, frameIndex);
@@ -817,12 +870,12 @@ namespace EditSharp.Playback
 
                             if (!followsReferenceClock)
                             {
-                                TimeSpan targetElapsed = TimeSpan.FromSeconds((framePosition - startPosition).TotalSeconds / Speed);
-                                TimeSpan actualElapsed = clock!.Elapsed;
+                                Time targetElapsed = paceElapsed + (framePosition - paceAt).Scale(1d / pace);
+                                Time actualElapsed = Elapsed();
 
                                 if (targetElapsed > actualElapsed)
                                 {
-                                    try { await Task.Delay(targetElapsed - actualElapsed, token); }
+                                    try { await Task.Delay((targetElapsed - actualElapsed).ToTimeout(), token); }
                                     catch (OperationCanceledException)
                                     {
                                         ArrayPool<byte>.Shared.Return(buffer);
@@ -830,6 +883,7 @@ namespace EditSharp.Playback
                                     }
                                 }
 
+                                referenceClock.SetRate(pace);
                                 referenceClock.Report(framePosition);
                             }
 
@@ -883,14 +937,13 @@ namespace EditSharp.Playback
         /// frame that isn't ready in time and jump to the frame due now.
         /// </summary>
         private async Task ReverseVideoLoopAsync(
-            CancellationToken token, TimeSpan startPosition,
+            CancellationToken token, Time startPosition,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
             PlaybackReferenceClock referenceClock, bool followsReferenceClock)
         {
             int width = (int)RenderSettings.Resolution.X;
             int height = (int)RenderSettings.Resolution.Y;
-            int fps = RenderSettings.Framerate;
-            double speedMagnitude = Math.Abs(Speed);
+            Rational fps = RenderSettings.Framerate;
             PlaybackMode mode = PlaybackMode;
 
             try
@@ -901,7 +954,7 @@ namespace EditSharp.Playback
                         fps, width, height, RenderSettings.HardwareAccelerator, RenderSettings.SourceMode,
                         VideoReadMode.RandomAccess, ContentFailurePolicy.Preview, Buffered: true, Direction: -1));
 
-                    int startFrame = (int)(startPosition.TotalSeconds * fps);
+                    int startFrame = (int)startPosition.ToFrame(fps);
 
                     FrameState warmupState = FrameStateResolver.Resolve(Timeline, startFrame, fps);
                     await contentSource.PrepareAsync(warmupState, token);
@@ -918,7 +971,7 @@ namespace EditSharp.Playback
                     {
                         token.ThrowIfCancellationRequested();
 
-                        await Task.Run(() => contentSource.WaitReady(warmupState, Timeout.InfiniteTimeSpan), token);
+                        await Task.Run(() => contentSource.WaitReady(warmupState, Time.MaxValue), token);
                         (byte[] warmupBuffer, int warmupLength) = await reverseGpuThread.RunAsync(() =>
                             FrameCompositor.RenderFrame(warmupState, contentSource, width, height, fps, surfacePool));
                         EditSharpConfig.Logger.LogVerbose("Reverse video warm-up frame rendered.");
@@ -940,10 +993,30 @@ namespace EditSharp.Playback
                             ArrayPool<byte>.Shared.Return(warmupBuffer);
                         }
 
+                        //as forward: this loop's own pace when it leads, moving back from `paceAt` at `pace`
+                        Time paceAt = startPosition, paceElapsed = Time.Zero;
+                        double pace = Math.Abs(Speed);
+
+                        Time Elapsed() => Time.FromTimeSpan(clock!.Elapsed);
+
+                        void Repace()
+                        {
+                            double now = -Speed;
+                            if (followsReferenceClock || now == pace || now <= 0) return;
+
+                            Time elapsed = Elapsed();
+                            paceAt -= (elapsed - paceElapsed).Scale(pace);
+                            paceElapsed = elapsed;
+                            pace = now;
+                        }
+
+                        double WallPerTimeline() => 1d / Math.Max(Math.Abs(followsReferenceClock ? referenceClock.Rate : pace), 0.0001);
+
                         int skipped = 0;
 
                         for (int frameIndex = startFrame - 1; frameIndex >= 0; frameIndex--)
                         {
+                            Repace();
                             while (true)
                             {
                                 if (token.IsCancellationRequested) return;
@@ -960,12 +1033,12 @@ namespace EditSharp.Playback
                                 //following: wait for the (descending) clock to reach this frame
                                 if (followsReferenceClock)
                                 {
-                                    TimeSpan gap = referenceClock.Position - FrameStateResolver.TimeOfFrame(frameIndex, fps);
+                                    Time gap = referenceClock.Position - FrameStateResolver.TimeOfFrame(frameIndex, fps);
 
-                                    if (gap > TimeSpan.Zero)
+                                    if (gap > Time.Zero)
                                     {
-                                        TimeSpan wait = TimeSpan.FromTicks((long)(gap.Ticks / speedMagnitude));
-                                        try { await Task.Delay(Max(wait, PlaybackReferenceClock.PollInterval), token); }
+                                        Time wait = gap.Scale(WallPerTimeline());
+                                        try { await Task.Delay(Max(wait, PlaybackReferenceClock.PollInterval).ToTimeout(), token); }
                                         catch (OperationCanceledException) { return; }
                                         continue;
                                     }
@@ -975,26 +1048,26 @@ namespace EditSharp.Playback
                             }
 
                             //where the playhead really is right now
-                            TimeSpan Now() => followsReferenceClock
+                            Time Now() => followsReferenceClock
                                 ? referenceClock.Position
-                                : startPosition - TimeSpan.FromSeconds(clock!.Elapsed.TotalSeconds * speedMagnitude);
+                                : paceAt - (Elapsed() - paceElapsed).Scale(pace);
 
-                            TimeSpan readyWait = Timeout.InfiniteTimeSpan;
+                            Time readyWait = Time.MaxValue;
 
                             if (mode != PlaybackMode.EveryFrame)
                             {
-                                int due = Math.Max(0, (int)Math.Ceiling(Now().TotalSeconds * fps));
+                                int due = Math.Max(0, (int)Now().ToFrame(fps, Rounding.Ceiling));
                                 if (due < frameIndex)
                                 {
                                     skipped += frameIndex - due;
                                     frameIndex = due;
                                 }
 
-                                TimeSpan untilNext = Now() - FrameStateResolver.TimeOfFrame(frameIndex - 1, fps);
-                                readyWait = Max(TimeSpan.Zero, TimeSpan.FromTicks((long)(untilNext.Ticks / speedMagnitude)));
+                                Time untilNext = Now() - FrameStateResolver.TimeOfFrame(frameIndex - 1, fps);
+                                readyWait = Max(Time.Zero, untilNext.Scale(WallPerTimeline()));
                             }
 
-                            TimeSpan framePosition = FrameStateResolver.TimeOfFrame(frameIndex, fps);
+                            Time framePosition = FrameStateResolver.TimeOfFrame(frameIndex, fps);
 
                             contentSource.Anticipate(Timeline, frameIndex);
                             FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps);
@@ -1007,12 +1080,12 @@ namespace EditSharp.Playback
 
                             if (!followsReferenceClock)
                             {
-                                TimeSpan targetElapsed = TimeSpan.FromSeconds((startFrame - frameIndex) / (fps * speedMagnitude));
-                                TimeSpan actualElapsed = clock!.Elapsed;
+                                Time targetElapsed = paceElapsed + (paceAt - framePosition).Scale(1d / pace);
+                                Time actualElapsed = Elapsed();
 
                                 if (targetElapsed > actualElapsed)
                                 {
-                                    try { await Task.Delay(targetElapsed - actualElapsed, token); }
+                                    try { await Task.Delay((targetElapsed - actualElapsed).ToTimeout(), token); }
                                     catch (OperationCanceledException) { return; }
                                 }
                             }
@@ -1020,7 +1093,11 @@ namespace EditSharp.Playback
                             (byte[] buffer, int length) = await reverseGpuThread.RunAsync(() =>
                                 FrameCompositor.RenderFrame(state, contentSource, width, height, fps, surfacePool));
 
-                            if (!followsReferenceClock) referenceClock.Report(framePosition);
+                            if (!followsReferenceClock)
+                            {
+                                referenceClock.SetRate(-pace);
+                                referenceClock.Report(framePosition);
+                            }
 
                             try
                             {
@@ -1072,7 +1149,7 @@ namespace EditSharp.Playback
                 if (!SessionActive || !IsCurrentSession(token)) return;
 
                 _state = PlaybackState.Inactive;
-                _lastKnownPosition = _referenceClock?.Position ?? _lastKnownPosition;
+                _lastKnownPosition = Position;
                 _referenceClock = null;
                 _pauseGate = null;
                 _cts = null;

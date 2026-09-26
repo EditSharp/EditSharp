@@ -126,7 +126,7 @@ namespace EditSharp.Audio.Analysis
         {
             AudioMedia media = Transaction.Suppressed(() => new AudioMedia { Path = full });
             using IPreparedAudioSource prepared = await media.PrepareAsync().ConfigureAwait(false);
-            using IAudioSampleReader reader = prepared.OpenReader(new AudioReaderOptions(AudioAnalysis.SampleRate, 1, TimeSpan.Zero));
+            using IAudioSampleReader reader = prepared.OpenReader(new AudioReaderOptions(AudioAnalysis.SampleRate, 1, Time.Zero));
             return AudioAnalysis.Build(reader, null, CancellationToken.None);
         }
 

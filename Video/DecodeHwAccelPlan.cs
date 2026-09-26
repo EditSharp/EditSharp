@@ -55,9 +55,9 @@ namespace EditSharp.Video
         /// content; a 10-bit source's frames are p010le and would need their own
         /// branch.
         /// </remarks>
-        public string BuildFilterGraph(double fps, int width, int height, double speed = 1d)
+        public string BuildFilterGraph(Rational fps, int width, int height, Rational? speed = null)
         {
-            string retime = speed == 1d ? "" : $"setpts=PTS/{FfmpegArgs.Num(speed)},";
+            string retime = speed is not { } s || s == Rational.One ? "" : $"setpts=PTS*{s.Den}/{s.Num},";
 
             string scale = UsesGpuScale
                 ? $"{ScaleFilterName}={width}:{height}"
@@ -65,8 +65,7 @@ namespace EditSharp.Video
 
             string download = UsesGpuScale ? ",hwdownload,format=nv12" : "";
 
-            //round-trip format: a source rate like 30000/1001 must not drift over a long proxy build
-            return $"{retime}fps={fps.ToString("R", System.Globalization.CultureInfo.InvariantCulture)},{scale}{download},format=rgba,settb=AVTB";
+            return $"{retime}fps={FfmpegArgs.Rate(fps)},{scale}{download},format=rgba,settb=AVTB";
         }
     }
 }

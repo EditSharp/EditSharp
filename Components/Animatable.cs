@@ -9,7 +9,7 @@ namespace EditSharp.Components
     public interface IKeyframe
     {
         /// <summary>When the keyframe is, in content time.</summary>
-        TimeSpan Start { get; }
+        Time Start { get; }
 
         /// <summary>The value it holds.</summary>
         object? Value { get; }
@@ -20,7 +20,7 @@ namespace EditSharp.Components
     {
         /// <summary>Moves every keyframe by the same amount.</summary>
         /// <param name="amount">How far to move them; negative moves them earlier.</param>
-        void ShiftKeyframes(TimeSpan amount);
+        void ShiftKeyframes(Time amount);
 
         /// <summary>The type of value it holds.</summary>
         Type ValueType { get; }
@@ -42,17 +42,17 @@ namespace EditSharp.Components
         /// <summary>The value at a moment.</summary>
         /// <param name="clipRelativeTime">Content time: since the clip's in-point, at 1x.</param>
         /// <returns>The value.</returns>
-        object? Evaluate(TimeSpan clipRelativeTime);
+        object? Evaluate(Time clipRelativeTime);
 
         /// <summary>Adds a keyframe, or updates the one already at that time.</summary>
         /// <param name="time">When, in content time.</param>
         /// <param name="value">The value; numbers and enums are converted to the value type.</param>
-        void SetKeyframe(TimeSpan time, object? value);
+        void SetKeyframe(Time time, object? value);
 
         /// <summary>Removes the keyframe at exactly a time.</summary>
         /// <param name="time">When, in content time.</param>
         /// <returns>False when there was no keyframe at that time.</returns>
-        bool RemoveKeyframeAt(TimeSpan time);
+        bool RemoveKeyframeAt(Time time);
 
         /// <summary>Removes every keyframe, leaving the static value.</summary>
         void ClearKeyframes();
@@ -97,7 +97,7 @@ namespace EditSharp.Components
         /// <summary>The value at a moment: the track's when it has two or more keyframes, otherwise the static value.</summary>
         /// <param name="clipRelativeTime">Content time: since the clip's in-point, at 1x.</param>
         /// <returns>The value.</returns>
-        public T Evaluate(TimeSpan clipRelativeTime)
+        public T Evaluate(Time clipRelativeTime)
         {
             if (Track == null || Track.Keyframes.Count < 2) return StaticValue;
 
@@ -105,7 +105,7 @@ namespace EditSharp.Components
         }
 
         /// <inheritdoc/>
-        public void ShiftKeyframes(TimeSpan amount) => Track?.Shift(amount);
+        public void ShiftKeyframes(Time amount) => Track?.Shift(amount);
 
         /// <inheritdoc/>
         public Type ValueType => typeof(T);
@@ -122,17 +122,17 @@ namespace EditSharp.Components
         /// <inheritdoc/>
         public IReadOnlyList<IKeyframe> Keyframes => Track?.Keyframes ?? (IReadOnlyList<IKeyframe>)Array.Empty<IKeyframe>();
 
-        object? IAnimatable.Evaluate(TimeSpan clipRelativeTime) => Evaluate(clipRelativeTime);
+        object? IAnimatable.Evaluate(Time clipRelativeTime) => Evaluate(clipRelativeTime);
 
         /// <inheritdoc/>
-        public void SetKeyframe(TimeSpan time, object? value)
+        public void SetKeyframe(Time time, object? value)
             => GetOrCreateTrack().AddKeyframe(time, (T)Editing.PropertyDescriptor.Coerce(value, typeof(T))!);
 
         /// <inheritdoc/>
         public void ClearKeyframes() => ClearTrack();
 
         /// <inheritdoc/>
-        public bool RemoveKeyframeAt(TimeSpan time)
+        public bool RemoveKeyframeAt(Time time)
         {
             Keyframe<T>? keyframe = Track?.Keyframes.FirstOrDefault(k => k.Start == time);
             if (keyframe is null) return false;

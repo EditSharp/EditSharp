@@ -16,7 +16,7 @@ namespace EditSharp.Compositing
         //one frame as RGBA8888 bytes in a buffer rented from ArrayPool<byte>.Shared; the caller returns it
         public static (byte[] Buffer, int Length) RenderFrame(
             FrameState frame, IClipContentSource contentSource,
-            int canvasWidth, int canvasHeight, int fps, SurfacePool pool)
+            int canvasWidth, int canvasHeight, Rational fps, SurfacePool pool)
         {
             using SKImage flattened = ComposeFrameImage(frame, contentSource, canvasWidth, canvasHeight, fps, pool);
             return ReadRgba8888(flattened, canvasWidth, canvasHeight);
@@ -25,7 +25,7 @@ namespace EditSharp.Compositing
         //one frame as an opaque, frame-sized image the caller disposes; nested timelines use it directly
         public static SKImage ComposeFrameImage(
             FrameState frame, IClipContentSource contentSource,
-            int canvasWidth, int canvasHeight, int fps, SurfacePool pool)
+            int canvasWidth, int canvasHeight, Rational fps, SurfacePool pool)
         {
             SKSurface accumulator = pool.Rent(canvasWidth, canvasHeight);
             SKImage composite;
@@ -70,7 +70,7 @@ namespace EditSharp.Compositing
         //transition combines two finished clips
         private static SKImage? ComposeChannel(
             FrameChannel channel, int frameIndex, IClipContentSource contentSource,
-            int canvasWidth, int canvasHeight, int fps, SurfacePool pool)
+            int canvasWidth, int canvasHeight, Rational fps, SurfacePool pool)
         {
             var rendered = new List<SKImage>(channel.Clips.Count);
 
@@ -107,12 +107,12 @@ namespace EditSharp.Compositing
         //disposes whatever content was handed over as transient
         private static void DrawClip(
             SKCanvas canvas, FrameClip frameClip, int frameIndex, IClipContentSource contentSource,
-            int canvasWidth, int canvasHeight, int fps, SurfacePool pool)
+            int canvasWidth, int canvasHeight, Rational fps, SurfacePool pool)
         {
             if (frameClip.Clip is not VideoClip clip) return; //only video channels are resolved into frames
 
             IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> resolved =
-                contentSource.GetContent(clip, frameClip.Graph, frameClip.ClipSeconds, frameIndex, canvasWidth, canvasHeight, pool);
+                contentSource.GetContent(clip, frameClip.Graph, frameClip.ContentTime, frameIndex, canvasWidth, canvasHeight, pool);
 
             var plain = new Dictionary<Guid, SKImage>(resolved.Count);
             foreach (KeyValuePair<Guid, (SKImage Image, bool Transient)> entry in resolved)
@@ -123,7 +123,7 @@ namespace EditSharp.Compositing
                 var context = new SkClipChainContext(canvasWidth, canvasHeight, fps);
 
                 ClipCompositor.Composite(
-                    canvas, frameClip.Graph, plain, frameClip.ClipSeconds, context, pool);
+                    canvas, frameClip.Graph, plain, frameClip.ContentTime, context, pool);
             }
             finally
             {

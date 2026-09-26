@@ -54,7 +54,7 @@ namespace EditSharp.Audio.Analysis
         public float[] Peak { get; }
 
         /// <summary>How long the analysed audio is.</summary>
-        public TimeSpan Duration => TimeSpan.FromSeconds(FrameCount * FrameSeconds);
+        public Time Duration => FrameTime(FrameCount);
 
         private AudioAnalysis(int frameCount, float[] bands, float[] peak)
         {
@@ -66,7 +66,12 @@ namespace EditSharp.Audio.Analysis
         /// <summary>The frame a moment in the audio falls in.</summary>
         /// <param name="time">Time in the audio.</param>
         /// <returns>The frame index; negative or past the end when the time is outside the audio.</returns>
-        public int FrameAt(TimeSpan time) => (int)Math.Floor(time.TotalSeconds / FrameSeconds);
+        public int FrameAt(Time time) => (int)Math.Floor(time.ToSamples(SampleRate) / (double)Hop);
+
+        /// <summary>When a frame starts.</summary>
+        /// <param name="frame">The frame index.</param>
+        /// <returns>The time, exactly.</returns>
+        public static Time FrameTime(long frame) => Time.FromSamples(frame * Hop, SampleRate);
 
         /// <summary>The energies of one frame's bands.</summary>
         /// <param name="frame">The frame index.</param>

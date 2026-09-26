@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 using EditSharp.Components;
 using EditSharp.Components.Clips;
@@ -10,12 +11,14 @@ namespace EditSharp.Audio.Engine
     /// then taken through one ContentWarp at |speed| with the chosen pitch mode
     /// (the same stages clips use). A negative speed plays the forward mix
     /// backwards (see ReversedTimelineAudio). Position is the timeline frame
-    /// the next output frame comes from.
+    /// the next output frame comes from. Step can change between reads; the
+    /// direction is fixed.
     /// </summary>
     internal sealed class MasterAudioStream : IDisposable
     {
         private readonly AudioSession _session;
-        private readonly double _speed;
+        private readonly bool _forward;
+        private double _step;
         private readonly PitchPreservation _pitch;
         private readonly ContentWarp _warp;
         private readonly TimelineAudioRenderer _renderer;
@@ -29,7 +32,8 @@ namespace EditSharp.Audio.Engine
             if (speed == 0) throw new ArgumentOutOfRangeException(nameof(speed), "Speed can't be 0.");
 
             _session = session;
-            _speed = speed;
+            _forward = speed > 0;
+            _step = Math.Abs(speed);
             _pitch = pitch;
 
             _renderer = new TimelineAudioRenderer(timeline, session);
@@ -43,16 +47,24 @@ namespace EditSharp.Audio.Engine
             _cursor = speed > 0 ? start : -start;
         }
 
-        public double Position => _speed > 0 ? _cursor : -_cursor;
+        public double Position => _forward ? _cursor : -_cursor;
+
+        public bool Forward => _forward;
+
+        //timeline frames per output frame, without the sign; set from another thread between reads
+        public double Step
+        {
+            get => Volatile.Read(ref _step);
+            set => Volatile.Write(ref _step, value > 0 ? value : throw new ArgumentOutOfRangeException(nameof(value), "The step must be positive."));
+        }
 
         /// <summary>Prepares the sources audible where the stream starts, waiting for them.</summary>
-        public void PrepareStart() => _renderer.PrepareAt(_speed > 0 ? _start : _start - 1);
+        public void PrepareStart() => _renderer.PrepareAt(_forward ? _start : _start - 1);
 
-        /// <summary>Fills `output` (whole frames) with the next stretch of master audio.</summary>
-        public void Read(Span<float> output)
+        /// <summary>Fills `output` (whole frames) with the next stretch of master audio, `step` timeline frames per output frame.</summary>
+        public void Read(Span<float> output, double step)
         {
             int frames = output.Length / _session.Format.Channels;
-            double step = Math.Abs(_speed);
 
             _warp.Render(_cursor, step, frames, _pitch, output);
             _cursor += step * frames;
@@ -102,9 +114,9 @@ namespace EditSharp.Audio.Engine
     /// </summary>
     internal sealed class ReversedTimelineAudio : IContentAudio
     {
-        private static readonly TimeSpan WindowLength = TimeSpan.FromSeconds(1);
+        private static readonly Time WindowLength = Time.FromSeconds(1);
         //long enough for typical compressor attack/release to settle; slower settings differ slightly just after each window's start
-        private static readonly TimeSpan WarmUp = TimeSpan.FromMilliseconds(500);
+        private static readonly Time WarmUp = Time.FromMilliseconds(500);
 
         private readonly TimelineAudioRenderer _renderer;
         private readonly AudioSession _session;

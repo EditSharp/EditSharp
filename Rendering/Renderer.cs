@@ -79,12 +79,12 @@ namespace EditSharp.Rendering
             Timeline timeline = blueprint.Timeline;
             int width = (int)blueprint.RenderSettings.Resolution.X;
             int height = (int)blueprint.RenderSettings.Resolution.Y;
-            int fps = blueprint.RenderSettings.Framerate;
+            Rational fps = blueprint.RenderSettings.Framerate;
             HardwareAccelerator hwAccel = blueprint.RenderSettings.HardwareAccelerator;
 
             var report = new RenderReportBuilder();
 
-            int totalFrames = Math.Max(1, (int)Math.Ceiling(timeline.Duration.TotalSeconds * fps));
+            int totalFrames = Math.Max(1, (int)timeline.Duration.ToFrame(fps, Rounding.Ceiling));
 
             //read ahead of the frame being composed, from originals unless the settings say otherwise
             using var contentSource = new ClipContentSource(new ContentSourceOptions(
@@ -115,7 +115,7 @@ namespace EditSharp.Rendering
 
         //starts the one ffmpeg process with stdin open for raw frames (and a named pipe for audio), then feeds both
         private static async Task RenderAndEncodeAsync(
-            Timeline timeline, int fps, int width, int height,
+            Timeline timeline, Rational fps, int width, int height,
             ClipContentSource contentSource,
             int totalFrames, SurfacePool surfacePool,
             RenderReportBuilder report, Blueprint blueprint)
@@ -139,7 +139,7 @@ namespace EditSharp.Rendering
                 "-f", "rawvideo",
                 "-pix_fmt", OutputFormat.FfmpegPixelFormat,
                 "-s", $"{width}x{height}",
-                "-r", fps.ToString(CultureInfo.InvariantCulture),
+                "-r", FfmpegArgs.Rate(fps),
                 //frames arrive on stdin; closing it ends the input like EOF on a file
                 "-i", "pipe:0",
             ]);
@@ -258,7 +258,7 @@ namespace EditSharp.Rendering
                 for (long frame = 0; frame < total; frame += session.BlockFrames)
                 {
                     int samples = (int)Math.Min(session.BlockFrames, total - frame) * AudioChannelCount;
-                    master.Read(block.AsSpan(0, samples));
+                    master.Read(block.AsSpan(0, samples), 1d);
                     await pipe.WriteAsync(MemoryMarshal.AsBytes(block.AsSpan(0, samples)).ToArray(), ct);
                 }
 
@@ -269,7 +269,7 @@ namespace EditSharp.Rendering
         }
 
         private static async Task RenderAllFramesAsync(
-            Timeline timeline, int fps, int width, int height,
+            Timeline timeline, Rational fps, int width, int height,
             ClipContentSource contentSource,
             int totalFrames, Stream accumulator, SurfacePool surfacePool)
         {
@@ -282,7 +282,7 @@ namespace EditSharp.Rendering
                 //an export always waits for every frame
                 contentSource.Anticipate(timeline, frameIndex);
                 FrameState state = FrameStateResolver.Resolve(timeline, frameIndex, fps);
-                contentSource.WaitReady(state, System.Threading.Timeout.InfiniteTimeSpan);
+                contentSource.WaitReady(state, Time.MaxValue);
 
                 (byte[] buffer, int length) = FrameCompositor.RenderFrame(
                     state, contentSource, width, height, fps, surfacePool);
@@ -317,7 +317,7 @@ namespace EditSharp.Rendering
             if ((int)blueprint.RenderSettings.Resolution.X <= 0 || (int)blueprint.RenderSettings.Resolution.Y <= 0)
                 throw new ArgumentException("Blueprint.RenderSettings.Resolution must have positive width and height.");
 
-            if (blueprint.RenderSettings.Framerate <= 0)
+            if (!blueprint.RenderSettings.Framerate.IsPositive)
                 throw new ArgumentException("Blueprint.RenderSettings.Framerate must be positive.");
 
             if (blueprint.RenderSettings.GpuAdapterIndex is < 0)

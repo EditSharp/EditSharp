@@ -35,14 +35,14 @@ namespace EditSharp.Components.Nodes.Input
         public bool TryGetDefault(string propertyName, out object? value)
         {
             value = null;
-            if (propertyName != nameof(Duration) || !TryGetNaturalLength(out TimeSpan? length) || length is null) return false;
+            if (propertyName != nameof(Duration) || !TryGetNaturalLength(out Time? length) || length is null) return false;
 
             value = length;
             return true;
         }
 
         /// <inheritdoc/>
-        public override bool TryGetNaturalLength(out TimeSpan? length)
+        public override bool TryGetNaturalLength(out Time? length)
         {
             if (Media is { } media) return media.TryGetNaturalLength(out length);
 
@@ -54,8 +54,8 @@ namespace EditSharp.Components.Nodes.Input
         /// <param name="ct">Cancels finding it.</param>
         /// <returns>The length; null for a still image, or when no media is selected.</returns>
         /// <exception cref="SourceUnavailableException">The media can't be read.</exception>
-        public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) =>
-            Media?.GetNaturalLengthAsync(ct) ?? Task.FromResult<TimeSpan?>(null);
+        public override Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default) =>
+            Media?.GetNaturalLengthAsync(ct) ?? Task.FromResult<Time?>(null);
 
         internal override async Task<IPreparedVideoSource> PrepareAsync(VideoPrepareContext context, CancellationToken ct = default)
         {

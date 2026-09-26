@@ -54,5 +54,5 @@ namespace EditSharp.Audio.Analysis
     /// <summary>What a node knows about the frame it's describing.</summary>
     /// <param name="ContentTime">The frame's time in the clip's content, at 1x, for evaluating keyframed parameters.</param>
     /// <param name="FrameSeconds">How long the frame is.</param>
-    public readonly record struct SpectralContext(TimeSpan ContentTime, double FrameSeconds);
+    public readonly record struct SpectralContext(Time ContentTime, double FrameSeconds);
 }

@@ -62,7 +62,7 @@ namespace EditSharp.Components.Media
 
         /// <inheritdoc/>
         /// <remarks>Answers from the probe cache; a file not probed yet starts its probe in the background.</remarks>
-        public override bool TryGetNaturalLength(out TimeSpan? length)
+        public override bool TryGetNaturalLength(out Time? length)
         {
             length = null;
 
@@ -81,7 +81,7 @@ namespace EditSharp.Components.Media
         /// <param name="ct">Cancels waiting for the probe.</param>
         /// <returns>The video's length; null for a still image.</returns>
         /// <exception cref="SourceUnavailableException"><see cref="SourceUnavailableReason.NoMedia"/> when no file is chosen; <see cref="SourceUnavailableReason.MediaOffline"/> when it's missing; <see cref="SourceUnavailableReason.DecodeError"/> when it can't be probed or has no duration.</exception>
-        public override async Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default)
+        public override async Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default)
         {
             MediaInfo info = await ProbeAsync(Path, ct);
 
@@ -130,7 +130,7 @@ namespace EditSharp.Components.Media
         /// <returns>The frame; the caller disposes it.</returns>
         /// <exception cref="SourceUnavailableException">The frame can't be read; with <see cref="SourceMode.ProxiesOnly"/>, a frame with no proxy is <see cref="SourceUnavailableReason.ProxyPending"/> or <see cref="SourceUnavailableReason.ProxyMissing"/>.</exception>
         public virtual async Task<SKImage> GetFrameAtAsync(
-            TimeSpan time, SourceMode mode = SourceMode.SourceOnly, int maxWidth = 0, int maxHeight = 0,
+            Time time, SourceMode mode = SourceMode.SourceOnly, int maxWidth = 0, int maxHeight = 0,
             CancellationToken ct = default)
         {
             MediaInfo info = await ProbeAsync(Path, ct);

@@ -15,19 +15,19 @@ namespace EditSharp.Playback
     {
         //the shortest wait a follower re-checking the leader uses; it waits for the estimated gap otherwise.
         //Task.Delay can't wait less than Windows' 15.6 ms timer tick anyway
-        public static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(2);
+        public static readonly Time PollInterval = Time.FromMilliseconds(2);
 
         private readonly object _lock = new();
         private readonly Stopwatch _wallClock = new();
-        private TimeSpan _reportedPosition;
-        private TimeSpan _reportedAt;
+        private Time _reportedPosition;
+        private Time _reportedAt;
 
         //the clock holds its position until Begin, so nothing moves while playback is still waiting on its sources
         private bool _begun;
         private bool _paused;
 
         /// <summary>`rate` is timeline time per second of wall time: the playback speed, negative in reverse.</summary>
-        public PlaybackReferenceClock(double rate = 1) => Rate = rate;
+        public PlaybackReferenceClock(double rate = 1) => _rate = rate;
 
         /// <summary>Starts the clock: playback has really started.</summary>
         public void Begin()
@@ -39,29 +39,34 @@ namespace EditSharp.Playback
             }
         }
 
-        public double Rate { get; }
+        private double _rate;
+        public double Rate { get { lock (_lock) return _rate; } }
 
-        public TimeSpan Position
+        public Time Position
         {
-            get
-            {
-                TimeSpan reportedPosition, reportedAt;
-                lock (_lock)
-                {
-                    reportedPosition = _reportedPosition;
-                    reportedAt = _reportedAt;
-                }
+            get { lock (_lock) return PositionNow(); }
+        }
 
-                return reportedPosition + TimeSpan.FromTicks((long)((_wallClock.Elapsed - reportedAt).Ticks * Rate));
+        private Time PositionNow() => _reportedPosition + (Time.FromTimeSpan(_wallClock.Elapsed) - _reportedAt).Scale(_rate);
+
+        /// <summary>Changes the rate from now on; the position carries on from where it is.</summary>
+        public void SetRate(double rate)
+        {
+            lock (_lock)
+            {
+                if (rate == _rate) return;
+                _reportedPosition = PositionNow();
+                _reportedAt = Time.FromTimeSpan(_wallClock.Elapsed);
+                _rate = rate;
             }
         }
 
-        public void Report(TimeSpan position)
+        public void Report(Time position)
         {
             lock (_lock)
             {
                 _reportedPosition = position;
-                _reportedAt = _wallClock.Elapsed;
+                _reportedAt = Time.FromTimeSpan(_wallClock.Elapsed);
             }
         }
 

@@ -48,7 +48,7 @@ namespace EditSharp.Caching.Proxy
         public string Path { get; }
         public int Width => _header.Width;
         public int Height => _header.Height;
-        public double FrameRate => _header.FrameRate;
+        public Rational FrameRate => _header.FrameRate;
         public EsrpPixelFormat PixelFormat => _header.PixelFormat;
         public EsrpMeta Meta { get; }
 
@@ -117,9 +117,9 @@ namespace EditSharp.Caching.Proxy
             return (header, EsrpMetaSerializer.Deserialize(metaBytes, path));
         }
 
-        /// <summary>The frame covering `seconds`, if it's been written.</summary>
-        public ProxyFrameAvailability TryGetFrameAt(double seconds, out SKImage? image) =>
-            TryGetFrame((int)Math.Floor(Math.Max(0, seconds) * FrameRate), out image);
+        /// <summary>The frame covering `time`, if it's been written.</summary>
+        public ProxyFrameAvailability TryGetFrameAt(Time time, out SKImage? image) =>
+            TryGetFrame((int)Time.Max(Time.Zero, time).ToFrame(FrameRate), out image);
 
         /// <summary>
         /// Frame `frame` as a fresh image the caller owns, or why not. Past the

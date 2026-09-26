@@ -13,7 +13,7 @@ public struct RenderSettings
     public Vector2 Resolution { get; set; } = new(1920, 1080);
 
     /// <summary>Output frames per second.</summary>
-    public int Framerate { get; set; } = 30;
+    public Rational Framerate { get; set; } = 30;
 
     /// <summary>The video codec to encode with.</summary>
     public VideoCodec VideoCodec { get; set; } = VideoCodec.H265;

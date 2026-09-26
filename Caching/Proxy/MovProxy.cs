@@ -34,7 +34,7 @@ namespace EditSharp.Caching.Proxy
         public ProxyFormat Format { get; set; }
         public int Width { get; set; }
         public int Height { get; set; }
-        public double FrameRate { get; set; }
+        public Rational FrameRate { get; set; }
         public int TotalFrames { get; set; }
         public List<MovSegment> Segments { get; set; } = new();
         public bool Complete { get; set; }
@@ -66,19 +66,19 @@ namespace EditSharp.Caching.Proxy
         /// that file; or null if it hasn't been written. File names in the
         /// sidecar are relative to its directory.
         /// </summary>
-        public (string File, double Seconds)? Locate(int frame, string directory)
+        public (string File, Time Time)? Locate(int frame, string directory)
         {
             if (frame < 0) return null;
 
             if (Complete)
                 return frame < TotalFrames && FinalFile is not null
-                    ? (Path.Combine(directory, FinalFile), frame / FrameRate)
+                    ? (Path.Combine(directory, FinalFile), Time.FromFrame(frame, FrameRate))
                     : null;
 
             foreach (MovSegment segment in Segments)
             {
                 if (frame >= segment.StartFrame && frame < segment.StartFrame + segment.Frames)
-                    return (Path.Combine(directory, segment.File), (frame - segment.StartFrame) / FrameRate);
+                    return (Path.Combine(directory, segment.File), Time.FromFrame(frame - segment.StartFrame, FrameRate));
             }
 
             return null;
@@ -98,8 +98,8 @@ namespace EditSharp.Caching.Proxy
     /// </summary>
     internal static class MovProxyBuilder
     {
-        private static readonly TimeSpan FragmentDuration = TimeSpan.FromSeconds(1);
-        private static readonly TimeSpan SaveInterval = TimeSpan.FromSeconds(1);
+        private static readonly Time FragmentDuration = Time.FromSeconds(1);
+        private static readonly Time SaveInterval = Time.FromSeconds(1);
 
         public static VideoCodec CodecFor(ProxyFormat format) => format switch
         {
@@ -168,7 +168,7 @@ namespace EditSharp.Caching.Proxy
         private static MovProxyMeta Fresh(ProxyBuildPlan plan, string sidecarPath)
         {
             EditSharpConfig.Logger.Log(
-                $"Building {plan.Format} proxy for '{plan.SourcePath}' ({plan.Width}x{plan.Height} @ {plan.FrameRate:0.###}fps, " +
+                $"Building {plan.Format} proxy for '{plan.SourcePath}' ({plan.Width}x{plan.Height} @ {plan.FrameRate}fps, " +
                 $"{plan.TotalFrames} frames).");
 
             var meta = new MovProxyMeta
@@ -193,8 +193,8 @@ namespace EditSharp.Caching.Proxy
         {
             VideoCodec codec = CodecFor(plan.Format);
             string encoder = CodecNames.VideoCodecNames[codec];
-            string rate = plan.FrameRate.ToString("R", CultureInfo.InvariantCulture);
-            int lag = (int)Math.Ceiling(FragmentDuration.TotalSeconds * plan.FrameRate);
+            string rate = FfmpegArgs.Rate(plan.FrameRate);
+            int lag = (int)FragmentDuration.ToFrame(plan.FrameRate, Rounding.Ceiling);
 
             var args = new List<string> { "-y", "-v", "error", "-nostats", "-progress", "pipe:1" };
             args.AddRange(FfmpegArgs.FilterThreadingArgs());
@@ -203,7 +203,7 @@ namespace EditSharp.Caching.Proxy
             {
                 //decoding re-encode, so the seek is frame-accurate
                 args.Add("-ss");
-                args.Add((segment.StartFrame / plan.FrameRate).ToString("R", CultureInfo.InvariantCulture));
+                args.Add(FfmpegArgs.Sec(Time.FromFrame(segment.StartFrame, plan.FrameRate)));
             }
 
             args.AddRange(["-i", plan.SourcePath, "-vf", $"fps={rate},scale={plan.Width}:{plan.Height},setsar=1"]);
@@ -217,7 +217,7 @@ namespace EditSharp.Caching.Proxy
             //audio always comes from the original
             args.Add("-an");
             args.AddRange(["-f", "mov", "-movflags", "+frag_keyframe+empty_moov+default_base_moof"]);
-            args.AddRange(["-frag_duration", ((long)FragmentDuration.TotalMicroseconds).ToString(CultureInfo.InvariantCulture)]);
+            args.AddRange(["-frag_duration", Time.MulDiv(FragmentDuration.Ticks, 1_000_000, Time.TicksPerSecond, Rounding.Nearest).ToString(CultureInfo.InvariantCulture)]);
             args.Add(output);
 
             var psi = new ProcessStartInfo
@@ -259,7 +259,7 @@ namespace EditSharp.Caching.Proxy
                 segment.Frames = readable;
                 onFramesWritten(meta.AvailableFrames);
 
-                if (sinceSave.Elapsed >= SaveInterval)
+                if (Time.FromTimeSpan(sinceSave.Elapsed) >= SaveInterval)
                 {
                     meta.Save(sidecarPath);
                     sinceSave.Restart();
@@ -289,10 +289,10 @@ namespace EditSharp.Caching.Proxy
             meta.Save(sidecarPath);
         }
 
-        private static async Task<int?> CountFramesAsync(string file, double frameRate)
+        private static async Task<int?> CountFramesAsync(string file, Rational frameRate)
         {
-            TimeSpan? duration = (await MediaProbe.ProbeAsync(file)).Duration;
-            return duration is { } d ? (int)Math.Round(d.TotalSeconds * frameRate) : null;
+            Time? duration = (await MediaProbe.ProbeAsync(file)).Duration;
+            return duration is { } d ? (int)d.ToFrame(frameRate, Rounding.Nearest) : null;
         }
 
         /// <summary>Stream-copies the segments (each cut at its recorded frames) into one faststart MOV and drops them.</summary>
@@ -307,7 +307,7 @@ namespace EditSharp.Caching.Proxy
             foreach (MovSegment segment in meta.Segments)
             {
                 list.Append("file '").Append(segment.File.Replace("'", @"'\''")).Append("'\n");
-                list.Append("outpoint ").Append((segment.Frames / plan.FrameRate).ToString("R", CultureInfo.InvariantCulture)).Append('\n');
+                list.Append("outpoint ").Append(FfmpegArgs.Sec(Time.FromFrame(segment.Frames, plan.FrameRate))).Append('\n');
             }
 
             await File.WriteAllTextAsync(listPath, list.ToString());

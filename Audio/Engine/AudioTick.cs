@@ -10,26 +10,24 @@ namespace EditSharp.Audio.Engine
     /// <summary>
     /// One block of work for a clip's graph: which timeline frames it covers
     /// and the clip's content position at the first of them, both as a time
-    /// (for automation) and as an exact content frame (for reading audio;
-    /// TimeSpan's 100 ns steps would put reads off by fractions of a sample).
-    /// ContentStep is how much content time each output frame advances
-    /// (Clip.Speed / rate). Graph is the
-    /// clip's graph snapshot for this tick; Pitch is how its inputs keep pitch
-    /// when ContentStep isn't 1x.
+    /// (for automation) and as a content frame that can fall between samples
+    /// (for reading audio). Speed is how many content frames each output frame
+    /// advances (Clip.Speed). Graph is the clip's graph snapshot for this tick;
+    /// Pitch is how its inputs keep pitch when Speed isn't 1.
     /// </summary>
     internal readonly record struct AudioTick(
         AudioFormat Format,
         long TimelineFrame,
         int Frames,
-        TimeSpan ContentStart,
+        Time ContentStart,
         double ContentFrame,
-        double ContentStep,
+        Rational Speed,
         Graph Graph,
         PitchPreservation Pitch = PitchPreservation.WSOLA)
     {
         public int Samples => Frames * Format.Channels;
 
-        public TimeSpan ContentTimeAt(int frame) => ContentStart + TimeSpan.FromSeconds(frame * ContentStep);
+        public Time ContentTimeAt(int frame) => ContentStart + Time.FromSamples(frame, Format.SampleRate) * Speed;
     }
 
     /// <summary>

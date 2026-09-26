@@ -19,7 +19,7 @@ namespace EditSharp.Playback
         public int Height { get; }
 
         /// <summary>The frame's timeline time.</summary>
-        public TimeSpan Position { get; }
+        public Time Position { get; }
 
         /// <summary>Wraps one frame.</summary>
         /// <param name="buffer">The pixels.</param>
@@ -27,7 +27,7 @@ namespace EditSharp.Playback
         /// <param name="width">The width in pixels.</param>
         /// <param name="height">The height in pixels.</param>
         /// <param name="position">The frame's timeline time.</param>
-        public VideoFrameEventArgs(byte[] buffer, int length, int width, int height, TimeSpan position)
+        public VideoFrameEventArgs(byte[] buffer, int length, int width, int height, Time position)
         {
             Buffer = buffer;
             Length = length;

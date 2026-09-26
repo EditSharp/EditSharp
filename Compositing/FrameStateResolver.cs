@@ -20,11 +20,11 @@ namespace EditSharp.Compositing
         /// and a snapshot of each clip's graph. Takes ModelLock's read side, so
         /// the result is safe to compose while the model is edited.
         /// </summary>
-        public static FrameState Resolve(Timeline timeline, int frameIndex, int fps)
+        public static FrameState Resolve(Timeline timeline, int frameIndex, Rational fps)
         {
             using var _ = ModelLock.Read();
 
-            TimeSpan time = TimeOfFrame(frameIndex, fps);
+            Time time = TimeOfFrame(frameIndex, fps);
 
             var channels = new List<FrameChannel>();
 
@@ -37,7 +37,7 @@ namespace EditSharp.Compositing
             return new FrameState { FrameIndex = frameIndex, Channels = channels };
         }
 
-        private static FrameChannel? ResolveChannel(VideoChannel channel, TimeSpan time)
+        private static FrameChannel? ResolveChannel(VideoChannel channel, Time time)
         {
             //clips on a channel can't overlap, so one is live; a second comes from a transition reaching back into the clip before
             Clip? active = channel.Clips.FirstOrDefault(
@@ -67,7 +67,7 @@ namespace EditSharp.Compositing
         //the transition under way at `time`, if any, and how far through. A transition belongs to the clip it
         //leaves (Transition.From), counts only where the two clips touch, and covers the start of the incoming clip
         private static (Transition? Transition, double Progress, Clip? Outgoing) ResolveTransition(
-            VideoChannel channel, Clip active, TimeSpan time)
+            VideoChannel channel, Clip active, Time time)
         {
             Clip? previous = channel.Clips
                 .Where(c => c.End == active.Start)
@@ -80,22 +80,21 @@ namespace EditSharp.Compositing
 
             if (transition == null) return (null, 0, null);
 
-            double seconds = transition.Duration.TotalSeconds;
-            if (seconds <= 0) return (null, 0, null);
+            Time length = transition.Duration;
+            if (length <= Time.Zero) return (null, 0, null);
 
             //no longer than either clip it joins, and never zero so the progress can be divided out
-            seconds = FfmpegArgs.Clamp(
-                seconds, 0.05,
-                Math.Max(0.05,
-                    Math.Min(previous.Duration.TotalSeconds, active.Duration.TotalSeconds) - 0.05));
+            Time margin = Time.FromMilliseconds(50);
+            Time longest = Time.Max(margin, Time.Min(previous.Duration, active.Duration) - margin);
+            length = Time.Clamp(length, margin, longest);
 
-            double into = (time - active.Start).TotalSeconds;
-            if (into >= seconds) return (null, 0, null);
+            Time into = time - active.Start;
+            if (into >= length) return (null, 0, null);
 
-            return (transition, into / seconds, previous);
+            return (transition, into / length, previous);
         }
 
-        private static FrameClip BuildFrameClip(Clip clip, TimeSpan time)
+        private static FrameClip BuildFrameClip(Clip clip, Time time)
         {
             //content time: Speed is how fast the graph plays against the timeline, and everything downstream
             //(keyframes, generators, which source frame) works in content time
@@ -103,13 +102,10 @@ namespace EditSharp.Compositing
             {
                 Clip = clip,
                 Graph = clip.Graph.Snapshot(),
-                ClipSeconds = ClipSecondsAt(clip, time),
+                ContentTime = clip.ContentTimeAt(time),
             };
         }
 
-        //the one content-time formula: prefetch buffers match frames by exact content time
-        public static double ClipSecondsAt(Clip clip, TimeSpan time) => (time - clip.Start).TotalSeconds * clip.Speed;
-
-        public static TimeSpan TimeOfFrame(int frameIndex, int fps) => TimeSpan.FromSeconds(frameIndex / (double)fps);
+        public static Time TimeOfFrame(int frameIndex, Rational fps) => Time.FromFrame(frameIndex, fps);
     }
 }

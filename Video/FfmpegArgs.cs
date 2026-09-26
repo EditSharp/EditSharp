@@ -7,9 +7,11 @@ namespace EditSharp.Video
     //number formatting for ffmpeg arguments, and the global filter options every call adds
     internal static class FfmpegArgs
     {
-        public static string Sec(TimeSpan t) => Num(t.TotalSeconds);
+        //ffmpeg keeps time in microseconds, so a time goes over as whole microseconds
+        public static string Sec(Time t) => Time.MulDiv(t.Ticks, 1_000_000, Time.TicksPerSecond, Rounding.Nearest).ToString(CultureInfo.InvariantCulture) + "us";
 
-        public static string Num(double v) => v.ToString("F4", CultureInfo.InvariantCulture);
+        //a rate as ffmpeg's num/den
+        public static string Rate(Rational r) => $"{r.Num.ToString(CultureInfo.InvariantCulture)}/{r.Den.ToString(CultureInfo.InvariantCulture)}";
 
         public static double Clamp(double value, double min, double max) =>
             Math.Max(min, Math.Min(value, Math.Max(min, max)));

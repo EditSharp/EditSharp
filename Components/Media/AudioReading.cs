@@ -9,7 +9,7 @@ namespace EditSharp.Components.Media
     /// <param name="Channels">The channel count samples come back interleaved in.</param>
     /// <param name="StartAt">The content time (since the in-point, at 1x) of the first sample.</param>
     /// <param name="Session">The reading session, for kinds that mix other sources themselves (a nested timeline).</param>
-    internal sealed record AudioReaderOptions(int SampleRate, int Channels, TimeSpan StartAt, AudioSession? Session = null);
+    internal sealed record AudioReaderOptions(int SampleRate, int Channels, Time StartAt, AudioSession? Session = null);
 
     /// <summary>A source readied for one session; opens readers on demand and owns whatever they share.</summary>
     internal interface IPreparedAudioSource : IDisposable

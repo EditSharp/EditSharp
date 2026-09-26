@@ -44,7 +44,7 @@ namespace EditSharp.Components.Media
             _info = info;
             _rate = options.SampleRate;
             _channels = options.Channels;
-            _position = (long)Math.Round(options.StartAt.TotalSeconds * _rate);
+            _position = options.StartAt.ToSamples(_rate, Rounding.Nearest);
         }
 
         public int Read(Span<float> destination)
@@ -71,7 +71,7 @@ namespace EditSharp.Components.Media
 
             if (_info.Duration is { } duration)
             {
-                long total = (long)Math.Floor(duration.TotalSeconds * _rate);
+                long total = duration.ToSamples(_rate);
                 frames = (int)Math.Max(0, Math.Min(wanted, total - _position));
             }
 

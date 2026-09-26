@@ -104,7 +104,7 @@ namespace EditSharp.Audio.Engine
             _prepared?.Dispose();
             _prepared = null;
 
-            TimeSpan at = session.TimeOf(_position);
+            Time at = session.TimeOf(_position);
             if (session.Report is { } report)
             {
                 if (report.Record(Node.Id, Node.Description, ex.Reason, ex.Message, at))
@@ -119,7 +119,7 @@ namespace EditSharp.Audio.Engine
         //exports never retry; previews do once the interval has passed
         private bool RetryDue() =>
             !session.WaitForSources &&
-            ((long)EditSharpConfig.SourceRetryInterval.TotalMilliseconds <= Environment.TickCount64 - _failedAt);
+            (EditSharpConfig.SourceRetryInterval <= Time.FromMilliseconds(Environment.TickCount64 - _failedAt));
 
         public void Dispose()
         {

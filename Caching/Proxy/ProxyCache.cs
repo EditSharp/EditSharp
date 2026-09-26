@@ -29,9 +29,9 @@ namespace EditSharp.Caching.Proxy
     /// </remarks>
     public static class ProxyCache
     {
-        internal const int SchemaVersion = 1;
+        internal const int SchemaVersion = 2;
 
-        private static readonly TimeSpan EventInterval = TimeSpan.FromMilliseconds(250);
+        private static readonly Time EventInterval = Time.FromMilliseconds(250);
 
         /// <summary>Raised when a file's proxy is queued, starts, progresses, finishes, fails or is cancelled.</summary>
         /// <remarks>Progress is reported at most four times a second per file. Raised on a background thread.</remarks>
@@ -192,7 +192,7 @@ namespace EditSharp.Caching.Proxy
             else
             {
                 Queue.AddLast(job);
-                job.Status = new ProxyStatus(ProxyState.Queued, TimeSpan.Zero, format, 0, null);
+                job.Status = new ProxyStatus(ProxyState.Queued, Time.Zero, format, 0, null);
                 Raise(job, force: true);
             }
 
@@ -239,7 +239,7 @@ namespace EditSharp.Caching.Proxy
 
             try
             {
-                SetStatus(job, new ProxyStatus(ProxyState.Building, TimeSpan.Zero, job.Format, 0, null), force: true);
+                SetStatus(job, new ProxyStatus(ProxyState.Building, Time.Zero, job.Format, 0, null), force: true);
 
                 ProxyBuildPlan plan = await PlanAsync(job);
                 lock (Gate) job.Plan = plan;
@@ -262,7 +262,7 @@ namespace EditSharp.Caching.Proxy
                     }
 
                     SetStatus(job, new ProxyStatus(
-                        ProxyState.Building, TimeSpan.FromSeconds(frames / plan.FrameRate), job.Format,
+                        ProxyState.Building, Time.FromFrame(frames, plan.FrameRate), job.Format,
                         plan.TotalFrames == 0 ? 1 : Math.Min(1, frames / (double)plan.TotalFrames), null));
                 }
 
@@ -280,8 +280,8 @@ namespace EditSharp.Caching.Proxy
             }
             catch (OperationCanceledException) when (job.Cts.IsCancellationRequested)
             {
-                TimeSpan available = job.Status.AvailableUpTo;
-                SetStatus(job, available > TimeSpan.Zero
+                Time available = job.Status.AvailableUpTo;
+                SetStatus(job, available > Time.Zero
                     ? new ProxyStatus(ProxyState.Partial, available, job.Format, job.Status.Progress, null)
                     : ProxyStatus.NotCached, force: true);
                 Finish(job, () => job.Done.TrySetCanceled());
@@ -317,14 +317,14 @@ namespace EditSharp.Caching.Proxy
             if (!info.HasVideo || info.IsStillImage)
                 throw new InvalidOperationException($"'{job.SourcePath}' has no video to build a proxy from.");
 
-            if (info.Duration is not { } duration || duration <= TimeSpan.Zero)
+            if (info.Duration is not { } duration || duration <= Time.Zero)
                 throw new InvalidOperationException($"'{job.SourcePath}' has no readable duration.");
 
             if (info.FrameRate is not { } frameRate)
                 throw new InvalidOperationException($"'{job.SourcePath}' has no readable frame rate.");
 
             (int width, int height) = FitSize(info.Width, info.Height, EditSharpConfig.ProxyMaxDimension);
-            int totalFrames = Math.Max(1, (int)Math.Ceiling(duration.TotalSeconds * frameRate));
+            int totalFrames = Math.Max(1, (int)duration.ToFrame(frameRate, Rounding.Ceiling));
 
             return new ProxyBuildPlan(job.SourcePath, job.Hash, info, job.Format, width, height, frameRate, totalFrames, job.HwAccel);
         }
@@ -361,7 +361,7 @@ namespace EditSharp.Caching.Proxy
         {
             long now = Stopwatch.GetTimestamp();
 
-            if (!force && Stopwatch.GetElapsedTime(job.LastEventTimestamp, now) < EventInterval) return;
+            if (!force && Time.FromTimeSpan(Stopwatch.GetElapsedTime(job.LastEventTimestamp, now)) < EventInterval) return;
             job.LastEventTimestamp = now;
 
             try
@@ -391,12 +391,12 @@ namespace EditSharp.Caching.Proxy
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException or System.Text.Json.JsonException)
             {
-                return new ProxyStatus(ProxyState.Failed, TimeSpan.Zero, entry.Format, 0, ex);
+                return new ProxyStatus(ProxyState.Failed, Time.Zero, entry.Format, 0, ex);
             }
 
             static ProxyStatus StatusOf(bool complete, int frames, int total, ProxyEntry entry) => new(
                 complete ? ProxyState.Complete : ProxyState.Partial,
-                TimeSpan.FromSeconds(frames / entry.FrameRate), entry.Format,
+                Time.FromFrame(frames, entry.FrameRate), entry.Format,
                 complete ? 1 : Math.Min(1, frames / (double)total), null);
 
             static int CapacityOf(string path) => EsrpReader.ReadHeaderAndMeta(path).Header.Capacity;

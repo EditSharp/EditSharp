@@ -9,7 +9,7 @@ namespace EditSharp.Components.Media;
 /// <summary>Frame-indexed access to one proxy, at the proxy's own frame rate, whatever its format.</summary>
 internal interface IProxyFrames : IDisposable
 {
-    double FrameRate { get; }
+    Rational FrameRate { get; }
 
     ProxyFrameAvailability TryGetFrame(int frame, out VideoFrame result);
 }
@@ -28,7 +28,7 @@ internal static class ProxyFrames
 /// </summary>
 internal sealed class EsrpProxyFrames(EsrpReader reader) : IProxyFrames
 {
-    public double FrameRate => reader.FrameRate;
+    public Rational FrameRate => reader.FrameRate;
 
     public ProxyFrameAvailability TryGetFrame(int frame, out VideoFrame result)
     {
@@ -54,8 +54,8 @@ internal sealed class EsrpProxyFrames(EsrpReader reader) : IProxyFrames
 /// </summary>
 internal sealed class MovProxyFrames : IProxyFrames
 {
-    private static readonly TimeSpan ReloadInterval = TimeSpan.FromMilliseconds(250);
-    private static readonly TimeSpan MaxDecodeThrough = TimeSpan.FromSeconds(2);
+    private static readonly Time ReloadInterval = Time.FromMilliseconds(250);
+    private static readonly Time MaxDecodeThrough = Time.FromSeconds(2);
 
     private readonly ProxyEntry _entry;
     private readonly string _directory;
@@ -80,7 +80,7 @@ internal sealed class MovProxyFrames : IProxyFrames
         _lastReload = Environment.TickCount64;
     }
 
-    public double FrameRate => _entry.FrameRate;
+    public Rational FrameRate => _entry.FrameRate;
 
     public ProxyFrameAvailability TryGetFrame(int frame, out VideoFrame result)
     {
@@ -91,7 +91,7 @@ internal sealed class MovProxyFrames : IProxyFrames
 
         if (!_sequential)
         {
-            SKImage image = SourceDecoder.DecodeSingleFrameAsync(location.File, location.Seconds, _entry.Width, _entry.Height)
+            SKImage image = SourceDecoder.DecodeSingleFrameAsync(location.File, location.Time, _entry.Width, _entry.Height)
                 .GetAwaiter().GetResult();
             result = new VideoFrame(image, Transient: true);
             return ProxyFrameAvailability.Ready;
@@ -104,8 +104,8 @@ internal sealed class MovProxyFrames : IProxyFrames
         }
 
         if (_decoder is null || location.File != _decoderFile || frame < _nextFrame ||
-            (frame - _nextFrame) / FrameRate > MaxDecodeThrough.TotalSeconds)
-            Reopen(location.File, location.Seconds, frame);
+            Time.FromFrame(frame - _nextFrame, FrameRate) > MaxDecodeThrough)
+            Reopen(location.File, location.Time, frame);
 
         while (true)
         {
@@ -142,27 +142,27 @@ internal sealed class MovProxyFrames : IProxyFrames
         }
     }
 
-    private (string File, double Seconds)? Locate(int frame)
+    private (string File, Time Time)? Locate(int frame)
     {
         if (_meta.Locate(frame, _directory) is { } found) return found;
         if (_meta.Complete) return null;
 
         long now = Environment.TickCount64;
-        if (now - _lastReload < ReloadInterval.TotalMilliseconds) return null;
+        if (Time.FromMilliseconds(now - _lastReload) < ReloadInterval) return null;
         _lastReload = now;
 
         _meta = MovProxyMeta.Load(_entry.Path);
         return _meta.Locate(frame, _directory);
     }
 
-    private void Reopen(string file, double seconds, int frame)
+    private void Reopen(string file, Time at, int frame)
     {
         _decoder?.Dispose();
         _current?.Dispose();
         _current = null;
         _currentFrame = -1;
 
-        _decoder = SourceDecoder.Start(file, seconds, FrameRate, _entry.Width, _entry.Height);
+        _decoder = SourceDecoder.Start(file, at, FrameRate, _entry.Width, _entry.Height);
         _decoderFile = file;
         _nextFrame = frame;
     }

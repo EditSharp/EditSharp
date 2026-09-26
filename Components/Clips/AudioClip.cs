@@ -32,7 +32,7 @@ namespace EditSharp.Components.Clips
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
-        public static AudioClip CreateFromMedia(AudioMedia media, TimeSpan start, TimeSpan duration) =>
+        public static AudioClip CreateFromMedia(AudioMedia media, Time start, Time duration) =>
             CreateFromInput(Transaction.Suppressed(() => new AudioMediaNode { Media = media }), start, duration);
 
         /// <summary>A clip playing an input node of any kind, such as a generator you've set up.</summary>
@@ -41,7 +41,7 @@ namespace EditSharp.Components.Clips
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
-        public static AudioClip CreateFromInput(AudioInputNode input, TimeSpan start, TimeSpan duration) =>
+        public static AudioClip CreateFromInput(AudioInputNode input, Time start, Time duration) =>
             Transaction.Suppressed(() => new AudioClip(Graph.CreateAudioGraph(input)) { Start = start, Duration = duration });
 
         /// <summary>A clip playing a synthesized tone; see <see cref="ToneNode"/>.</summary>
@@ -53,7 +53,7 @@ namespace EditSharp.Components.Clips
         /// <param name="amplitude">The volume, from 0 (silent) to 1 (full scale).</param>
         /// <returns>The clip.</returns>
         public static AudioClip CreateTone(
-            TimeSpan start, TimeSpan duration, Waveform waveform = Waveform.Sine,
+            Time start, Time duration, Waveform waveform = Waveform.Sine,
             float frequencyHz = 440f, float amplitude = 1f) =>
             CreateFromInput(Transaction.Suppressed(() => new ToneNode { Waveform = waveform, Frequency = new(frequencyHz), Amplitude = new(amplitude) }), start, duration);
 
@@ -63,7 +63,7 @@ namespace EditSharp.Components.Clips
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
-        public static AudioClip CreateTimelineEmbed(Timeline timeline, TimeSpan start, TimeSpan duration) =>
+        public static AudioClip CreateTimelineEmbed(Timeline timeline, Time start, Time duration) =>
             CreateFromInput(Transaction.Suppressed(() => new TimelineAudioNode { Timeline = timeline }), start, duration);
 
         /// <summary>A clip with a graph you've built, such as one with several inputs mixed together.</summary>
@@ -73,7 +73,7 @@ namespace EditSharp.Components.Clips
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
         /// <exception cref="ArgumentException"><paramref name="graph"/> isn't an audio graph.</exception>
-        public static AudioClip CreateCustom(Graph graph, TimeSpan start, TimeSpan duration)
+        public static AudioClip CreateCustom(Graph graph, Time start, Time duration)
         {
             if (graph.Domain != NodeDomain.Audio)
                 throw new ArgumentException("AudioClip requires an Audio-domain Graph.", nameof(graph));

@@ -50,7 +50,7 @@ namespace EditSharp.Components.Nodes.Input
         /// <summary>Always null: a tone has no end of its own.</summary>
         /// <param name="ct">Unused.</param>
         /// <returns>Null.</returns>
-        public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult<TimeSpan?>(null);
+        public override Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult<Time?>(null);
 
         /// <inheritdoc/>
         /// <remarks>The fundamental and its harmonics land in their bands with the waveform's harmonic weights; the peak is the amplitude.</remarks>
@@ -109,7 +109,7 @@ namespace EditSharp.Components.Nodes.Input
                 _node = node;
                 _rate = options.SampleRate;
                 _channels = options.Channels;
-                _position = (long)System.Math.Round(options.StartAt.TotalSeconds * _rate);
+                _position = options.StartAt.ToSamples(_rate, Rounding.Nearest);
 
                 //where a steady tone at the starting frequency would be
                 double t = _position / (double)_rate;
@@ -120,7 +120,7 @@ namespace EditSharp.Components.Nodes.Input
             {
                 if (_ended) throw new SourceUnavailableException(SourceUnavailableReason.EndOfSource, "The tone has ended.");
 
-                long? window = _node.ResolveWindow(null).Length is { } d ? (long)System.Math.Floor(d.TotalSeconds * _rate) : null;
+                long? window = _node.ResolveWindow(null).Length is { } d ? d.ToSamples(_rate) : null;
                 int frames = destination.Length / _channels;
                 Waveform waveform = _node.Waveform;
 
@@ -132,7 +132,7 @@ namespace EditSharp.Components.Nodes.Input
                         _position %= w;
                     }
 
-                    TimeSpan t = TimeSpan.FromSeconds(_position / (double)_rate);
+                    Time t = Time.FromSamples(_position, _rate);
                     double value = waveform switch
                     {
                         Waveform.Sine => System.Math.Sin(_phase),

@@ -69,7 +69,7 @@ namespace EditSharp.Components.Clips
         /// <summary>Every value at one moment.</summary>
         /// <param name="clipRelativeTime">Content time: since the clip's in-point, at 1x.</param>
         /// <returns>The values.</returns>
-        public ResolvedTransform Evaluate(TimeSpan clipRelativeTime) => new(
+        public ResolvedTransform Evaluate(Time clipRelativeTime) => new(
             Position.Evaluate(clipRelativeTime),
             Scale.Evaluate(clipRelativeTime),
             Rotation.Evaluate(clipRelativeTime),

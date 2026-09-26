@@ -36,7 +36,7 @@ namespace EditSharp.Compositing.Sources
     /// ones (scrubbing, thumbnails, nested timelines) read on demand.
     /// </summary>
     internal sealed record ContentSourceOptions(
-        int Fps,
+        Rational Fps,
         int CanvasWidth,
         int CanvasHeight,
         HardwareAccelerator HwAccel,
@@ -134,8 +134,8 @@ namespace EditSharp.Compositing.Sources
         {
             using var _ = ModelLock.Read();
 
-            TimeSpan now = FrameStateResolver.TimeOfFrame(frameIndex, _options.Fps);
-            TimeSpan lookahead = EditSharpConfig.SourceLookahead;
+            Time now = FrameStateResolver.TimeOfFrame(frameIndex, _options.Fps);
+            Time lookahead = EditSharpConfig.SourceLookahead;
             var live = new HashSet<Guid>();
 
             foreach (VideoChannel channel in timeline.VideoChannels)
@@ -144,7 +144,7 @@ namespace EditSharp.Compositing.Sources
                 {
                     if (clip is not VideoClip video) continue;
 
-                    TimeSpan reachEnd = ReachEnd(channel, clip);
+                    Time reachEnd = ReachEnd(channel, clip);
 
                     bool upcoming = _options.Direction > 0
                         ? clip.Start <= now + lookahead && reachEnd > now
@@ -172,15 +172,15 @@ namespace EditSharp.Compositing.Sources
         }
 
         /// <summary>
-        /// Waits (up to `timeout`, or Timeout.InfiniteTimeSpan) until every
+        /// Waits (up to `timeout`, or Time.MaxValue) until every
         /// media input of `state` can hand over its frame without blocking.
         /// Inputs that have failed count as ready; they'll show their
         /// placeholder. False means the frame isn't ready in time.
         /// </summary>
-        public bool WaitReady(FrameState state, TimeSpan timeout)
+        public bool WaitReady(FrameState state, Time timeout)
         {
             var clock = Stopwatch.StartNew();
-            TimeSpan Remaining() => timeout == Timeout.InfiniteTimeSpan ? Timeout.InfiniteTimeSpan : Max(TimeSpan.Zero, timeout - clock.Elapsed);
+            Time Remaining() => timeout == Time.MaxValue ? Time.MaxValue : Max(Time.Zero, timeout - Time.FromTimeSpan(clock.Elapsed));
 
             foreach (FrameClip frameClip in state.Channels.SelectMany(c => c.Clips))
             {
@@ -203,7 +203,7 @@ namespace EditSharp.Compositing.Sources
                         OpenBuffer(input, prepared, frameClip.Graph, state.FrameIndex, ReachEnd(null, clip));
                     }
 
-                    TimeSpan content = TimeSpan.FromSeconds(frameClip.ClipSeconds);
+                    Time content = frameClip.ContentTime;
                     if (!input.Buffer!.WaitReady(state.FrameIndex, content, Remaining())) return false;
                 }
             }
@@ -214,8 +214,8 @@ namespace EditSharp.Compositing.Sources
         // ---- per frame ----
 
         public IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> GetContent(
-            VideoClip clip, Graph graph, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool) =>
-            GetContent(clip, graph, clipSeconds, frameIndex, canvasWidth, canvasHeight, pool, null);
+            VideoClip clip, Graph graph, Time contentTime, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool) =>
+            GetContent(clip, graph, contentTime, frameIndex, canvasWidth, canvasHeight, pool, null);
 
         /// <summary>
         /// GetContent with some inputs already resolved (see
@@ -223,7 +223,7 @@ namespace EditSharp.Compositing.Sources
         /// only the rest are resolved here.
         /// </summary>
         public IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> GetContent(
-            VideoClip clip, Graph graph, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool,
+            VideoClip clip, Graph graph, Time contentTime, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool,
             IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)>? resolved)
         {
             var result = new Dictionary<Guid, (SKImage, bool)>();
@@ -239,12 +239,12 @@ namespace EditSharp.Compositing.Sources
 
                 if (_oneShot.Remove(node.Id, out IPreparedVideoSource? bound))
                 {
-                    result[node.Id] = ReadOnce(bound, clip, clipSeconds, canvasWidth, canvasHeight, pool);
+                    result[node.Id] = ReadOnce(bound, clip, contentTime, canvasWidth, canvasHeight, pool);
                     continue;
                 }
 
                 result[node.Id] = node is VideoInputNode media
-                    ? ResolveMedia(clip, graph, media, clipSeconds, frameIndex, canvasWidth, canvasHeight, pool)
+                    ? ResolveMedia(clip, graph, media, contentTime, frameIndex, canvasWidth, canvasHeight, pool)
                     : throw new NotSupportedException($"ClipContentSource has no dispatch for {node.GetType().Name}.");
             }
 
@@ -252,7 +252,7 @@ namespace EditSharp.Compositing.Sources
         }
 
         /// <summary>
-        /// Every media input of `clip` at `clipSeconds` through a one-shot
+        /// Every media input of `clip` at `contentTime` through a one-shot
         /// VideoInputNode.GetFrameAtAsync; nothing is kept open, so a caller
         /// touching many clips (thumbnails) holds no readers. Failures become
         /// placeholders; Complete is false if any was something still on its
@@ -261,9 +261,9 @@ namespace EditSharp.Compositing.Sources
         /// GPU thread. Hand the result to GetContent.
         /// </summary>
         public async Task<(IReadOnlyDictionary<Guid, (SKImage Image, bool Transient)> Media, bool Complete)> GetMediaFramesOnceAsync(
-            Graph graph, double clipSeconds, int width, int height, CancellationToken ct = default)
+            Graph graph, Time contentTime, int width, int height, CancellationToken ct = default)
         {
-            TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
+            Time content = contentTime;
             VideoInputNode[] nodes = graph.Nodes.OfType<VideoInputNode>().Where(n => n.Enabled).ToArray();
 
             var frames = await Task.WhenAll(nodes.Select(async node =>
@@ -293,9 +293,9 @@ namespace EditSharp.Compositing.Sources
         }
 
         //a compositor-bound source's frame, read and let go of in one go (see GetMediaFramesOnceAsync)
-        private (SKImage, bool) ReadOnce(IPreparedVideoSource prepared, VideoClip clip, double clipSeconds, int canvasWidth, int canvasHeight, SurfacePool pool)
+        private (SKImage, bool) ReadOnce(IPreparedVideoSource prepared, VideoClip clip, Time contentTime, int canvasWidth, int canvasHeight, SurfacePool pool)
         {
-            TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
+            Time content = contentTime;
 
             try
             {
@@ -318,10 +318,10 @@ namespace EditSharp.Compositing.Sources
             }
         }
 
-        private (SKImage, bool) ResolveMedia(VideoClip clip, Graph graph, VideoInputNode node, double clipSeconds, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool)
+        private (SKImage, bool) ResolveMedia(VideoClip clip, Graph graph, VideoInputNode node, Time contentTime, int frameIndex, int canvasWidth, int canvasHeight, SurfacePool pool)
         {
             MediaInput input = Input(clip, node);
-            TimeSpan content = TimeSpan.FromSeconds(clipSeconds);
+            Time content = contentTime;
 
             try
             {
@@ -399,7 +399,7 @@ namespace EditSharp.Compositing.Sources
         {
             if (_options.Report is not { } report) return;
 
-            TimeSpan at = FrameStateResolver.TimeOfFrame(frameIndex, _options.Fps);
+            Time at = FrameStateResolver.TimeOfFrame(frameIndex, _options.Fps);
             if (report.Record(input.Node.Id, input.Node.Description, ex.Reason, ex.Message, at))
                 EditSharpConfig.Logger.LogWarning($"{input.Node.Description}: {ex.Message} Rendering a placeholder from {at}.");
         }
@@ -407,7 +407,7 @@ namespace EditSharp.Compositing.Sources
         private bool RetryDue(MediaInput input) =>
             _options.Failures == ContentFailurePolicy.Preview &&
             input.Failure!.Reason is SourceUnavailableReason.MediaOffline or SourceUnavailableReason.DecodeError or SourceUnavailableReason.NoMedia or SourceUnavailableReason.NoTimeline &&
-            Environment.TickCount64 - input.FailedAt >= EditSharpConfig.SourceRetryInterval.TotalMilliseconds;
+            Time.FromMilliseconds(Environment.TickCount64 - input.FailedAt) >= EditSharpConfig.SourceRetryInterval;
 
         // ---- inputs ----
 
@@ -462,18 +462,18 @@ namespace EditSharp.Compositing.Sources
             if (!preparing.IsCompleted && _options.Buffered && _options.Failures == ContentFailurePolicy.Preview)
                 throw new SourceUnavailableException(SourceUnavailableReason.Opening, $"{input.Node.Description} is still opening.");
 
-            WaitQuietly(preparing, Timeout.InfiniteTimeSpan);
+            WaitQuietly(preparing, Time.MaxValue);
 
             return TryTakePrepared(input) ?? throw input.Failure!;
         }
 
-        private BufferedVideoReader OpenBuffer(MediaInput input, IPreparedVideoSource prepared, Graph graph, int firstFrame, TimeSpan reachEnd)
+        private BufferedVideoReader OpenBuffer(MediaInput input, IPreparedVideoSource prepared, Graph graph, int firstFrame, Time reachEnd)
         {
             VideoClip clip = input.Clip;
-            TimeSpan content = ContentTimeOf(clip, firstFrame);
+            Time content = ContentTimeOf(clip, firstFrame);
 
-            int firstClipFrame = (int)Math.Ceiling(clip.Start.TotalSeconds * _options.Fps - 1e-9);
-            int endFrame = (int)Math.Ceiling(reachEnd.TotalSeconds * _options.Fps - 1e-9);
+            int firstClipFrame = (int)clip.Start.ToFrame(_options.Fps, Rounding.Ceiling);
+            int endFrame = (int)reachEnd.ToFrame(_options.Fps, Rounding.Ceiling);
 
             IVideoFrameReader reader = prepared.OpenReader(ReaderOptions(input, prepared, graph, content, callerOwnsFrames: true, _options.CanvasWidth, _options.CanvasHeight));
 
@@ -484,7 +484,7 @@ namespace EditSharp.Compositing.Sources
         }
 
         private VideoReaderOptions ReaderOptions(
-            MediaInput input, IPreparedVideoSource prepared, Graph graph, TimeSpan startAt, bool callerOwnsFrames, int canvasWidth, int canvasHeight)
+            MediaInput input, IPreparedVideoSource prepared, Graph graph, Time startAt, bool callerOwnsFrames, int canvasWidth, int canvasHeight)
         {
             //decode only as large as the clip's own transform will ever show it
             (int nativeWidth, int nativeHeight) = prepared.NativeSize;
@@ -524,37 +524,36 @@ namespace EditSharp.Compositing.Sources
 
         // ---- timeline arithmetic ----
 
-        private TimeSpan ContentTimeOf(Clip clip, int frame) =>
-            TimeSpan.FromSeconds(FrameStateResolver.ClipSecondsAt(clip, FrameStateResolver.TimeOfFrame(frame, _options.Fps)));
+        private Time ContentTimeOf(Clip clip, int frame) => clip.ContentTimeAt(FrameStateResolver.TimeOfFrame(frame, _options.Fps));
 
         /// <summary>
         /// How far past its own end a clip is still composited: through the
         /// transition into the next clip, if its channel has one (the outgoing
         /// clip is drawn under it).
         /// </summary>
-        private static TimeSpan ReachEnd(Channel? channel, Clip clip)
+        private static Time ReachEnd(Channel? channel, Clip clip)
         {
             using var _ = ModelLock.Read();
 
             channel ??= clip.Channel;
-            TimeSpan transition = channel?.Transitions.FirstOrDefault(t => ReferenceEquals(t.From, clip))?.Duration ?? TimeSpan.Zero;
-            return clip.End + Max(TimeSpan.Zero, transition);
+            Time transition = channel?.Transitions.FirstOrDefault(t => ReferenceEquals(t.From, clip))?.Duration ?? Time.Zero;
+            return clip.End + Max(Time.Zero, transition);
         }
 
         //where a clip's buffer starts: the playhead if the clip is already on screen, else where it'll first appear
-        private int EntryFrame(Clip clip, TimeSpan reachEnd, int frameIndex)
+        private int EntryFrame(Clip clip, Time reachEnd, int frameIndex)
         {
-            int first = (int)Math.Ceiling(clip.Start.TotalSeconds * _options.Fps - 1e-9);
-            int last = (int)Math.Ceiling(reachEnd.TotalSeconds * _options.Fps - 1e-9) - 1;
+            int first = (int)clip.Start.ToFrame(_options.Fps, Rounding.Ceiling);
+            int last = (int)reachEnd.ToFrame(_options.Fps, Rounding.Ceiling) - 1;
 
             return _options.Direction > 0 ? Math.Max(first, frameIndex) : Math.Min(last, frameIndex);
         }
 
-        private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+        private static Time Max(Time a, Time b) => a > b ? a : b;
 
-        private static bool WaitQuietly(Task task, TimeSpan timeout)
+        private static bool WaitQuietly(Task task, Time timeout)
         {
-            try { return task.Wait(timeout); }
+            try { return task.Wait(timeout.ToTimeout()); }
             catch (AggregateException) { return true; } //finished, by failing; TryTakePrepared records it
         }
 

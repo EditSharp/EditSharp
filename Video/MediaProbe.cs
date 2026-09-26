@@ -25,9 +25,9 @@ namespace EditSharp.Video
         int Width,
         int Height,
         bool HasAudio,
-        TimeSpan? Duration,
+        Time? Duration,
         bool IsStillImage,
-        double? FrameRate,
+        Rational? FrameRate,
         bool HasAlpha = false);
 
     //runs ffprobe (EditSharpConfig.FfprobePath) once per file for streams and format together
@@ -92,7 +92,7 @@ namespace EditSharp.Video
             bool hasAlpha = false;
             int width = 0;
             int height = 0;
-            double? frameRate = null;
+            Rational? frameRate = null;
 
             if (root.TryGetProperty("streams", out JsonElement streams))
             {
@@ -119,7 +119,7 @@ namespace EditSharp.Video
                 }
             }
 
-            TimeSpan? duration = null;
+            Time? duration = null;
             bool isStillImage = false;
 
             //still images come through the image demuxers: image2 for files
@@ -134,10 +134,9 @@ namespace EditSharp.Video
             if (root.TryGetProperty("format", out JsonElement format) &&
                 format.TryGetProperty("duration", out JsonElement durationProperty) &&
                 durationProperty.GetString() is { } durationText &&
-                double.TryParse(durationText, NumberStyles.Float, CultureInfo.InvariantCulture,
-                    out double seconds))
+                Rational.TryParse(durationText, out Rational seconds))
             {
-                duration = TimeSpan.FromSeconds(seconds);
+                duration = Time.FromSeconds(seconds);
             }
 
             return new MediaInfo(hasVideo, width, height, hasAudio, isStillImage ? null : duration, isStillImage, frameRate, hasAlpha);
@@ -154,18 +153,11 @@ namespace EditSharp.Video
         }
 
         //ffprobe rates are fractions ("30000/1001"); "0/0" means unknown
-        private static double? ParseRate(JsonElement stream, string property)
+        private static Rational? ParseRate(JsonElement stream, string property)
         {
             if (!stream.TryGetProperty(property, out JsonElement value) || value.GetString() is not { } text) return null;
 
-            string[] parts = text.Split('/');
-            if (parts.Length != 2 ||
-                !double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out double numerator) ||
-                !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double denominator) ||
-                numerator <= 0 || denominator <= 0)
-                return null;
-
-            return numerator / denominator;
+            return Rational.TryParse(text, out Rational rate) && rate.IsPositive ? rate : null;
         }
 
         private static ProcessStartInfo BuildStartInfo(string[] args)

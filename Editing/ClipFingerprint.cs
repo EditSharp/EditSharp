@@ -35,7 +35,7 @@ namespace EditSharp.Editing
             var hash = new HashCode();
             hash.Add(clip.Speed);
 
-            TimeSpan anchor = Anchor(clip);
+            Time anchor = Anchor(clip);
             AddGraph(ref hash, clip.Graph, anchor, 0);
 
             return hash.ToHashCode();
@@ -44,10 +44,10 @@ namespace EditSharp.Editing
         /// <summary>The head in-point the clip's content is anchored to.</summary>
         /// <param name="clip">The clip.</param>
         /// <returns>The first trimmable input's in-point (they all shift together), or zero when the clip has none.</returns>
-        public static TimeSpan Anchor(Clip clip)
-            => clip.Graph.AllNodes.OfType<InputNode>().FirstOrDefault()?.InPoint ?? TimeSpan.Zero;
+        public static Time Anchor(Clip clip)
+            => clip.Graph.AllNodes.OfType<InputNode>().FirstOrDefault()?.InPoint ?? Time.Zero;
 
-        private static void AddGraph(ref HashCode hash, Graph graph, TimeSpan anchor, int depth)
+        private static void AddGraph(ref HashCode hash, Graph graph, Time anchor, int depth)
         {
             foreach (Node node in graph.Nodes)
             {
@@ -79,14 +79,14 @@ namespace EditSharp.Editing
             }
         }
 
-        private static void AddDescriptor(ref HashCode hash, PropertyDescriptor descriptor, object target, TimeSpan anchor, int depth)
+        private static void AddDescriptor(ref HashCode hash, PropertyDescriptor descriptor, object target, Time anchor, int depth)
         {
             if (descriptor.GetAnimatable(target) is IAnimatable animatable) AddAnimatable(ref hash, animatable, anchor);
             else if (descriptor.IsCollection) AddValue(ref hash, descriptor.GetList(target), anchor, depth + 1);
             else AddValue(ref hash, descriptor.GetValue(target), anchor, depth + 1);
         }
 
-        private static void AddAnimatable(ref HashCode hash, IAnimatable animatable, TimeSpan anchor)
+        private static void AddAnimatable(ref HashCode hash, IAnimatable animatable, Time anchor)
         {
             AddValue(ref hash, animatable.GetStaticValue(), anchor, MaxDepth);
 
@@ -97,7 +97,7 @@ namespace EditSharp.Editing
             }
         }
 
-        private static void AddValue(ref HashCode hash, object? value, TimeSpan anchor, int depth)
+        private static void AddValue(ref HashCode hash, object? value, Time anchor, int depth)
         {
             switch (value)
             {

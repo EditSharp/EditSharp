@@ -361,6 +361,21 @@ namespace EditSharp.Editing
             if (target.IsEnum)
                 return value is string name ? Enum.Parse(target, name, ignoreCase: true) : Enum.ToObject(target, value);
 
+            //a typed number becomes the exact decimal it reads as: 1.5025 is 601/400
+            if (target == typeof(Rational))
+            {
+                return value switch
+                {
+                    string text => Rational.Parse(text),
+                    double or float => Rational.FromDecimal((decimal)Convert.ToDouble(value, CultureInfo.InvariantCulture)),
+                    IConvertible => Rational.FromDecimal(Convert.ToDecimal(value, CultureInfo.InvariantCulture)),
+                    _ => value,
+                };
+            }
+
+            if (value is Rational rational && target == typeof(double)) return rational.Value;
+            if (value is Rational fraction && target == typeof(float)) return (float)fraction.Value;
+
             if (value is IConvertible) return Convert.ChangeType(value, target, CultureInfo.InvariantCulture);
 
             return value;
@@ -439,12 +454,12 @@ namespace EditSharp.Editing
             if (valueType.IsEnum) return PropertyEditor.Dropdown;
             if (valueType == typeof(string)) return PropertyEditor.Text;
 
-            if (valueType == typeof(float) || valueType == typeof(double) || valueType == typeof(int) || valueType == typeof(long))
+            if (valueType == typeof(float) || valueType == typeof(double) || valueType == typeof(int) || valueType == typeof(long) || valueType == typeof(Rational))
                 return !double.IsNaN(attribute.Min) && !double.IsNaN(attribute.Max) ? PropertyEditor.Slider : PropertyEditor.Number;
 
             if (valueType == typeof(SKColor)) return PropertyEditor.Color;
             if (valueType == typeof(Vector2)) return PropertyEditor.Vector;
-            if (valueType == typeof(TimeSpan)) return PropertyEditor.Time;
+            if (valueType == typeof(Time)) return PropertyEditor.Time;
             if (typeof(IMedia).IsAssignableFrom(valueType)) return PropertyEditor.Media;
             if (valueType == typeof(Timeline)) return PropertyEditor.Timeline;
 

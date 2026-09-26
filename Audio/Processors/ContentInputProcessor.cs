@@ -29,7 +29,7 @@ namespace EditSharp.Audio.Processors
                 return;
             }
 
-            warp.Render(tick.ContentFrame, tick.ContentStep * tick.Format.SampleRate, tick.Frames, tick.Pitch, output);
+            warp.Render(tick.ContentFrame, tick.Speed.Value, tick.Frames, tick.Pitch, output);
         }
 
         private ContentWarp Warp()

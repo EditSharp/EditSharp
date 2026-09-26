@@ -38,11 +38,11 @@ namespace EditSharp.Components
         public IReadOnlyList<Channel> Channels => [.. _videoChannels, .. _audioChannels];
 
         /// <summary>Where the last clip on any channel ends; zero when there are none.</summary>
-        public TimeSpan Duration
+        public Time Duration
         {
             get
             {
-                TimeSpan max = TimeSpan.Zero;
+                Time max = Time.Zero;
                 foreach (VideoChannel channel in _videoChannels) if (channel.End > max) max = channel.End;
                 foreach (AudioChannel channel in _audioChannels) if (channel.End > max) max = channel.End;
                 return max;
@@ -119,7 +119,7 @@ namespace EditSharp.Components
         /// <summary>Clears a range on every channel and closes the gap, so the channels stay in sync.</summary>
         /// <param name="start">Where the range starts.</param>
         /// <param name="end">Where it ends; an empty or reversed range does nothing.</param>
-        public void RippleRemoveRange(TimeSpan start, TimeSpan end)
+        public void RippleRemoveRange(Time start, Time end)
         {
             foreach (Channel channel in Channels) channel.RippleRemoveRange(start, end);
         }

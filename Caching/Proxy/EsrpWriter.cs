@@ -43,7 +43,7 @@ namespace EditSharp.Caching.Proxy
 
         public static EsrpWriter Create(
             string path, int width, int height, EsrpPixelFormat pixelFormat, EsrpCompressionScheme compression,
-            double frameRate, int capacity, EsrpMeta meta, byte[] palette)
+            Rational frameRate, int capacity, EsrpMeta meta, byte[] palette)
         {
             byte[] metaBytes = EsrpMetaSerializer.SerializeToUtf8Bytes(meta);
 

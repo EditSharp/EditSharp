@@ -10,12 +10,12 @@ namespace EditSharp.Components
     public sealed class KeyframeHandle<T>
     {
         /// <summary>How far the handle reaches toward the neighbouring keyframe on its side; never negative, and never past that keyframe.</summary>
-        public TimeSpan TimeOffset { get; internal set; }
+        public Time TimeOffset { get; internal set; }
 
         /// <summary>The control point's value, as an offset added to the keyframe's value.</summary>
         public T ValueOffset { get; internal set; }
 
-        internal KeyframeHandle(TimeSpan timeOffset, T valueOffset)
+        internal KeyframeHandle(Time timeOffset, T valueOffset)
         {
             TimeOffset = timeOffset;
             ValueOffset = valueOffset;
@@ -29,9 +29,9 @@ namespace EditSharp.Components
     {
         object? IKeyframe.Value => Value;
 
-        TimeSpan _start;
+        Time _start;
         /// <summary>When the keyframe is, in content time; move it with <see cref="KeyframeTrack{T}.MoveKeyframe"/>.</summary>
-        public TimeSpan Start { get => _start; internal set => Transaction.Set(this, ref _start, value, static (o, v) => o._start = v); }
+        public Time Start { get => _start; internal set => Transaction.Set(this, ref _start, value, static (o, v) => o._start = v); }
 
         T _value;
         /// <summary>The value.</summary>
@@ -58,7 +58,7 @@ namespace EditSharp.Components
         /// <summary>How the leaving handle is set; see <see cref="KeyframeTrack{T}.SetTangentMode"/>.</summary>
         public TangentMode OutTangentMode { get => _outTangentMode; internal set => Transaction.Set(this, ref _outTangentMode, value, static (o, v) => o._outTangentMode = v); }
 
-        internal Keyframe(TimeSpan start, T value)
+        internal Keyframe(Time start, T value)
         {
             _start = start;
             _value = value;
@@ -92,7 +92,7 @@ namespace EditSharp.Components
         /// <param name="start">When, in content time.</param>
         /// <param name="value">The value.</param>
         /// <returns>The keyframe.</returns>
-        public Keyframe<T> AddKeyframe(TimeSpan start, T value)
+        public Keyframe<T> AddKeyframe(Time start, T value)
         {
             Keyframe<T>? existing = _keyframes.FirstOrDefault(k => k.Start == start);
             if (existing != null)
@@ -124,14 +124,14 @@ namespace EditSharp.Components
         /// <param name="start">When, in content time.</param>
         /// <param name="value">The value.</param>
         /// <returns>The keyframe.</returns>
-        protected virtual Keyframe<T> CreateKeyframe(TimeSpan start, T value) => new(start, value);
+        protected virtual Keyframe<T> CreateKeyframe(Time start, T value) => new(start, value);
 
         /// <summary>Moves every keyframe by the same amount, handles and all.</summary>
         /// <remarks>Keyframes can end up before zero: a head trim leaves the ones it cut past at negative times, so extending back restores them.</remarks>
         /// <param name="amount">How far to move them; negative moves them earlier.</param>
-        public void Shift(TimeSpan amount)
+        public void Shift(Time amount)
         {
-            if (amount == TimeSpan.Zero) return;
+            if (amount == Time.Zero) return;
 
             foreach (Keyframe<T> keyframe in _keyframes) keyframe.Start += amount;
         }
@@ -207,19 +207,19 @@ namespace EditSharp.Components
         /// <param name="keyframe">The keyframe; one not on the track is ignored.</param>
         /// <param name="newStart">The new time, clamped to just inside its neighbours.</param>
         /// <param name="newValue">The new value.</param>
-        public void MoveKeyframe(Keyframe<T> keyframe, TimeSpan newStart, T newValue)
+        public void MoveKeyframe(Keyframe<T> keyframe, Time newStart, T newValue)
         {
             int index = _keyframes.IndexOf(keyframe);
             if (index < 0) return;
 
-            TimeSpan floor = index > 0 ? _keyframes[index - 1].Start : TimeSpan.MinValue;
-            TimeSpan ceiling = index < _keyframes.Count - 1 ? _keyframes[index + 1].Start : TimeSpan.MaxValue;
+            Time floor = index > 0 ? _keyframes[index - 1].Start : Time.MinValue;
+            Time ceiling = index < _keyframes.Count - 1 ? _keyframes[index + 1].Start : Time.MaxValue;
 
             //strictly between, since two keyframes can't share a time
-            TimeSpan clampedFloor = floor == TimeSpan.MinValue ? floor : floor + TimeSpan.FromTicks(1);
-            TimeSpan clampedCeiling = ceiling == TimeSpan.MaxValue ? ceiling : ceiling - TimeSpan.FromTicks(1);
+            Time clampedFloor = floor == Time.MinValue ? floor : floor + Time.Tick;
+            Time clampedCeiling = ceiling == Time.MaxValue ? ceiling : ceiling - Time.Tick;
 
-            TimeSpan clamped = newStart < clampedFloor ? clampedFloor
+            Time clamped = newStart < clampedFloor ? clampedFloor
                 : newStart > clampedCeiling ? clampedCeiling
                 : newStart;
 
@@ -246,17 +246,17 @@ namespace EditSharp.Components
         /// <param name="isInHandle">True for the arriving handle, false for the leaving one.</param>
         /// <param name="timeOffset">How far the handle reaches toward the neighbour on its side, clamped to that neighbour.</param>
         /// <param name="valueOffset">The control point's value, as an offset added to the keyframe's value.</param>
-        public void SetHandle(Keyframe<T> keyframe, bool isInHandle, TimeSpan timeOffset, T valueOffset)
+        public void SetHandle(Keyframe<T> keyframe, bool isInHandle, Time timeOffset, T valueOffset)
         {
             int index = _keyframes.IndexOf(keyframe);
             if (index < 0) return;
 
-            TimeSpan maxReach = isInHandle
-                ? (index > 0 ? keyframe.Start - _keyframes[index - 1].Start : TimeSpan.MaxValue)
-                : (index < _keyframes.Count - 1 ? _keyframes[index + 1].Start - keyframe.Start : TimeSpan.MaxValue);
+            Time maxReach = isInHandle
+                ? (index > 0 ? keyframe.Start - _keyframes[index - 1].Start : Time.MaxValue)
+                : (index < _keyframes.Count - 1 ? _keyframes[index + 1].Start - keyframe.Start : Time.MaxValue);
 
-            TimeSpan clampedOffset = timeOffset < TimeSpan.Zero ? TimeSpan.Zero
-                : maxReach != TimeSpan.MaxValue && timeOffset > maxReach ? maxReach
+            Time clampedOffset = timeOffset < Time.Zero ? Time.Zero
+                : maxReach != Time.MaxValue && timeOffset > maxReach ? maxReach
                 : timeOffset;
 
             var handle = new KeyframeHandle<T>(clampedOffset, valueOffset);
@@ -318,26 +318,26 @@ namespace EditSharp.Components
             T tangentValue = _interpolator.Scale(_interpolator.Subtract(next.Value, prev.Value), 1f / 6f);
 
             //an edge keyframe reaches a third of the way to its one neighbour
-            TimeSpan span = hasPrev && hasNext
-                ? TimeSpan.FromTicks((next.Start - prev.Start).Ticks / 6)
+            Time span = hasPrev && hasNext
+                ? (next.Start - prev.Start) / 6
                 : hasNext
-                    ? TimeSpan.FromTicks((next.Start - keyframe.Start).Ticks / 3)
-                    : TimeSpan.FromTicks((keyframe.Start - prev.Start).Ticks / 3);
+                    ? (next.Start - keyframe.Start) / 3
+                    : (keyframe.Start - prev.Start) / 3;
 
             //a handle clamped to a shorter gap scales its value by the same ratio, keeping its slope; a steeper
             //handle would overshoot the next keyframe
             if (keyframe.OutTangentMode == TangentMode.Auto && hasNext)
             {
-                TimeSpan gap = next.Start - keyframe.Start;
-                TimeSpan reach = span.Ticks <= gap.Ticks ? span : gap;
+                Time gap = next.Start - keyframe.Start;
+                Time reach = span.Ticks <= gap.Ticks ? span : gap;
                 float scale = span.Ticks > 0 ? (float)reach.Ticks / span.Ticks : 1f;
                 keyframe.OutHandle = new KeyframeHandle<T>(reach, _interpolator.Scale(tangentValue, scale));
             }
 
             if (keyframe.InTangentMode == TangentMode.Auto && hasPrev)
             {
-                TimeSpan gap = keyframe.Start - prev.Start;
-                TimeSpan reach = span.Ticks <= gap.Ticks ? span : gap;
+                Time gap = keyframe.Start - prev.Start;
+                Time reach = span.Ticks <= gap.Ticks ? span : gap;
                 float scale = span.Ticks > 0 ? (float)reach.Ticks / span.Ticks : 1f;
                 keyframe.InHandle = new KeyframeHandle<T>(reach, _interpolator.Scale(tangentValue, -scale));
             }
@@ -347,7 +347,7 @@ namespace EditSharp.Components
         /// <remarks>Before the first keyframe it's the first keyframe's value, after the last the last's. <see cref="Animatable{T}"/> uses its static value instead when there are fewer than two keyframes.</remarks>
         /// <param name="time">Content time.</param>
         /// <returns>The value; default when there are no keyframes.</returns>
-        public T Evaluate(TimeSpan time)
+        public T Evaluate(Time time)
         {
             if (_keyframes.Count == 0) return default!;
             if (_keyframes.Count == 1) return _keyframes[0].Value;
@@ -363,6 +363,9 @@ namespace EditSharp.Components
                 //a time exactly on a keyframe belongs to the segment it starts, so a Hold changes at its own time
                 if (time < from.Start || time >= to.Start) continue;
 
+                //exactly on a keyframe is exactly its value
+                if (time == from.Start) return from.Value;
+
                 return InterpolateSegment(from, to, time);
             }
 
@@ -374,63 +377,78 @@ namespace EditSharp.Components
         /// <param name="to">The later keyframe.</param>
         /// <param name="time">A content time between them.</param>
         /// <returns>The value.</returns>
-        protected virtual T InterpolateSegment(Keyframe<T> from, Keyframe<T> to, TimeSpan time)
+        protected virtual T InterpolateSegment(Keyframe<T> from, Keyframe<T> to, Time time)
         {
             //Hold on the leaving side wins, whatever the arriving side says
             if (from.OutInterpolation == InterpolationType.Hold) return from.Value;
 
-            float u = SolveBezierU(time, from, to);
-            return EvaluateValueCubic(from, to, u);
+            T p1 = OutControlValue(from);
+            T p2 = InControlValue(to);
+
+            //a flat segment is exactly its value all the way along
+            EqualityComparer<T> equal = EqualityComparer<T>.Default;
+            if (equal.Equals(from.Value, to.Value) && equal.Equals(p1, from.Value) && equal.Equals(p2, from.Value)) return from.Value;
+
+            double u = SolveBezierU(time, from, to);
+
+            //no value handles: a straight line, so one lerp
+            if (equal.Equals(p1, from.Value) && equal.Equals(p2, to.Value) && !HasTimeHandles(from, to))
+                return _interpolator.Lerp(from.Value, to.Value, (float)u);
+
+            return EvaluateValueCubic(from.Value, p1, p2, to.Value, u);
         }
 
-        //the Bezier parameter u in [0, 1] whose time is `time`, by bisection. A Linear side's control point sits
-        //on its keyframe. The time curve is monotonic because handles never reach past a neighbour
-        private static float SolveBezierU<TVal>(TimeSpan time, Keyframe<TVal> from, Keyframe<TVal> to)
+        private static bool HasTimeHandles(Keyframe<T> from, Keyframe<T> to) =>
+            (from.OutInterpolation == InterpolationType.Bezier && from.OutHandle != null) ||
+            (to.InInterpolation == InterpolationType.Bezier && to.InHandle != null);
+
+        private T OutControlValue(Keyframe<T> from) => from.OutInterpolation == InterpolationType.Bezier && from.OutHandle != null
+            ? _interpolator.Add(from.Value, from.OutHandle.ValueOffset)
+            : from.Value;
+
+        private T InControlValue(Keyframe<T> to) => to.InInterpolation == InterpolationType.Bezier && to.InHandle != null
+            ? _interpolator.Add(to.Value, to.InHandle.ValueOffset)
+            : to.Value;
+
+        //the Bezier parameter u in [0, 1] whose time is `time`. Times are taken relative to `from`, so they stay
+        //exact in a double. Without time handles the time curve is a straight line and u is the plain fraction;
+        //otherwise it's found by bisection, and it's monotonic because handles never reach past a neighbour
+        private static double SolveBezierU<TVal>(Time time, Keyframe<TVal> from, Keyframe<TVal> to)
         {
-            double tA = from.Start.Ticks;
-            double tB = to.Start.Ticks;
-            double target = time.Ticks;
+            double tB = (to.Start - from.Start).Ticks;
+            double target = (time - from.Start).Ticks;
+            if (tB <= 0) return 0;
 
-            double p1 = from.OutInterpolation == InterpolationType.Bezier && from.OutHandle != null
-                ? tA + from.OutHandle.TimeOffset.Ticks
-                : tA;
+            bool outHandle = from.OutInterpolation == InterpolationType.Bezier && from.OutHandle != null;
+            bool inHandle = to.InInterpolation == InterpolationType.Bezier && to.InHandle != null;
+            if (!outHandle && !inHandle) return Math.Clamp(target / tB, 0, 1);
 
-            double p2 = to.InInterpolation == InterpolationType.Bezier && to.InHandle != null
-                ? tB - to.InHandle.TimeOffset.Ticks
-                : tB;
+            double p1 = outHandle ? from.OutHandle!.TimeOffset.Ticks : 0;
+            double p2 = inHandle ? tB - to.InHandle!.TimeOffset.Ticks : tB;
 
             double lo = 0, hi = 1;
-            for (int i = 0; i < 40; i++)
+            for (int i = 0; i < 60; i++)
             {
                 double mid = (lo + hi) / 2;
                 double m = 1 - mid;
-                double sampled =
-                    (m * m * m * tA) + (3 * m * m * mid * p1) + (3 * m * mid * mid * p2) + (mid * mid * mid * tB);
+                double sampled = (3 * m * m * mid * p1) + (3 * m * mid * mid * p2) + (mid * mid * mid * tB);
 
                 if (sampled < target) lo = mid; else hi = mid;
             }
 
-            return (float)((lo + hi) / 2);
+            return (lo + hi) / 2;
         }
 
-        private T EvaluateValueCubic(Keyframe<T> from, Keyframe<T> to, float u)
+        //the cubic through four control values by repeated lerps (de Casteljau), so the ends and equal values come out exact
+        private T EvaluateValueCubic(T p0, T p1, T p2, T p3, double u)
         {
-            T p1 = from.OutInterpolation == InterpolationType.Bezier && from.OutHandle != null
-                ? _interpolator.Add(from.Value, from.OutHandle.ValueOffset)
-                : from.Value;
+            float t = (float)u;
 
-            T p2 = to.InInterpolation == InterpolationType.Bezier && to.InHandle != null
-                ? _interpolator.Add(to.Value, to.InHandle.ValueOffset)
-                : to.Value;
+            T q0 = _interpolator.Lerp(p0, p1, t);
+            T q1 = _interpolator.Lerp(p1, p2, t);
+            T q2 = _interpolator.Lerp(p2, p3, t);
 
-            float m = 1 - u;
-
-            T term0 = _interpolator.Scale(from.Value, m * m * m);
-            T term1 = _interpolator.Scale(p1, 3 * m * m * u);
-            T term2 = _interpolator.Scale(p2, 3 * m * u * u);
-            T term3 = _interpolator.Scale(to.Value, u * u * u);
-
-            return _interpolator.Add(_interpolator.Add(term0, term1), _interpolator.Add(term2, term3));
+            return _interpolator.Lerp(_interpolator.Lerp(q0, q1, t), _interpolator.Lerp(q1, q2, t), t);
         }
 
         /// <summary>How far through a segment a time is, in the curve's own parameter, taking the time handles into account.</summary>
@@ -438,7 +456,7 @@ namespace EditSharp.Components
         /// <param name="from">The earlier keyframe.</param>
         /// <param name="to">The later keyframe.</param>
         /// <returns>The parameter, from 0 at <paramref name="from"/> to 1 at <paramref name="to"/>.</returns>
-        protected static float SolveU(TimeSpan time, Keyframe<T> from, Keyframe<T> to) =>
+        protected static double SolveU(Time time, Keyframe<T> from, Keyframe<T> to) =>
             SolveBezierU(time, from, to);
     }
 }

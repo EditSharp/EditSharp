@@ -75,28 +75,28 @@ namespace EditSharp
                 : throw new ArgumentOutOfRangeException(nameof(value), "MaxConcurrentProxyBuilds must be at least 1.");
         }
 
-        private static TimeSpan _sourceRetryInterval = TimeSpan.FromSeconds(2);
+        private static Time _sourceRetryInterval = Time.FromSeconds(2);
 
         /// <summary>How long a preview waits before retrying a source that was offline or failed to decode.</summary>
         /// <remarks>A drive may be reconnected or a file re-exported in the meantime. Exports never retry.</remarks>
         /// <exception cref="ArgumentOutOfRangeException">Set to zero or less.</exception>
-        public static TimeSpan SourceRetryInterval
+        public static Time SourceRetryInterval
         {
             get => _sourceRetryInterval;
-            set => _sourceRetryInterval = value > TimeSpan.Zero
+            set => _sourceRetryInterval = value > Time.Zero
                 ? value
                 : throw new ArgumentOutOfRangeException(nameof(value), "SourceRetryInterval must be positive.");
         }
 
-        private static TimeSpan _sourceLookahead = TimeSpan.FromSeconds(2);
+        private static Time _sourceLookahead = Time.FromSeconds(2);
 
         /// <summary>How far ahead of the playhead (behind it, in reverse) sources are prepared and their readers opened.</summary>
         /// <remarks>A clip that arrives on screen then already has frames waiting.</remarks>
         /// <exception cref="ArgumentOutOfRangeException">Set below zero.</exception>
-        public static TimeSpan SourceLookahead
+        public static Time SourceLookahead
         {
             get => _sourceLookahead;
-            set => _sourceLookahead = value >= TimeSpan.Zero
+            set => _sourceLookahead = value >= Time.Zero
                 ? value
                 : throw new ArgumentOutOfRangeException(nameof(value), "SourceLookahead can't be negative.");
         }
@@ -114,15 +114,15 @@ namespace EditSharp
                 : throw new ArgumentOutOfRangeException(nameof(value), "AudioBlockFrames must be between 32 and 16384.");
         }
 
-        private static TimeSpan _audioLatency = TimeSpan.FromMilliseconds(100);
+        private static Time _audioLatency = Time.FromMilliseconds(100);
 
         /// <summary>How far ahead of the speakers playback renders audio, which is also how long an edit takes to be heard.</summary>
         /// <remarks>Read when a session starts.</remarks>
         /// <exception cref="ArgumentOutOfRangeException">Set to zero or less.</exception>
-        public static TimeSpan AudioLatency
+        public static Time AudioLatency
         {
             get => _audioLatency;
-            set => _audioLatency = value > TimeSpan.Zero
+            set => _audioLatency = value > Time.Zero
                 ? value
                 : throw new ArgumentOutOfRangeException(nameof(value), "AudioLatency must be positive.");
         }

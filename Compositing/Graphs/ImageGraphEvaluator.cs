@@ -29,7 +29,7 @@ namespace EditSharp.Compositing.Graphs
         public static SKImage Evaluate(
             Graph graph,
             IReadOnlyDictionary<Guid, SKImage> resolvedInputs,
-            TimeSpan clipRelativeTime,
+            Time clipRelativeTime,
             SkClipChainContext context,
             SurfacePool pool)
         {
@@ -367,7 +367,7 @@ namespace EditSharp.Compositing.Graphs
         }
 
         private static SKImage ApplyDropShadow(
-            DropShadowNode shadow, SKImage input, TimeSpan time, SkClipChainContext context, SurfacePool pool)
+            DropShadowNode shadow, SKImage input, Time time, SkClipChainContext context, SurfacePool pool)
         {
             float sigma = (float)Math.Clamp(shadow.Blur.Evaluate(time) * context.CanvasWidth, 0.1, 1024.0);
 
@@ -466,7 +466,7 @@ namespace EditSharp.Compositing.Graphs
 
         // ---- mask-producing nodes ----
 
-        private static SKImage RenderShapeMask(ShapeMaskNode shape, TimeSpan time, SkClipChainContext context, SurfacePool pool)
+        private static SKImage RenderShapeMask(ShapeMaskNode shape, Time time, SkClipChainContext context, SurfacePool pool)
         {
             int width = context.CanvasWidth;
             int height = context.CanvasHeight;

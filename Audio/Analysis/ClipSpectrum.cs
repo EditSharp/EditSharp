@@ -15,7 +15,7 @@ namespace EditSharp.Audio.Analysis
     /// <param name="FrameSeconds">How long each frame is.</param>
     /// <param name="Bands">Band energies, frame-major: frame f's <see cref="AudioAnalysis.BandCount"/> bands start at f * BandCount.</param>
     /// <param name="Peak">Each frame's peak, 0 to 1 for unclipped audio.</param>
-    public sealed record SpectralEnvelope(TimeSpan ContentStart, double FrameSeconds, float[] Bands, float[] Peak)
+    public sealed record SpectralEnvelope(Time ContentStart, double FrameSeconds, float[] Bands, float[] Peak)
     {
         /// <summary>How many frames there are.</summary>
         public int Count => Peak.Length;
@@ -77,7 +77,7 @@ namespace EditSharp.Audio.Analysis
         /// <returns>The envelope, or null when a media the clip reads has no analysis in memory (see <see cref="AudioAnalysisCache.GetAsync"/>).</returns>
         /// <exception cref="ArgumentNullException"><paramref name="clip"/> is null.</exception>
         /// <exception cref="ArgumentOutOfRangeException"><paramref name="frameCount"/> is negative.</exception>
-        public static SpectralEnvelope? Evaluate(AudioClip clip, TimeSpan contentStart, int frameCount)
+        public static SpectralEnvelope? Evaluate(AudioClip clip, Time contentStart, int frameCount)
         {
             ArgumentNullException.ThrowIfNull(clip);
             if (frameCount < 0) throw new ArgumentOutOfRangeException(nameof(frameCount), "frameCount can't be negative.");
@@ -99,7 +99,7 @@ namespace EditSharp.Audio.Analysis
 
             for (int f = 0; f < frameCount; f++)
             {
-                var context = new SpectralContext(contentStart + TimeSpan.FromSeconds(f * AudioAnalysis.FrameSeconds), AudioAnalysis.FrameSeconds);
+                var context = new SpectralContext(contentStart + AudioAnalysis.FrameTime(f), AudioAnalysis.FrameSeconds);
 
                 for (int n = 0; n < order.Count; n++)
                 {

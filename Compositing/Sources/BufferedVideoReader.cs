@@ -26,10 +26,10 @@ namespace EditSharp.Compositing.Sources
     /// </summary>
     internal sealed class BufferedVideoReader : IDisposable
     {
-        private sealed class Entry(int frame, TimeSpan time)
+        private sealed class Entry(int frame, Time time)
         {
             public int Frame { get; } = frame;
-            public TimeSpan Time { get; } = time;
+            public Time Time { get; } = time;
             public VideoFrame Content { get; set; }
             public bool HasContent { get; set; }
             public SourceUnavailableException? Error { get; set; }
@@ -42,7 +42,7 @@ namespace EditSharp.Compositing.Sources
         }
 
         private readonly IVideoFrameReader _inner;
-        private readonly Func<int, TimeSpan> _timeAt;
+        private readonly Func<int, Time> _timeAt;
         private readonly Func<int, bool> _inRange;
         private readonly int _direction;
         private readonly int _capacity;
@@ -59,7 +59,7 @@ namespace EditSharp.Compositing.Sources
 
         public BufferedVideoReader(
             IVideoFrameReader inner, int firstFrame, int direction, int capacity,
-            Func<int, TimeSpan> contentTimeAt, Func<int, bool> inRange)
+            Func<int, Time> contentTimeAt, Func<int, bool> inRange)
         {
             _inner = inner;
             _next = firstFrame;
@@ -72,10 +72,10 @@ namespace EditSharp.Compositing.Sources
             _worker.Start();
         }
 
-        /// <summary>Waits up to `timeout` (infinite: Timeout.InfiniteTimeSpan) for `frame` to be ready.</summary>
-        public bool WaitReady(int frame, TimeSpan time, TimeSpan timeout)
+        /// <summary>Waits up to `timeout` (infinite: Time.MaxValue) for `frame` to be ready.</summary>
+        public bool WaitReady(int frame, Time time, Time timeout)
         {
-            long deadline = timeout == Timeout.InfiniteTimeSpan ? long.MaxValue : Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+            long deadline = timeout == Time.MaxValue ? long.MaxValue : Environment.TickCount64 + (long)Math.Ceiling(timeout.Milliseconds);
 
             lock (_lock)
             {
@@ -102,13 +102,13 @@ namespace EditSharp.Compositing.Sources
         /// if necessary. Reader-held (non-transient): valid until the next Take.
         /// Throws the SourceUnavailableException the reader gave for it.
         /// </summary>
-        public VideoFrame Take(int frame, TimeSpan time)
+        public VideoFrame Take(int frame, Time time)
         {
             lock (_lock)
             {
                 if (!Matches(_held, frame, time))
                 {
-                    WaitReady(frame, time, Timeout.InfiniteTimeSpan);
+                    WaitReady(frame, time, Time.MaxValue);
                     ObjectDisposedException.ThrowIf(_disposed, this);
 
                     _held?.Release();
@@ -123,11 +123,11 @@ namespace EditSharp.Compositing.Sources
             }
         }
 
-        private static bool Matches(Entry? entry, int frame, TimeSpan time) =>
+        private static bool Matches(Entry? entry, int frame, Time time) =>
             entry is not null && entry.Frame == frame && entry.Time == time;
 
         //called under _lock: drop what's behind `frame`, restart if `frame` isn't coming next
-        private void Align(int frame, TimeSpan time)
+        private void Align(int frame, Time time)
         {
             while (_queue.First is { } head && (frame - head.Value.Frame) * _direction > 0)
             {

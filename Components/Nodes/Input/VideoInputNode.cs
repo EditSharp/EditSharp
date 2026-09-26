@@ -38,7 +38,7 @@ namespace EditSharp.Components.Nodes.Input
         /// <returns>The frame; the caller disposes it.</returns>
         /// <exception cref="SourceUnavailableException">The frame can't be read; with <see cref="SourceMode.ProxiesOnly"/>, a frame with no proxy is <see cref="SourceUnavailableReason.ProxyPending"/> or <see cref="SourceUnavailableReason.ProxyMissing"/>.</exception>
         public virtual Task<SKImage> GetFrameAtAsync(
-            TimeSpan contentTime, SourceMode mode = SourceMode.SourceOnly, int maxWidth = 0, int maxHeight = 0,
+            Time contentTime, SourceMode mode = SourceMode.SourceOnly, int maxWidth = 0, int maxHeight = 0,
             CancellationToken ct = default) => VideoFrames.ReadOnceAsync(PrepareAsync, contentTime, mode, maxWidth, maxHeight, ct);
     }
 }

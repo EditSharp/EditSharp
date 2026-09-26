@@ -33,7 +33,7 @@ namespace EditSharp.Components.Nodes.Input
         /// <summary>The timeline's duration.</summary>
         /// <param name="ct">Unused.</param>
         /// <returns>The duration; null when no timeline is chosen.</returns>
-        public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult(Timeline?.Duration);
+        public override Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult(Timeline?.Duration);
 
         internal override Task<IPreparedVideoSource> PrepareAsync(VideoPrepareContext context, CancellationToken ct = default) =>
             Timeline is null
@@ -60,14 +60,14 @@ namespace EditSharp.Components.Nodes.Input
         {
             private ClipContentSource? _content;
 
-            public VideoFrame GetFrame(TimeSpan contentTime)
+            public VideoFrame GetFrame(Time contentTime)
             {
                 Timeline timeline = node.Timeline
                     ?? throw new SourceUnavailableException(SourceUnavailableReason.NoTimeline, "No timeline is selected.");
 
-                TimeSpan time = node.ToMaterialTime(contentTime, timeline.Duration);
+                Time time = node.ToMaterialTime(contentTime, timeline.Duration);
                 SKSizeI canvas = GeneratedFrames.Canvas(options);
-                int fps = compositor.Options.Fps;
+                Rational fps = compositor.Options.Fps;
 
                 _content ??= new ClipContentSource(compositor.Options with
                 {
@@ -77,7 +77,7 @@ namespace EditSharp.Components.Nodes.Input
                     CanvasHeight = canvas.Height,
                 });
 
-                int frame = (int)System.Math.Round(time.TotalSeconds * fps);
+                int frame = (int)time.ToFrame(fps, Rounding.Nearest);
                 FrameState state = FrameStateResolver.Resolve(timeline, frame, fps);
                 return new VideoFrame(FrameCompositor.ComposeFrameImage(state, _content, canvas.Width, canvas.Height, fps, compositor.Pool), Transient: true);
             }

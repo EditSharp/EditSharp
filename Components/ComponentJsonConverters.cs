@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Numerics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -37,7 +36,7 @@ namespace EditSharp.Components
                 foreach (Keyframe<T> keyframe in track.Keyframes)
                 {
                     writer.WriteStartObject();
-                    writer.WriteString("start", keyframe.Start.ToString("c", CultureInfo.InvariantCulture));
+                    writer.WriteNumber("start", keyframe.Start.Ticks);
                     writer.WritePropertyName("value");
                     JsonSerializer.Serialize(writer, keyframe.Value, options);
                     writer.WriteString("in", keyframe.InInterpolation.ToString());
@@ -59,7 +58,7 @@ namespace EditSharp.Components
             if (handle is null) return;
 
             writer.WriteStartObject(name);
-            writer.WriteString("time", handle.TimeOffset.ToString("c", CultureInfo.InvariantCulture));
+            writer.WriteNumber("time", handle.TimeOffset.Ticks);
             writer.WritePropertyName("value");
             JsonSerializer.Serialize(writer, handle.ValueOffset, options);
             writer.WriteEndObject();
@@ -78,7 +77,7 @@ namespace EditSharp.Components
 
             foreach (JsonElement json in keyframes.EnumerateArray())
             {
-                TimeSpan start = TimeSpan.ParseExact(json.GetProperty("start").GetString()!, "c", CultureInfo.InvariantCulture);
+                Time start = new(json.GetProperty("start").GetInt64());
                 added.Add((track.AddKeyframe(start, json.GetProperty("value").Deserialize<T>(options)!), json));
             }
 
@@ -99,7 +98,7 @@ namespace EditSharp.Components
         private static KeyframeHandle<T>? ReadHandle(JsonElement json, string name, JsonSerializerOptions options) =>
             json.TryGetProperty(name, out JsonElement handle)
                 ? new KeyframeHandle<T>(
-                    TimeSpan.ParseExact(handle.GetProperty("time").GetString()!, "c", CultureInfo.InvariantCulture),
+                    new Time(handle.GetProperty("time").GetInt64()),
                     handle.GetProperty("value").Deserialize<T>(options)!)
                 : null;
     }

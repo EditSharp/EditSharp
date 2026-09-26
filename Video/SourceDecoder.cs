@@ -23,7 +23,7 @@ namespace EditSharp.Video
     internal sealed class SourceDecoder : IDisposable
     {
         //how long Dispose waits for a killed process to exit; running out is logged, not thrown
-        private static readonly TimeSpan DisposeWaitForExitTimeout = TimeSpan.FromSeconds(10);
+        private static readonly Time DisposeWaitForExitTimeout = Time.FromSeconds(10);
 
         private readonly Process _process;
         private readonly Stream _stdout;
@@ -81,12 +81,12 @@ namespace EditSharp.Video
             }
         }
 
-        //starts decoding from `sourceStartSeconds`, conformed to `fps`, at `width` x `height` as rgba8888.
+        //starts decoding from `sourceStart`, conformed to `fps`, at `width` x `height` as rgba8888.
         //`plan` picks hardware decode and GPU or CPU scaling; `fastOpen` skips most of ffmpeg's stream
         //probing and is only for files EditSharp built itself
         public static SourceDecoder Start(
-            string sourcePath, double sourceStartSeconds, double fps, int width, int height,
-            DecodeHwAccelPlan? plan = null, bool fastOpen = false, double speed = 1d)
+            string sourcePath, Time sourceStart, Rational fps, int width, int height,
+            DecodeHwAccelPlan? plan = null, bool fastOpen = false, Rational? speed = null)
         {
             plan ??= DecodeHwAccelPlan.Software;
             string filter = plan.BuildFilterGraph(fps, width, height, speed);
@@ -109,10 +109,10 @@ namespace EditSharp.Video
                 args.Add("0");
             }
 
-            if (sourceStartSeconds > 0)
+            if (sourceStart > Time.Zero)
             {
                 args.Add("-ss");
-                args.Add(FfmpegArgs.Num(sourceStartSeconds));
+                args.Add(FfmpegArgs.Sec(sourceStart));
             }
 
             args.AddRange(new[]
@@ -150,9 +150,9 @@ namespace EditSharp.Video
                 process, process.StandardOutput.BaseStream, width, height, sourcePath, args);
         }
 
-        //one frame at `seekSeconds` from its own ffmpeg process, seeking before -i; cancelling kills the process
+        //one frame at `seek` from its own ffmpeg process, seeking before -i; cancelling kills the process
         public static async Task<SKImage> DecodeSingleFrameAsync(
-            string sourcePath, double seekSeconds, int width, int height,
+            string sourcePath, Time seek, int width, int height,
             DecodeHwAccelPlan? plan = null, CancellationToken ct = default)
         {
             plan ??= DecodeHwAccelPlan.Software;
@@ -170,10 +170,10 @@ namespace EditSharp.Video
 
             //no fast-open probing limits: the source may not be a file EditSharp wrote
 
-            if (seekSeconds > 0)
+            if (seek > Time.Zero)
             {
                 args.Add("-ss");
-                args.Add(FfmpegArgs.Num(seekSeconds));
+                args.Add(FfmpegArgs.Sec(seek));
             }
 
             args.AddRange(new[]
@@ -221,7 +221,7 @@ namespace EditSharp.Video
             if (totalRead != frameByteSize)
                 throw new InvalidOperationException(
                     $"SourceDecoder.DecodeSingleFrameAsync produced no frame for '{sourcePath}' at " +
-                    $"{seekSeconds}s (read {totalRead}/{frameByteSize} bytes, ffmpeg exit " +
+                    $"{seek} (read {totalRead}/{frameByteSize} bytes, ffmpeg exit " +
                     $"{process.ExitCode}). ffmpeg stderr:{Environment.NewLine}{stderr}");
 
             var info = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
@@ -243,7 +243,7 @@ namespace EditSharp.Video
 
         //the next frame, in order: call once per output frame. Past the source's end the last frame repeats
         //total time blocked on the pipe, logged with each read
-        private TimeSpan _cumulativeReadTime = TimeSpan.Zero;
+        private Time _cumulativeReadTime = Time.Zero;
 
         public SKImage NextFrame()
         {
@@ -253,11 +253,11 @@ namespace EditSharp.Video
                 byte[] buffer = new byte[_frameByteSize];
                 int totalRead = ReadFully(_stdout, buffer);
                 sw.Stop();
-                _cumulativeReadTime += sw.Elapsed;
+                _cumulativeReadTime += Time.FromTimeSpan(sw.Elapsed);
 
                 EditSharpConfig.Logger.LogVerbose(
                     $"SourceDecoder: pipe read took {sw.ElapsedMilliseconds}ms this frame " +
-                    $"({_cumulativeReadTime.TotalMilliseconds:F0}ms cumulative for this decoder).");
+                    $"({_cumulativeReadTime.Milliseconds:F0}ms cumulative for this decoder).");
 
                 if (totalRead == _frameByteSize)
                 {
@@ -347,11 +347,11 @@ namespace EditSharp.Video
                 {
                     _process.Kill(entireProcessTree: true);
 
-                    if (!_process.WaitForExit(DisposeWaitForExitTimeout))
+                    if (!_process.WaitForExit(DisposeWaitForExitTimeout.ToTimeSpan()))
                     {
                         EditSharpConfig.Logger.Log(
                             $"SourceDecoder.Dispose('{_sourcePath}'): killed ffmpeg process did not exit " +
-                            $"within {DisposeWaitForExitTimeout.TotalSeconds:F0}s; proceeding anyway. If this " +
+                            $"within {DisposeWaitForExitTimeout.Seconds:F0}s; proceeding anyway. If this " +
                             "recurs, a caller doing GPU work immediately after disposing a decoder may still " +
                             "race this process's own teardown.");
                     }

@@ -31,7 +31,7 @@ namespace EditSharp.Components.Nodes.Input
         /// <summary>The timeline's duration.</summary>
         /// <param name="ct">Unused.</param>
         /// <returns>The duration; null when no timeline is chosen.</returns>
-        public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult(Timeline?.Duration);
+        public override Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult(Timeline?.Duration);
 
         internal override Task<IPreparedAudioSource> PrepareAsync(CancellationToken ct = default) => Timeline is { } timeline
             ? Task.FromResult<IPreparedAudioSource>(new Prepared(this, timeline))
@@ -73,9 +73,9 @@ namespace EditSharp.Components.Nodes.Input
 
                 int channels = _session.Format.Channels;
                 int frames = destination.Length / channels;
-                (TimeSpan from, TimeSpan? length) = _node.ResolveWindow(_timeline.Duration);
+                (Time from, Time? length) = _node.ResolveWindow(_timeline.Duration);
                 long start = _session.FrameOf(from);
-                long window = _session.FrameOf(length ?? TimeSpan.Zero);
+                long window = _session.FrameOf(length ?? Time.Zero);
 
                 int done = 0;
                 while (done < frames)

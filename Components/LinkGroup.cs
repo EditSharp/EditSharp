@@ -26,12 +26,12 @@ namespace EditSharp.Components
 
         /// <inheritdoc/>
         /// <exception cref="NotSupportedException"><paramref name="targetChannel"/> isn't null; use <see cref="MoveChannel"/>.</exception>
-        public void Move(TimeSpan newStart, Channel? targetChannel = null) => MoveCore(newStart, targetChannel, ripple: false);
+        public void Move(Time newStart, Channel? targetChannel = null) => MoveCore(newStart, targetChannel, ripple: false);
         /// <inheritdoc/>
         /// <exception cref="NotSupportedException"><paramref name="targetChannel"/> isn't null; use <see cref="RippleMoveChannel"/>.</exception>
-        public void RippleMove(TimeSpan newStart, Channel? targetChannel = null) => MoveCore(newStart, targetChannel, ripple: true);
+        public void RippleMove(Time newStart, Channel? targetChannel = null) => MoveCore(newStart, targetChannel, ripple: true);
 
-        private void MoveCore(TimeSpan newStart, Channel? targetChannel, bool ripple)
+        private void MoveCore(Time newStart, Channel? targetChannel, bool ripple)
         {
             if (targetChannel != null)
                 throw new NotSupportedException(
@@ -41,12 +41,12 @@ namespace EditSharp.Components
             List<Clip> members = [.. Members];
             if (members.Count == 0) return;
 
-            TimeSpan delta = newStart - members.Min(m => m.Start);
+            Time delta = newStart - members.Min(m => m.Start);
 
             //every target first, so moving one member can't change another's
-            List<(Clip Clip, TimeSpan NewStart)> targets = [.. members.Select(m => (m, m.Start + delta))];
+            List<(Clip Clip, Time NewStart)> targets = [.. members.Select(m => (m, m.Start + delta))];
 
-            foreach ((Clip clip, TimeSpan target) in targets)
+            foreach ((Clip clip, Time target) in targets)
             {
                 if (ripple) clip.RippleMove(target);
                 else clip.Move(target);
@@ -89,25 +89,25 @@ namespace EditSharp.Components
         }
 
         /// <inheritdoc/>
-        public void TrimStart(TimeSpan amount) => TrimCore(amount, atStart: true);
+        public void TrimStart(Time amount) => TrimCore(amount, atStart: true);
         /// <inheritdoc/>
-        public void TrimEnd(TimeSpan amount) => TrimCore(amount, atStart: false);
+        public void TrimEnd(Time amount) => TrimCore(amount, atStart: false);
 
-        private void TrimCore(TimeSpan amount, bool atStart)
+        private void TrimCore(Time amount, bool atStart)
         {
-            if (amount <= TimeSpan.Zero) return;
+            if (amount <= Time.Zero) return;
 
             List<Clip> members = [.. Members];
             if (members.Count == 0) return;
 
-            TimeSpan achievable = members
+            Time achievable = members
                 .Select(m => m.Duration - Clip.MinimumDuration)
-                .Where(max => max >= TimeSpan.Zero)
-                .DefaultIfEmpty(TimeSpan.Zero)
+                .Where(max => max >= Time.Zero)
+                .DefaultIfEmpty(Time.Zero)
                 .Min();
 
-            TimeSpan clamped = amount < achievable ? amount : achievable;
-            if (clamped <= TimeSpan.Zero) return;
+            Time clamped = amount < achievable ? amount : achievable;
+            if (clamped <= Time.Zero) return;
 
             foreach (Clip m in members)
             {
@@ -117,27 +117,27 @@ namespace EditSharp.Components
         }
 
         /// <inheritdoc/>
-        public void ExtendStart(TimeSpan amount) => ExtendCore(amount, atStart: true, ripple: false);
+        public void ExtendStart(Time amount) => ExtendCore(amount, atStart: true, ripple: false);
         /// <inheritdoc/>
-        public void ExtendEnd(TimeSpan amount) => ExtendCore(amount, atStart: false, ripple: false);
+        public void ExtendEnd(Time amount) => ExtendCore(amount, atStart: false, ripple: false);
         /// <inheritdoc/>
-        public void RippleExtendStart(TimeSpan amount) => ExtendCore(amount, atStart: true, ripple: true);
+        public void RippleExtendStart(Time amount) => ExtendCore(amount, atStart: true, ripple: true);
         /// <inheritdoc/>
-        public void RippleExtendEnd(TimeSpan amount) => ExtendCore(amount, atStart: false, ripple: true);
+        public void RippleExtendEnd(Time amount) => ExtendCore(amount, atStart: false, ripple: true);
 
-        private void ExtendCore(TimeSpan amount, bool atStart, bool ripple)
+        private void ExtendCore(Time amount, bool atStart, bool ripple)
         {
-            if (amount <= TimeSpan.Zero) return;
+            if (amount <= Time.Zero) return;
 
             List<Clip> members = [.. Members];
             if (members.Count == 0) return;
 
             //linked clips move together, so the most constrained member sets the
             //limit for all of them (timeline time, like `amount`)
-            TimeSpan ceiling = members.Select(m => atStart ? m.HeadExtendLimit : m.TailExtendLimit).Min();
-            TimeSpan clamped = ceiling == TimeSpan.MaxValue || amount <= ceiling ? amount : ceiling;
+            Time ceiling = members.Select(m => atStart ? m.HeadExtendLimit : m.TailExtendLimit).Min();
+            Time clamped = ceiling == Time.MaxValue || amount <= ceiling ? amount : ceiling;
 
-            if (clamped <= TimeSpan.Zero) return;
+            if (clamped <= Time.Zero) return;
 
             foreach (Clip m in members)
             {
@@ -155,7 +155,7 @@ namespace EditSharp.Components
         }
 
         /// <inheritdoc/>
-        public void Split(TimeSpan at)
+        public void Split(Time at)
         {
             foreach (Clip clip in Members)
             {
@@ -215,7 +215,7 @@ namespace EditSharp.Components
         /// <param name="duration">How long they last.</param>
         /// <returns>The two clips.</returns>
         public static (VideoClip Video, AudioClip Audio) CreateTimelineAudioVideoPair(
-            Timeline timeline, TimeSpan start, TimeSpan duration)
+            Timeline timeline, Time start, Time duration)
         {
             using var _ = Transaction.Suppress();
 

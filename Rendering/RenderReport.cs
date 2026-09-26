@@ -28,8 +28,8 @@ public sealed record SourceProblem(
     string Source,
     SourceUnavailableReason Reason,
     string Message,
-    TimeSpan FirstAt,
-    TimeSpan LastAt,
+    Time FirstAt,
+    Time LastAt,
     int Frames);
 
 //collects SourceProblems during a render, one per node and reason; thread-safe
@@ -39,7 +39,7 @@ internal sealed class RenderReportBuilder
     private readonly object _lock = new();
 
     //records a failure; true the first time this node fails for this reason (worth a log line)
-    public bool Record(Guid nodeId, string source, SourceUnavailableReason reason, string message, TimeSpan at)
+    public bool Record(Guid nodeId, string source, SourceUnavailableReason reason, string message, Time at)
     {
         lock (_lock)
         {

@@ -39,9 +39,9 @@ namespace EditSharp.Components.Media
     /// <param name="Compositor">What a compositor-bound reader may use; set only while compositing.</param>
     internal sealed record VideoReaderOptions(
         VideoReadMode Mode,
-        TimeSpan StartAt,
-        int Fps = 30,
-        double Speed = 1d,
+        Time StartAt,
+        Rational Fps,
+        Rational Speed,
         int MaxWidth = 0,
         int MaxHeight = 0,
         bool CallerOwnsFrames = false,
@@ -78,6 +78,6 @@ namespace EditSharp.Components.Media
         /// <param name="contentTime">Time since the in-point, at 1x.</param>
         /// <returns>The frame; see <see cref="VideoFrame.Transient"/> for who disposes it.</returns>
         /// <exception cref="SourceUnavailableException">The frame can't be read, including past the end (<see cref="SourceUnavailableReason.EndOfSource"/>).</exception>
-        VideoFrame GetFrame(TimeSpan contentTime);
+        VideoFrame GetFrame(Time contentTime);
     }
 }

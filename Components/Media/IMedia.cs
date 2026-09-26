@@ -136,14 +136,14 @@ namespace EditSharp.Components.Media
         /// <param name="ct">Cancels finding the length.</param>
         /// <returns>The length, or null when the material has no end of its own (a still image).</returns>
         /// <exception cref="SourceUnavailableException">The material can't be read; <see cref="SourceUnavailableReason.NoMedia"/> when no file is chosen.</exception>
-        public abstract Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default);
+        public abstract Task<Time?> GetNaturalLengthAsync(CancellationToken ct = default);
 
         /// <summary><see cref="GetNaturalLengthAsync"/>'s answer, if it's known right away.</summary>
         /// <param name="length">The length when known; otherwise null.</param>
         /// <returns>False while the length still has to be found, such as for a file not probed yet.</returns>
-        public virtual bool TryGetNaturalLength(out TimeSpan? length)
+        public virtual bool TryGetNaturalLength(out Time? length)
         {
-            Task<TimeSpan?> task = GetNaturalLengthAsync();
+            Task<Time?> task = GetNaturalLengthAsync();
             length = task.IsCompletedSuccessfully ? task.Result : null;
             return task.IsCompletedSuccessfully;
         }

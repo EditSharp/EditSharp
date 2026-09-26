@@ -19,7 +19,7 @@ namespace EditSharp.Playback
         public int ChannelCount { get; }
 
         /// <summary>The timeline time of the block's first frame.</summary>
-        public TimeSpan Position { get; }
+        public Time Position { get; }
 
         /// <summary>Wraps one block of samples.</summary>
         /// <param name="buffer">The samples.</param>
@@ -27,7 +27,7 @@ namespace EditSharp.Playback
         /// <param name="sampleRate">Frames per second.</param>
         /// <param name="channelCount">Samples per frame.</param>
         /// <param name="position">The timeline time of the first frame.</param>
-        public AudioSampleEventArgs(byte[] buffer, int length, int sampleRate, int channelCount, TimeSpan position)
+        public AudioSampleEventArgs(byte[] buffer, int length, int sampleRate, int channelCount, Time position)
         {
             Buffer = buffer;
             Length = length;

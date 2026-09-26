@@ -21,7 +21,7 @@ namespace EditSharp.Components
         /// <summary>How the leaving path handle is set.</summary>
         public TangentMode SpatialOutTangentMode { get => _spatialOutTangentMode; internal set => Transaction.Set(this, ref _spatialOutTangentMode, value, static (o, v) => o._spatialOutTangentMode = v); }
 
-        internal SpatialKeyframe(TimeSpan start, Vector2 value) : base(start, value) { }
+        internal SpatialKeyframe(Time start, Vector2 value) : base(start, value) { }
     }
 
     /// <summary>A position track whose keyframes shape the path between them as well as the timing.</summary>
@@ -34,14 +34,14 @@ namespace EditSharp.Components
     public sealed class PositionTrack : KeyframeTrack<Vector2>
     {
         /// <inheritdoc/>
-        protected override Keyframe<Vector2> CreateKeyframe(TimeSpan start, Vector2 value) =>
+        protected override Keyframe<Vector2> CreateKeyframe(Time start, Vector2 value) =>
             new SpatialKeyframe(start, value);
 
         /// <summary>Adds a keyframe, or updates the value of the one already at that time.</summary>
         /// <param name="start">When, in content time.</param>
         /// <param name="value">The position.</param>
         /// <returns>The keyframe.</returns>
-        public SpatialKeyframe AddSpatialKeyframe(TimeSpan start, Vector2 value) =>
+        public SpatialKeyframe AddSpatialKeyframe(Time start, Vector2 value) =>
             (SpatialKeyframe)AddKeyframe(start, value);
 
         /// <inheritdoc/>
@@ -84,12 +84,12 @@ namespace EditSharp.Components
         }
 
         /// <inheritdoc/>
-        protected override Vector2 InterpolateSegment(Keyframe<Vector2> from, Keyframe<Vector2> to, TimeSpan time)
+        protected override Vector2 InterpolateSegment(Keyframe<Vector2> from, Keyframe<Vector2> to, Time time)
         {
             if (from.OutInterpolation == InterpolationType.Hold) return from.Value;
 
             //how far along the segment, from the time handles
-            float u = SolveU(time, from, to);
+            float u = (float)SolveU(time, from, to);
 
             //that far along the path the spatial handles shape
             var fromSpatial = (SpatialKeyframe)from;
@@ -103,12 +103,12 @@ namespace EditSharp.Components
                 ? toSpatial.Value + toSpatial.SpatialInHandle.Value
                 : toSpatial.Value;
 
-            float m = 1 - u;
+            //repeated lerps (de Casteljau), so a path that doesn't move stays exactly where it is
+            Vector2 q0 = Vector2.Lerp(fromSpatial.Value, p1, u);
+            Vector2 q1 = Vector2.Lerp(p1, p2, u);
+            Vector2 q2 = Vector2.Lerp(p2, toSpatial.Value, u);
 
-            return (m * m * m * fromSpatial.Value)
-                 + (3 * m * m * u * p1)
-                 + (3 * m * u * u * p2)
-                 + (u * u * u * toSpatial.Value);
+            return Vector2.Lerp(Vector2.Lerp(q0, q1, u), Vector2.Lerp(q1, q2, u), u);
         }
     }
 }

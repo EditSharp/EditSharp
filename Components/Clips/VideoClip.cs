@@ -27,7 +27,7 @@ namespace EditSharp.Components.Clips
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
-        public static VideoClip CreateFromMedia(VideoMedia media, TimeSpan start, TimeSpan duration) =>
+        public static VideoClip CreateFromMedia(VideoMedia media, Time start, Time duration) =>
             CreateFromInput(Transaction.Suppressed(() => new VideoMediaNode { Media = media }), start, duration);
 
         /// <summary>A clip showing an input node of any kind, such as a generator you've set up.</summary>
@@ -36,7 +36,7 @@ namespace EditSharp.Components.Clips
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
-        public static VideoClip CreateFromInput(VideoInputNode input, TimeSpan start, TimeSpan duration) =>
+        public static VideoClip CreateFromInput(VideoInputNode input, Time start, Time duration) =>
             Transaction.Suppressed(() => new VideoClip(Graph.CreateVideoGraph(input)) { Start = start, Duration = duration });
 
         /// <summary>A clip showing text; see <see cref="TextNode"/>.</summary>
@@ -51,7 +51,7 @@ namespace EditSharp.Components.Clips
         /// <param name="size">The font's em size, as a fraction of the frame's width.</param>
         /// <returns>The clip.</returns>
         public static VideoClip CreateText(
-            string content, TimeSpan start, TimeSpan duration,
+            string content, Time start, Time duration,
             string font = "Comic Sans MS", int weight = 400, bool italic = false,
             HorizontalTextAlignment align = HorizontalTextAlignment.Center, float size = 0.05f) =>
             CreateFromInput(Transaction.Suppressed(() => new TextNode
@@ -70,7 +70,7 @@ namespace EditSharp.Components.Clips
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
-        public static VideoClip CreateColorGenerator(SKColor color, TimeSpan start, TimeSpan duration) =>
+        public static VideoClip CreateColorGenerator(SKColor color, Time start, Time duration) =>
             CreateFromInput(Transaction.Suppressed(() => new ColorNode { Color = new(color) }), start, duration);
 
         /// <summary>A clip filling the frame with changing noise; see <see cref="NoiseNode"/>.</summary>
@@ -81,7 +81,7 @@ namespace EditSharp.Components.Clips
         /// <param name="detail">How fine the noise is, from 0 to 1.</param>
         /// <param name="seetheRate">How fast it changes, from 0 (still) to 1.</param>
         /// <returns>The clip.</returns>
-        public static VideoClip CreateNoise(TimeSpan start, TimeSpan duration, int? seed = null, float detail = 0.03f, float seetheRate = 0.03f) =>
+        public static VideoClip CreateNoise(Time start, Time duration, int? seed = null, float detail = 0.03f, float seetheRate = 0.03f) =>
             CreateFromInput(Transaction.Suppressed(() => new NoiseNode
             {
                 Seed = seed ?? Random.Shared.Next(),
@@ -95,7 +95,7 @@ namespace EditSharp.Components.Clips
         /// <param name="start">Where the clip starts on the timeline.</param>
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
-        public static VideoClip CreateTimelineEmbed(Timeline timeline, TimeSpan start, TimeSpan duration) =>
+        public static VideoClip CreateTimelineEmbed(Timeline timeline, Time start, Time duration) =>
             CreateFromInput(Transaction.Suppressed(() => new TimelineVideoNode { Timeline = timeline }), start, duration);
 
         /// <summary>A clip with a graph you've built, such as one with several inputs merged together.</summary>
@@ -105,7 +105,7 @@ namespace EditSharp.Components.Clips
         /// <param name="duration">How long it lasts.</param>
         /// <returns>The clip.</returns>
         /// <exception cref="ArgumentException"><paramref name="graph"/> isn't a video graph.</exception>
-        public static VideoClip CreateCustom(Graph graph, TimeSpan start, TimeSpan duration)
+        public static VideoClip CreateCustom(Graph graph, Time start, Time duration)
         {
             if (graph.Domain != NodeDomain.Image)
                 throw new ArgumentException("VideoClip requires an Image-domain Graph.", nameof(graph));

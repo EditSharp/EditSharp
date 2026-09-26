@@ -33,7 +33,7 @@ namespace EditSharp.Caching.Proxy
 
     /// <summary>The .esrp proxy file: a fixed header, an embedded JSON meta blob, an optional shared palette, a preallocated frame index, then frame data.</summary>
     /// <remarks>
-    /// The file is readable while it's being written (since version 8). The index is preallocated for Capacity frames (the probed
+    /// The file is readable while it's being written (since version 8); the frame rate is an exact fraction (since version 9). The index is preallocated for Capacity frames (the probed
     /// duration's worth) and zero-filled; the writer appends a frame's data,
     /// flushes, and only then fills that frame's index entry, so a non-zero
     /// entry always points at complete data. Frames are written strictly in
@@ -44,7 +44,7 @@ namespace EditSharp.Caching.Proxy
     /// <code>
     ///   [0..52)   header, little-endian:
     ///               magic u32, version i32, width i32, height i32,
-    ///               pixelFormat i32, compression i32, frameRate f64,
+    ///               pixelFormat i32, compression i32, frameRate i32 numerator + i32 denominator,
     ///               capacity i32, metaLength i32, paletteLength i32,
     ///               flags i32 (bit 0 = complete), frameCount i32
     ///   meta      UTF8 JSON (EsrpMeta)
@@ -56,7 +56,7 @@ namespace EditSharp.Caching.Proxy
     internal static class EsrpFormat
     {
         public const uint Magic = 0x50525345; // "ESRP"
-        public const int CurrentVersion = 8;
+        public const int CurrentVersion = 9;
 
         public const int Delta7PaletteEntryCount = 128;
         public const int Delta7PaletteByteSize = Delta7PaletteEntryCount * 3;
@@ -72,7 +72,7 @@ namespace EditSharp.Caching.Proxy
 
         public readonly record struct Header(
             int Width, int Height, EsrpPixelFormat PixelFormat, EsrpCompressionScheme CompressionScheme,
-            double FrameRate, int Capacity, int MetaLength, int PaletteLength, bool Complete, int FrameCount);
+            Rational FrameRate, int Capacity, int MetaLength, int PaletteLength, bool Complete, int FrameCount);
 
         public static void WriteHeader(Span<byte> destination, Header header)
         {
@@ -85,7 +85,8 @@ namespace EditSharp.Caching.Proxy
             BitConverter.TryWriteBytes(destination[12..16], header.Height);
             BitConverter.TryWriteBytes(destination[16..20], (int)header.PixelFormat);
             BitConverter.TryWriteBytes(destination[20..24], (int)header.CompressionScheme);
-            BitConverter.TryWriteBytes(destination[24..32], header.FrameRate);
+            BitConverter.TryWriteBytes(destination[24..28], checked((int)header.FrameRate.Num));
+            BitConverter.TryWriteBytes(destination[28..32], checked((int)header.FrameRate.Den));
             BitConverter.TryWriteBytes(destination[32..36], header.Capacity);
             BitConverter.TryWriteBytes(destination[36..40], header.MetaLength);
             BitConverter.TryWriteBytes(destination[40..44], header.PaletteLength);
@@ -105,12 +106,16 @@ namespace EditSharp.Caching.Proxy
             if (version != CurrentVersion)
                 throw new InvalidDataException($"'{diagnosticPath}' is .esrp version {version}; this build reads {CurrentVersion}.");
 
+            int rateDen = BitConverter.ToInt32(source[28..32]);
+            if (rateDen <= 0)
+                throw new InvalidDataException($"'{diagnosticPath}' has an invalid .esrp header.");
+
             var header = new Header(
                 Width: BitConverter.ToInt32(source[8..12]),
                 Height: BitConverter.ToInt32(source[12..16]),
                 PixelFormat: (EsrpPixelFormat)BitConverter.ToInt32(source[16..20]),
                 CompressionScheme: (EsrpCompressionScheme)BitConverter.ToInt32(source[20..24]),
-                FrameRate: BitConverter.ToDouble(source[24..32]),
+                FrameRate: new Rational(BitConverter.ToInt32(source[24..28]), rateDen),
                 Capacity: BitConverter.ToInt32(source[32..36]),
                 MetaLength: BitConverter.ToInt32(source[36..40]),
                 PaletteLength: BitConverter.ToInt32(source[40..44]),
@@ -120,7 +125,7 @@ namespace EditSharp.Caching.Proxy
             if (!Enum.IsDefined(header.PixelFormat) || !Enum.IsDefined(header.CompressionScheme))
                 throw new InvalidDataException($"'{diagnosticPath}' uses a pixel format or compression this build can't read.");
 
-            if (header.Width <= 0 || header.Height <= 0 || header.Capacity <= 0 || header.FrameRate <= 0 ||
+            if (header.Width <= 0 || header.Height <= 0 || header.Capacity <= 0 || !header.FrameRate.IsPositive ||
                 header.MetaLength < 0 || header.PaletteLength < 0 || header.FrameCount < 0 || header.FrameCount > header.Capacity)
                 throw new InvalidDataException($"'{diagnosticPath}' has an invalid .esrp header.");
 

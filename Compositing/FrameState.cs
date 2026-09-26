@@ -16,7 +16,7 @@ namespace EditSharp.Compositing
         public required Graph Graph { get; init; }
 
         //the clip's content time at this frame, which keyframed values are evaluated at
-        public double ClipSeconds { get; init; }
+        public Time ContentTime { get; init; }
     }
 
     /// <summary>

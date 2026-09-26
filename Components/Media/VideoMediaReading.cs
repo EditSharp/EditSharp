@@ -14,7 +14,7 @@ namespace EditSharp.Components.Media
         /// <summary>Prepares, opens one reader at `time`, takes the frame and closes everything.</summary>
         public static Task<SKImage> ReadOnceAsync(
             Func<VideoPrepareContext, CancellationToken, Task<IPreparedVideoSource>> prepare,
-            TimeSpan time, SourceMode mode, int maxWidth, int maxHeight, CancellationToken ct) => Task.Run(async () =>
+            Time time, SourceMode mode, int maxWidth, int maxHeight, CancellationToken ct) => Task.Run(async () =>
         {
             using IPreparedVideoSource prepared = await prepare(new VideoPrepareContext(HardwareAccelerator.None, mode), ct);
 
@@ -22,7 +22,7 @@ namespace EditSharp.Components.Media
             VideoReadMode readMode = mode == SourceMode.ProxiesOnly ? VideoReadMode.RandomAccess : VideoReadMode.Sequential;
 
             using IVideoFrameReader reader = prepared.OpenReader(new VideoReaderOptions(
-                readMode, time, MaxWidth: maxWidth, MaxHeight: maxHeight, CallerOwnsFrames: true));
+                readMode, time, Fps: 30, Speed: Rational.One, MaxWidth: maxWidth, MaxHeight: maxHeight, CallerOwnsFrames: true));
 
             VideoFrame frame = reader.GetFrame(time);
             return frame.Transient ? frame.Image : CopyOf(frame.Image);
@@ -52,7 +52,7 @@ namespace EditSharp.Components.Media
         //a still is the same picture at every time
         private sealed class Reader(SKImage image) : IVideoFrameReader
         {
-            public VideoFrame GetFrame(TimeSpan time) => new(image, Transient: false);
+            public VideoFrame GetFrame(Time time) => new(image, Transient: false);
 
             public void Dispose() { }
         }
@@ -109,7 +109,7 @@ namespace EditSharp.Components.Media
 
     /// <summary>
     /// Forward decoding of the original through one ffmpeg pipe (SourceDecoder).
-    /// Each decoded frame covers Speed/Fps of file time; the reader keeps the
+    /// Frame k after a seek starts at k × Speed/Fps of file time past it; the reader keeps the
     /// current frame and hands it back (reader-owned) for every time that still
     /// lands inside it. A jump backwards, or further ahead than is worth decoding
     /// through, reopens the pipe at the new position; the node reading through
@@ -120,29 +120,31 @@ namespace EditSharp.Components.Media
     /// </summary>
     internal sealed class SequentialVideoFileReader : IVideoFrameReader
     {
-        private static readonly TimeSpan MaxDecodeThrough = TimeSpan.FromSeconds(2);
+        private static readonly Time MaxDecodeThrough = Time.FromSeconds(2);
 
         private readonly MediaDecodeTarget _target;
         private readonly VideoReaderOptions _options;
-        private readonly TimeSpan _frameStep;
+        private readonly Rational _frameSeconds;
 
         private SourceDecoder? _decoder;
-        private TimeSpan _nextTime;
+        private Time _openedAt;
+        private long _decoded;
+        private Time _nextTime;
 
         private SKImage? _current;
-        private TimeSpan _currentTime;
+        private Time _currentTime;
 
         public SequentialVideoFileReader(MediaDecodeTarget target, VideoReaderOptions options)
         {
             _target = target;
             _options = options;
-            _frameStep = TimeSpan.FromSeconds(options.Speed / options.Fps);
+            _frameSeconds = options.Speed / options.Fps;
 
             //start ffmpeg seeking now rather than on the first frame
             Reopen(options.StartAt);
         }
 
-        public VideoFrame GetFrame(TimeSpan time)
+        public VideoFrame GetFrame(Time time)
         {
             if (_current is not null && time >= _currentTime && time < _nextTime)
                 return new VideoFrame(_current, Transient: false);
@@ -157,7 +159,8 @@ namespace EditSharp.Components.Media
                 _current?.Dispose();
                 _current = null;
                 _currentTime = _nextTime;
-                _nextTime += _frameStep;
+                _decoded++;
+                _nextTime = _openedAt + Time.FromSeconds(_frameSeconds * _decoded);
 
                 if (time >= _nextTime)
                 {
@@ -197,7 +200,7 @@ namespace EditSharp.Components.Media
             return frame;
         }
 
-        private void Reopen(TimeSpan time)
+        private void Reopen(Time time)
         {
             _decoder?.Dispose();
             _current?.Dispose();
@@ -207,7 +210,7 @@ namespace EditSharp.Components.Media
             try
             {
                 _decoder = SourceDecoder.Start(
-                    _target.Path, time.TotalSeconds, _options.Fps, _target.Width, _target.Height,
+                    _target.Path, time, _options.Fps, _target.Width, _target.Height,
                     _target.Plan, fastOpen: false, _options.Speed);
             }
             catch (Exception ex)
@@ -215,6 +218,8 @@ namespace EditSharp.Components.Media
                 throw Unavailable($"Could not start decoding '{_target.Path}'.", ex);
             }
 
+            _openedAt = time;
+            _decoded = 0;
             _nextTime = time;
         }
 
@@ -242,13 +247,13 @@ namespace EditSharp.Components.Media
     internal sealed class ProxyVideoFileReader(string path, ProxyEntry? entry, bool sequential, bool callerOwnsFrames)
         : IVideoFrameReader
     {
-        private static readonly TimeSpan LookupInterval = TimeSpan.FromMilliseconds(250);
+        private static readonly Time LookupInterval = Time.FromMilliseconds(250);
 
         private ProxyEntry? _entry = entry;
         private IProxyFrames? _frames;
         private long _lastLookup;
 
-        public VideoFrame GetFrame(TimeSpan time) => TryRead(time, out VideoFrame frame) switch
+        public VideoFrame GetFrame(Time time) => TryRead(time, out VideoFrame frame) switch
         {
             ProxyFrameAvailability.Ready => frame,
             ProxyFrameAvailability.PastEnd => throw new SourceUnavailableException(SourceUnavailableReason.EndOfSource,
@@ -257,13 +262,13 @@ namespace EditSharp.Components.Media
         };
 
         /// <summary>The proxy frame at file time `time`, or why not; for callers (the mixed reader) that fall back rather than fail.</summary>
-        public ProxyFrameAvailability TryRead(TimeSpan time, out VideoFrame frame)
+        public ProxyFrameAvailability TryRead(Time time, out VideoFrame frame)
         {
             frame = default;
 
             if (Frames() is not { } frames) return ProxyFrameAvailability.Pending;
 
-            int index = (int)Math.Floor(time.TotalSeconds * frames.FrameRate + 1e-9);
+            int index = (int)time.ToFrame(frames.FrameRate);
 
             try
             {
@@ -282,7 +287,7 @@ namespace EditSharp.Components.Media
             if (_entry is null)
             {
                 long now = Environment.TickCount64;
-                if (now - _lastLookup < LookupInterval.TotalMilliseconds) return null;
+                if (Time.FromMilliseconds(now - _lastLookup) < LookupInterval) return null;
                 _lastLookup = now;
 
                 if (!ProxyCache.TryGetEntry(path, out ProxyEntry found)) return null;
@@ -320,12 +325,12 @@ namespace EditSharp.Components.Media
     /// proxy's edge continues on the original, and moves back onto the proxy on
     /// a later jump into covered ground.
     /// </summary>
-    internal sealed class MixedVideoFileReader(ProxyVideoFileReader proxy, Func<TimeSpan, SequentialVideoFileReader> openOriginal)
+    internal sealed class MixedVideoFileReader(ProxyVideoFileReader proxy, Func<Time, SequentialVideoFileReader> openOriginal)
         : IVideoFrameReader
     {
         private SequentialVideoFileReader? _original;
 
-        public VideoFrame GetFrame(TimeSpan time)
+        public VideoFrame GetFrame(Time time)
         {
             if (proxy.TryRead(time, out VideoFrame frame) == ProxyFrameAvailability.Ready)
                 return frame;

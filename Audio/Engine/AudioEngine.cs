@@ -7,8 +7,8 @@ using EditSharp.Components.Clips;
 
 namespace EditSharp.Audio.Engine
 {
-    /// <summary>A block of master audio and the timeline position its first frame came from.</summary>
-    internal sealed record AudioBlock(float[] Samples, int Frames, TimeSpan Position);
+    /// <summary>A block of master audio, the timeline position its first frame came from, and how many timeline frames each of its frames covers.</summary>
+    internal sealed record AudioBlock(float[] Samples, int Frames, Time Position, double Pace);
 
     /// <summary>
     /// Renders master audio on its own thread, staying at most
@@ -22,20 +22,18 @@ namespace EditSharp.Audio.Engine
         private readonly Timeline _timeline;
         private readonly AudioSession _session;
         private readonly MasterAudioStream _master;
-        private readonly double _speed;
         private readonly Channel<AudioBlock> _blocks;
         private readonly CancellationTokenSource _stop = new();
         private Thread? _thread;
 
-        public AudioEngine(Timeline timeline, AudioSession session, TimeSpan start, double speed, PitchPreservation pitch)
+        public AudioEngine(Timeline timeline, AudioSession session, Time start, double speed, PitchPreservation pitch)
         {
             _timeline = timeline;
             _session = session;
-            _speed = speed;
             _master = new MasterAudioStream(timeline, session, session.FrameOf(start), speed, pitch);
 
-            double blockSeconds = session.BlockFrames / (double)session.Format.SampleRate;
-            int capacity = Math.Max(2, (int)Math.Ceiling(EditSharpConfig.AudioLatency.TotalSeconds / blockSeconds));
+            Time block = Time.FromSamples(session.BlockFrames, session.Format.SampleRate);
+            int capacity = Math.Max(2, (int)((EditSharpConfig.AudioLatency.Ticks + block.Ticks - 1) / block.Ticks));
             _blocks = Channel.CreateBounded<AudioBlock>(new BoundedChannelOptions(capacity) { SingleReader = true, SingleWriter = true });
         }
 
@@ -46,6 +44,9 @@ namespace EditSharp.Audio.Engine
             _thread = new Thread(Run) { IsBackground = true, Name = "EditSharp-Audio", Priority = ThreadPriority.AboveNormal };
             _thread.Start();
         }
+
+        /// <summary>How fast blocks rendered from now on play, without the sign; blocks already queued keep their own.</summary>
+        public void SetPace(double pace) => _master.Step = pace;
 
         /// <summary>The next block, or null once the timeline has run out.</summary>
         public async ValueTask<AudioBlock?> TakeAsync(CancellationToken ct)
@@ -64,16 +65,17 @@ namespace EditSharp.Audio.Engine
                 while (!_stop.IsCancellationRequested)
                 {
                     double position = _master.Position;
+                    double pace = _master.Step;
 
                     //frames left before the timeline runs out in this direction
-                    double remaining = _speed > 0 ? (end - position) / _speed : position / -_speed;
+                    double remaining = _master.Forward ? (end - position) / pace : position / pace;
                     int frames = (int)Math.Min(_session.BlockFrames, Math.Ceiling(remaining));
                     if (frames <= 0) break;
 
                     var samples = new float[frames * channels];
-                    _master.Read(samples);
+                    _master.Read(samples, pace);
 
-                    var block = new AudioBlock(samples, frames, _session.TimeOf((long)Math.Round(position)));
+                    var block = new AudioBlock(samples, frames, _session.TimeOf((long)Math.Round(position)), pace);
                     _blocks.Writer.WriteAsync(block, _stop.Token).AsTask().GetAwaiter().GetResult();
                 }
             }
