@@ -15,7 +15,7 @@
          once there's a second consumer, without touching the project file. -->
     <IsPackable>true</IsPackable>
     <PackageId>EditSharp</PackageId>
-    <Version>0.1.1</Version>
+    <Version>0.1.2</Version>
     <Description>C#/ffmpeg timeline video (and, eventually, image) editing pipeline.</Description>
     <Authors>CoolBeansStudio</Authors>
     <RepositoryUrl>https://github.com/EditSharp/EditSharp</RepositoryUrl>
