@@ -228,6 +228,13 @@ namespace EditSharp.Compositing.Graphs
                         break;
                     }
 
+                    //a node this build can't load passes its first image input through
+                    case MissingNode missing:
+                        if (missing.Ports.FirstOrDefault(p => p.Direction == PortDirection.Input && p.Type == PortType.Image) is { } inPort &&
+                            missing.Ports.FirstOrDefault(p => p.Direction == PortDirection.Output && p.Type == PortType.Image) is { } outPort)
+                            images[(node.Id, outPort.Name)] = RequireImage(graph, node, inPort.Name, images);
+                        break;
+
                     //Value nodes have no image; they're read on demand where a Value input is connected
                     case ValueConstantNode:
                     case MathNode:

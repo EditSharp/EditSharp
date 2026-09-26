@@ -82,6 +82,6 @@ namespace EditSharp.Components.Clips
         }
 
         /// <inheritdoc/>
-        public override AudioClip Duplicate() => Transaction.Suppressed(() => new AudioClip(Graph.Duplicate()) { Name = Name, Start = Start, Duration = Duration, Speed = Speed, Color = Color, PreservePitch = PreservePitch });
+        public override AudioClip Duplicate() => Transaction.Suppressed(() => CopyTimingTo(new AudioClip(Graph.Duplicate()) { Name = Name, Start = Start, Duration = Duration, Color = Color, PreservePitch = PreservePitch }));
     }
 }

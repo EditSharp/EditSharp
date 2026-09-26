@@ -50,6 +50,24 @@ namespace EditSharp
         /// <summary>Whether it's above zero.</summary>
         public bool IsPositive => Num > 0;
 
+        /// <summary>Whether it's below zero.</summary>
+        public bool IsNegative => Num < 0;
+
+        /// <summary>Whether it's zero.</summary>
+        public bool IsZero => Num == 0;
+
+        /// <summary>-1, 0 or 1, as the fraction is negative, zero or positive.</summary>
+        public int Sign => Math.Sign(Num);
+
+        /// <summary>The fraction without its sign.</summary>
+        /// <returns>|this|.</returns>
+        public Rational Abs() => new(Math.Abs(Num), Den);
+
+        /// <summary>The fraction negated.</summary>
+        /// <param name="a">The fraction.</param>
+        /// <returns>-a.</returns>
+        public static Rational operator -(Rational a) => new(-a.Num, a.Den);
+
         /// <summary>One over this.</summary>
         /// <returns>Den/Num.</returns>
         /// <exception cref="DivideByZeroException">This is zero.</exception>

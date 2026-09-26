@@ -10,7 +10,7 @@ namespace EditSharp.Components
     /// <summary>
     /// Animatable&lt;T&gt; as its static value plus, when it has a track, every
     /// keyframe exactly as it was: time, value, interpolation, tangent modes
-    /// and handles.
+    /// and handles, and for a <see cref="PositionTrack"/> its path handles too.
     /// </summary>
     internal sealed class AnimatableJsonConverterFactory : JsonConverterFactory
     {
@@ -32,6 +32,8 @@ namespace EditSharp.Components
 
             if (value.Track is { } track)
             {
+                if (track is PositionTrack) writer.WriteString("track", "position");
+
                 writer.WriteStartArray("keyframes");
                 foreach (Keyframe<T> keyframe in track.Keyframes)
                 {
@@ -45,6 +47,15 @@ namespace EditSharp.Components
                     writer.WriteString("outTangent", keyframe.OutTangentMode.ToString());
                     WriteHandle(writer, "inHandle", keyframe.InHandle, options);
                     WriteHandle(writer, "outHandle", keyframe.OutHandle, options);
+
+                    if (keyframe is SpatialKeyframe spatial)
+                    {
+                        writer.WriteString("spatialInTangent", spatial.SpatialInTangentMode.ToString());
+                        writer.WriteString("spatialOutTangent", spatial.SpatialOutTangentMode.ToString());
+                        if (spatial.SpatialInHandle is { } spatialIn) { writer.WritePropertyName("spatialIn"); JsonSerializer.Serialize(writer, spatialIn, options); }
+                        if (spatial.SpatialOutHandle is { } spatialOut) { writer.WritePropertyName("spatialOut"); JsonSerializer.Serialize(writer, spatialOut, options); }
+                    }
+
                     writer.WriteEndObject();
                 }
                 writer.WriteEndArray();
@@ -72,6 +83,10 @@ namespace EditSharp.Components
             var animatable = new Animatable<T>(root.GetProperty("value").Deserialize<T>(options)!);
             if (!root.TryGetProperty("keyframes", out JsonElement keyframes)) return animatable;
 
+            //a position track shapes its path too
+            if (root.TryGetProperty("track", out JsonElement trackKind) && trackKind.GetString() == "position" && animatable is Animatable<Vector2> position)
+                position.AttachTrack(new PositionTrack());
+
             KeyframeTrack<T> track = animatable.GetOrCreateTrack();
             var added = new List<(Keyframe<T> Keyframe, JsonElement Json)>();
 
@@ -90,6 +105,14 @@ namespace EditSharp.Components
                 keyframe.OutTangentMode = Enum.Parse<TangentMode>(json.GetProperty("outTangent").GetString()!);
                 keyframe.InHandle = ReadHandle(json, "inHandle", options);
                 keyframe.OutHandle = ReadHandle(json, "outHandle", options);
+
+                if (keyframe is SpatialKeyframe spatial)
+                {
+                    if (json.TryGetProperty("spatialInTangent", out JsonElement inMode)) spatial.SpatialInTangentMode = Enum.Parse<TangentMode>(inMode.GetString()!);
+                    if (json.TryGetProperty("spatialOutTangent", out JsonElement outMode)) spatial.SpatialOutTangentMode = Enum.Parse<TangentMode>(outMode.GetString()!);
+                    if (json.TryGetProperty("spatialIn", out JsonElement spatialIn)) spatial.SpatialInHandle = spatialIn.Deserialize<Vector2>(options);
+                    if (json.TryGetProperty("spatialOut", out JsonElement spatialOut)) spatial.SpatialOutHandle = spatialOut.Deserialize<Vector2>(options);
+                }
             }
 
             return animatable;

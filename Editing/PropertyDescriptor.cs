@@ -125,6 +125,7 @@ namespace EditSharp.Editing
             Editor = Inspect.Infer(ValueType, attribute, IsCollection);
             IsReadOnly = attribute.ReadOnly || (!IsAnimatable && !IsCollection && !property.CanWrite);
             Conditions = conditions;
+            ReadOnlyConditions = [.. property.GetCustomAttributes<ReadOnlyWhenAttribute>(inherit: true)];
 
             Attribute = attribute;
         }
@@ -257,20 +258,34 @@ namespace EditSharp.Editing
             if (Conditions.Count == 0) return true;
 
             object holder = Holder(target);
-            Type type = holder.GetType();
+            return Conditions.All(c => SiblingHolds(holder, c.Property, c.AnyOf));
+        }
 
-            foreach (VisibleWhenAttribute condition in Conditions)
-            {
-                PropertyInfo? sibling = type.GetProperty(condition.Property, BindingFlags.Public | BindingFlags.Instance);
-                if (sibling is null) return false;
+        /// <summary>The conditions any one of which makes the property read-only.</summary>
+        public IReadOnlyList<ReadOnlyWhenAttribute> ReadOnlyConditions { get; }
 
-                object? current = sibling.GetValue(holder);
-                if (current is IAnimatable animatable) current = animatable.GetStaticValue();
+        /// <summary>Whether the property can't be edited on <paramref name="target"/> right now: always when <see cref="IsReadOnly"/>, otherwise per its <see cref="ReadOnlyConditions"/>.</summary>
+        /// <param name="target">The object the property belongs to.</param>
+        /// <returns>True when it can't be edited.</returns>
+        public bool IsReadOnlyOn(object target)
+        {
+            if (IsReadOnly) return true;
+            if (ReadOnlyConditions.Count == 0) return false;
 
-                if (!condition.AnyOf.Any(v => Equals(v, current))) return false;
-            }
+            object holder = Holder(target);
+            return ReadOnlyConditions.Any(c => SiblingHolds(holder, c.Property, c.AnyOf));
+        }
 
-            return true;
+        //whether a sibling property of the holder currently holds one of the values
+        private static bool SiblingHolds(object holder, string property, IReadOnlyList<object?> anyOf)
+        {
+            PropertyInfo? sibling = holder.GetType().GetProperty(property, BindingFlags.Public | BindingFlags.Instance);
+            if (sibling is null) return false;
+
+            object? current = sibling.GetValue(holder);
+            if (current is IAnimatable animatable) current = animatable.GetStaticValue();
+
+            return anyOf.Any(v => Equals(v, current));
         }
 
         // ---- lists ----

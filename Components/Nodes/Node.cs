@@ -11,7 +11,7 @@ namespace EditSharp.Components.Nodes
     public abstract class Node
     {
         /// <summary>Identifies the node within its graph; connections refer to nodes by it.</summary>
-        public Guid Id { get; } = Guid.NewGuid();
+        public Guid Id { get; internal set; } = Guid.NewGuid();
 
         //the graph this node was added to; set by Graph, never by a snapshot
         internal Graph? Graph { get; set; }

@@ -3,6 +3,7 @@ using EditSharp.Editing;
 namespace EditSharp.Components.Transitions
 {
     /// <summary>The incoming clip pushes the outgoing one out of the frame.</summary>
+    [TransitionKind("slide", DisplayName = "Slide")]
     public sealed class SlideTransition : Transition
     {
         float _angle = 0f;

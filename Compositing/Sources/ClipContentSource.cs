@@ -203,7 +203,7 @@ namespace EditSharp.Compositing.Sources
                         OpenBuffer(input, prepared, frameClip.Graph, state.FrameIndex, ReachEnd(null, clip));
                     }
 
-                    Time content = frameClip.ContentTime;
+                    Time content = frameClip.MediaTime;
                     if (!input.Buffer!.WaitReady(state.FrameIndex, content, Remaining())) return false;
                 }
             }
@@ -300,7 +300,7 @@ namespace EditSharp.Compositing.Sources
             try
             {
                 using IVideoFrameReader reader = prepared.OpenReader(new VideoReaderOptions(
-                    _options.ReadMode, content, _options.Fps, clip.Speed, CallerOwnsFrames: true,
+                    ReadModeFor(clip), content, _options.Fps, ReadSpeed(clip), CallerOwnsFrames: true,
                     CanvasWidth: canvasWidth, CanvasHeight: canvasHeight, Compositor: new CompositorAccess(pool, _options)));
 
                 VideoFrame frame = reader.GetFrame(content);
@@ -495,7 +495,7 @@ namespace EditSharp.Compositing.Sources
                 : (0, 0);
 
             return new VideoReaderOptions(
-                _options.ReadMode, startAt, _options.Fps, input.Clip.Speed, width, height, callerOwnsFrames, canvasWidth, canvasHeight);
+                ReadModeFor(input.Clip), startAt, _options.Fps, ReadSpeed(input.Clip), width, height, callerOwnsFrames, canvasWidth, canvasHeight);
         }
 
         //`background` closes the buffer and its decoder off this thread: shutting one down can take
@@ -524,7 +524,13 @@ namespace EditSharp.Compositing.Sources
 
         // ---- timeline arithmetic ----
 
-        private Time ContentTimeOf(Clip clip, int frame) => clip.ContentTimeAt(FrameStateResolver.TimeOfFrame(frame, _options.Fps));
+        //a clip playing backwards or holding a frame reads its frames out of order, which only the proxy can do
+        private VideoReadMode ReadModeFor(Clip clip) => clip.Speed.IsPositive ? _options.ReadMode : VideoReadMode.RandomAccess;
+
+        //the rate a sequential read decodes at; a random-access read ignores it
+        private static Rational ReadSpeed(Clip clip) => clip.Speed.IsPositive ? clip.Speed : Rational.One;
+
+        private Time ContentTimeOf(Clip clip, int frame) => clip.MediaTimeAt(FrameStateResolver.TimeOfFrame(frame, _options.Fps));
 
         /// <summary>
         /// How far past its own end a clip is still composited: through the

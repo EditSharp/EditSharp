@@ -5,6 +5,7 @@ using EditSharp.Editing;
 namespace EditSharp.Components.Transitions
 {
     /// <summary>Fades out to a colour over the first half, then in from it over the second.</summary>
+    [TransitionKind("fade-to-color", DisplayName = "Fade to colour")]
     public sealed class FadeToColorTransition : Transition
     {
         SKColor _color = SKColors.Black;

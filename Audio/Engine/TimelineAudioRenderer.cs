@@ -28,7 +28,7 @@ namespace EditSharp.Audio.Engine
         private readonly Dictionary<AudioClip, ClipAudioNetwork> _networks = new(ReferenceEqualityComparer.Instance);
         private float[] _bus = new float[session.BlockFrames * session.Format.Channels];
 
-        private readonly record struct Audible(AudioClip Clip, long Start, long End, Rational Speed, PitchPreservation Pitch, Graph Graph);
+        private readonly record struct Audible(AudioClip Clip, long Start, long End, Rational Speed, long ContentFrames, PitchPreservation Pitch, Graph Graph);
 
         private readonly record struct ChannelWork(Guid Id, float Volume, List<Audible> Clips);
 
@@ -58,8 +58,11 @@ namespace EditSharp.Audio.Engine
 
                         long start = session.FrameOf(clip.Start), stop = session.FrameOf(clip.End);
 
+                        //a frozen clip holds a picture, and is silent
+                        if (clip.Frozen) continue;
+
                         if (start < end && stop > frame)
-                            audible.Add(new Audible(audio, start, stop, clip.Speed, audio.PreservePitch, audio.Graph.Snapshot()));
+                            audible.Add(new Audible(audio, start, stop, clip.Speed, clip.ContentDuration.ToSamples(format.SampleRate, Rounding.Nearest), audio.PreservePitch, audio.Graph.Snapshot()));
                         else if (start >= end && start < end + lookahead)
                             upcoming.Add((audio, audio.Graph.Snapshot()));
                     }
@@ -84,11 +87,14 @@ namespace EditSharp.Audio.Engine
 
                     var tick = new AudioTick(
                         format, from, count,
-                        Time.FromSamples(from - clip.Start, format.SampleRate) * clip.Speed,
-                        (from - clip.Start) * clip.Speed.Value,
-                        clip.Speed,
+                        Time.FromSamples(from - clip.Start, format.SampleRate) * clip.Speed.Abs(),
+                        clip.Speed.IsNegative
+                            ? clip.ContentFrames - 1 - (from - clip.Start) * -clip.Speed.Value
+                            : (from - clip.Start) * clip.Speed.Value,
+                        clip.Speed.Abs(),
                         clip.Graph,
-                        clip.Pitch);
+                        clip.Pitch,
+                        clip.Speed.IsNegative);
 
                     Network(clip.Clip).Process(tick, bus.Slice((int)(from - frame) * channels, count * channels));
                 }

@@ -13,7 +13,7 @@ namespace EditSharp.Components.Channels
     public abstract class Channel
     {
         /// <summary>Identifies the channel while the program runs, such as for tapping its audio; it isn't saved.</summary>
-        public Guid Id { get; } = Guid.NewGuid();
+        public Guid Id { get; internal set; } = Guid.NewGuid();
 
         string _name = "Channel";
         /// <summary>The channel's name, as editors show it.</summary>
@@ -308,6 +308,22 @@ namespace EditSharp.Components.Channels
             return transition;
         }
 
+        //loading: a clip placed exactly as saved, overlapping a transition partner as it did
+        internal void Restore(Clip clip)
+        {
+            ValidateType(clip);
+            PlaceInternal(clip);
+            Timeline?.RegisterEmbeddedTimelines(clip);
+        }
+
+        //loading: a transition between clips already grown into each other
+        internal void RestoreTransition(Clip from, Clip to, Transition transition)
+        {
+            transition.From = from;
+            transition.To = to;
+            _transitions.Add(transition);
+        }
+
         /// <summary>Removes a transition; the clips keep the lengths it gave them.</summary>
         /// <param name="transition">The transition.</param>
         public void RemoveTransition(Transition transition) => RemoveTransitionsWhere(t => ReferenceEquals(t, transition));
@@ -369,7 +385,7 @@ namespace EditSharp.Components.Channels
             }
         }
 
-        private void RippleFrom(Time at, Time amount)
+        internal void RippleFrom(Time at, Time amount)
         {
             if (amount <= Time.Zero) return;
 

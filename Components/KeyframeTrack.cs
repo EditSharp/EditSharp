@@ -136,6 +136,33 @@ namespace EditSharp.Components
             foreach (Keyframe<T> keyframe in _keyframes) keyframe.Start += amount;
         }
 
+        /// <summary>Turns the track around a time: a keyframe at t moves to <paramref name="around"/> - t, and each keyframe's arriving and leaving sides swap, so the curve plays backwards.</summary>
+        /// <remarks>A Hold holds the value on its left, so a held segment keeps its left keyframe's value rather than its right one's after the turn.</remarks>
+        /// <param name="around">The time the track turns around; mirroring twice around the same time restores it.</param>
+        public void Mirror(Time around)
+        {
+            if (_keyframes.Count == 0) return;
+
+            foreach (Keyframe<T> keyframe in _keyframes)
+            {
+                keyframe.Start = around - keyframe.Start;
+                (keyframe.InInterpolation, keyframe.OutInterpolation) = (keyframe.OutInterpolation, keyframe.InInterpolation);
+                (keyframe.InHandle, keyframe.OutHandle) = (keyframe.OutHandle, keyframe.InHandle);
+                (keyframe.InTangentMode, keyframe.OutTangentMode) = (keyframe.OutTangentMode, keyframe.InTangentMode);
+                MirrorKeyframeExtras(keyframe);
+            }
+
+            List<Keyframe<T>> before = [.. _keyframes];
+            Transaction.Apply(
+                () => _keyframes.Reverse(),
+                () => { _keyframes.Clear(); _keyframes.AddRange(before); },
+                "mirror keyframes");
+        }
+
+        /// <summary>Swaps whatever a subclass's keyframes hold on each side, for <see cref="Mirror"/>.</summary>
+        /// <param name="keyframe">The keyframe being turned around.</param>
+        protected virtual void MirrorKeyframeExtras(Keyframe<T> keyframe) { }
+
         /// <summary>A deep copy of the same kind of track.</summary>
         /// <remarks>Nothing is recorded in history.</remarks>
         /// <returns>The copy.</returns>

@@ -2,6 +2,7 @@ using EditSharp.History;
 namespace EditSharp.Components.Transitions
 {
     /// <summary>A crossfade: the outgoing clip fades out as the incoming one fades in.</summary>
+    [TransitionKind("fade", DisplayName = "Crossfade")]
     public sealed class FadeTransition : Transition
     {
         /// <inheritdoc/>

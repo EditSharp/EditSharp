@@ -102,7 +102,8 @@ namespace EditSharp.Compositing
             {
                 Clip = clip,
                 Graph = clip.Graph.Snapshot(),
-                ContentTime = clip.ContentTimeAt(time),
+                AnimationTime = clip.ContentTimeAt(time),
+                MediaTime = clip.MediaTimeAt(time),
             };
         }
 

@@ -245,6 +245,9 @@ namespace EditSharp.Components.Nodes
             _nodes.Add(outputNode);
         }
 
+        //loading: a graph around its saved output node, the rest added after
+        internal static Graph Restore(NodeDomain domain, OutputNode outputNode) => new(domain, outputNode);
+
         //a flattened view - see Flattened. shares node objects with its source, owns nothing
         private Graph(NodeDomain domain, OutputNode outputNode, List<Node> nodes, List<Connection> connections)
         {

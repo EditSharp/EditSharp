@@ -103,6 +103,9 @@ namespace EditSharp.Playback
         public IDisposable TapAudio(Guid id, Action<AudioTapBlock> onBlock) => _audioTaps.Add(id, onBlock);
 
         private Time _lastKnownPosition = Time.Zero;
+
+        //set by Dispose, so a render it cuts short ends quietly
+        private volatile bool _disposed;
         private PlaybackReferenceClock? _referenceClock;
         /// <summary>Where playback is on the timeline: moving while playing, or the last position played or scrubbed to.</summary>
         /// <remarks>Always within the timeline; the clock reading ahead of the last frame at a high speed stops at the end.</remarks>
@@ -442,6 +445,10 @@ namespace EditSharp.Playback
                     _scrubGate.Release();
                 }
             }
+            catch (ObjectDisposedException) when (_disposed)
+            {
+                //the playback went away mid-render: nothing is waiting for the frame
+            }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 //replaced by a newer scrub, not cancelled by the caller: nothing to report
@@ -508,10 +515,53 @@ namespace EditSharp.Playback
                 VideoReadMode.RandomAccess, ContentFailurePolicy.Preview));
         }
 
+        /// <summary>The whole timeline composited at a position, as a picture: for posters and previews outside playback.</summary>
+        /// <remarks>Uses the scrub session, so it waits for any scrub in progress and can't run while playing. The frame is <see cref="RenderSettings"/>'s resolution; a source still being prepared shows its placeholder, and Complete says so.</remarks>
+        /// <param name="position">The timeline time; clamped to the timeline.</param>
+        /// <param name="ct">Cancels the render.</param>
+        /// <returns>The frame's RGBA pixels, and whether any part of it is still to come.</returns>
+        /// <exception cref="InvalidOperationException">Called while playing.</exception>
+        /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
+        public async Task<ClipFrame> RenderFrameAsync(Time position, CancellationToken ct = default)
+        {
+            lock (_stateLock)
+            {
+                if (_state == PlaybackState.Playing)
+                    throw new InvalidOperationException("RenderFrameAsync cannot be used while playing; Pause() first.");
+            }
+
+            position = Time.Clamp(position, Time.Zero, Timeline.Duration);
+            int width = (int)RenderSettings.Resolution.X;
+            int height = (int)RenderSettings.Resolution.Y;
+
+            await _scrubGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await EnsureScrubSessionBaseAsync(width, height).WaitAsync(ct).ConfigureAwait(false);
+
+                (byte[] buffer, int length) = await ComposeInstantFrameAsync(
+                    _scrubContentSource!, _scrubSurfacePool!, _scrubGpuThread!,
+                    position, width, height, RenderSettings.Framerate, ct).ConfigureAwait(false);
+
+                try
+                {
+                    return new ClipFrame(buffer.AsSpan(0, length).ToArray(), width, height, !_scrubContentSource!.LastFrameIncomplete);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
+            }
+            finally
+            {
+                _scrubGate.Release();
+            }
+        }
+
         /// <summary>One clip composited on its own, for thumbnails.</summary>
         /// <remarks>Media is read once, in RenderSettings.SourceMode, so nothing stays open between calls.</remarks>
         /// <param name="clip">The clip.</param>
-        /// <param name="contentTime">The clip's content time to show.</param>
+        /// <param name="contentTime">The content to show, as content time from the in-point; the effects are drawn at the animation time the clip shows it at.</param>
         /// <param name="width">The frame's width in pixels.</param>
         /// <param name="height">The frame's height in pixels.</param>
         /// <param name="ct">Cancels the render.</param>
@@ -530,6 +580,7 @@ namespace EditSharp.Playback
             int canvasHeight = (int)RenderSettings.Resolution.Y;
             Rational fps = RenderSettings.Framerate;
             contentTime = Time.Max(Time.Zero, contentTime);
+            Time animationTime = clip.ContentTimeOfMedia(contentTime);
 
             await _scrubGate.WaitAsync(ct).ConfigureAwait(false);
             try
@@ -563,7 +614,7 @@ namespace EditSharp.Playback
                         try
                         {
                             surface.Canvas.Clear(SKColors.Black);
-                            ClipCompositor.Composite(surface.Canvas, graph, plain, contentTime, context, pool);
+                            ClipCompositor.Composite(surface.Canvas, graph, plain, animationTime, context, pool);
 
                             using SKImage image = surface.Snapshot();
                             return new ClipFrame(ReadPixels(image, width, height), width, height, complete);
@@ -1163,6 +1214,7 @@ namespace EditSharp.Playback
         /// <remarks>Waits for the session to release its GPU context and decoders before returning.</remarks>
         public void Dispose()
         {
+            _disposed = true;
             Stop();
 
             //the one place a retired session is waited on synchronously

@@ -5,14 +5,16 @@ namespace EditSharp.Audio.Processors
 {
     /// <summary>
     /// The processor behind every audio input node: reads the node's content
-    /// stream through a ContentWarp at the clip's speed and pitch mode. `identity` is what the
-    /// stream was made from (the node's Source);
-    /// when it changes the stream is rebuilt.
+    /// stream through a ContentWarp at the clip's speed and pitch mode, or a
+    /// reversed view of it through a second warp when the clip plays backwards.
+    /// `identity` is what the stream was made from (the node's Source); when it
+    /// changes the streams are rebuilt.
     /// </summary>
     internal sealed class ContentInputProcessor(Func<object> identity, Func<IContentAudio> create, AudioSession session) : IAudioProcessor
     {
         private object? _identity;
         private ContentWarp? _warp;
+        private ContentWarp? _reverseWarp;
 
         /// <summary>Starts preparing ahead of time (with `wait`, until done); true once reads can start.</summary>
         public bool Prepare(bool wait = false) => Warp().Content.Ready(wait);
@@ -29,7 +31,21 @@ namespace EditSharp.Audio.Processors
                 return;
             }
 
-            warp.Render(tick.ContentFrame, tick.Speed.Value, tick.Frames, tick.Pitch, output);
+            if (!tick.Reversed)
+            {
+                warp.Render(tick.ContentFrame, tick.Speed.Value, tick.Frames, tick.Pitch, output);
+                return;
+            }
+
+            //the reversed view's frames are negated content frames, read forwards
+            _reverseWarp ??= new ContentWarp(new ReversedContentAudio(create(), session.Format.Channels), session.Format);
+            if (!_reverseWarp.Content.Ready(session.WaitForSources))
+            {
+                output.Clear();
+                return;
+            }
+
+            _reverseWarp.Render(-tick.ContentFrame, tick.Speed.Value, tick.Frames, tick.Pitch, output);
         }
 
         private ContentWarp Warp()
@@ -39,6 +55,8 @@ namespace EditSharp.Audio.Processors
             if (_warp is null || !ReferenceEquals(current, _identity))
             {
                 _warp?.Dispose();
+                _reverseWarp?.Dispose();
+                _reverseWarp = null;
                 _warp = new ContentWarp(create(), session.Format);
                 _identity = current;
             }
@@ -46,6 +64,10 @@ namespace EditSharp.Audio.Processors
             return _warp;
         }
 
-        public void Dispose() => _warp?.Dispose();
+        public void Dispose()
+        {
+            _warp?.Dispose();
+            _reverseWarp?.Dispose();
+        }
     }
 }

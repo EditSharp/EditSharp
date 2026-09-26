@@ -22,6 +22,10 @@ namespace EditSharp.Components
         /// <param name="amount">How far to move them; negative moves them earlier.</param>
         void ShiftKeyframes(Time amount);
 
+        /// <summary>Turns every keyframe around a time, so the animation plays backwards; see <see cref="KeyframeTrack{T}.Mirror"/>.</summary>
+        /// <param name="around">The time the keyframes turn around.</param>
+        void MirrorKeyframes(Time around);
+
         /// <summary>The type of value it holds.</summary>
         Type ValueType { get; }
 
@@ -106,6 +110,9 @@ namespace EditSharp.Components
 
         /// <inheritdoc/>
         public void ShiftKeyframes(Time amount) => Track?.Shift(amount);
+
+        /// <inheritdoc/>
+        public void MirrorKeyframes(Time around) => Track?.Mirror(around);
 
         /// <inheritdoc/>
         public Type ValueType => typeof(T);

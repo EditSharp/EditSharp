@@ -15,8 +15,11 @@ namespace EditSharp.Compositing
         /// <summary>The clip's graph as it was when the frame was resolved; compose from this, not Clip.Graph.</summary>
         public required Graph Graph { get; init; }
 
-        //the clip's content time at this frame, which keyframed values are evaluated at
-        public Time ContentTime { get; init; }
+        //the clip's animation time at this frame, which its effects' keyframes are evaluated at
+        public Time AnimationTime { get; init; }
+
+        //the content its inputs read at this frame, from their in-points: backwards or held when the clip's speed says
+        public Time MediaTime { get; init; }
     }
 
     /// <summary>

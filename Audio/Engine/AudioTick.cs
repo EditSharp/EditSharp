@@ -12,8 +12,10 @@ namespace EditSharp.Audio.Engine
     /// and the clip's content position at the first of them, both as a time
     /// (for automation) and as a content frame that can fall between samples
     /// (for reading audio). Speed is how many content frames each output frame
-    /// advances (Clip.Speed). Graph is the clip's graph snapshot for this tick;
-    /// Pitch is how its inputs keep pitch when Speed isn't 1.
+    /// advances (|Clip.Speed|); with Reversed the content is read backwards from
+    /// ContentFrame while the animation time still runs forwards. Graph is the
+    /// clip's graph snapshot for this tick; Pitch is how its inputs keep pitch
+    /// when Speed isn't 1.
     /// </summary>
     internal readonly record struct AudioTick(
         AudioFormat Format,
@@ -23,7 +25,8 @@ namespace EditSharp.Audio.Engine
         double ContentFrame,
         Rational Speed,
         Graph Graph,
-        PitchPreservation Pitch = PitchPreservation.WSOLA)
+        PitchPreservation Pitch = PitchPreservation.WSOLA,
+        bool Reversed = false)
     {
         public int Samples => Frames * Format.Channels;
 

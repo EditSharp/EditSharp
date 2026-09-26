@@ -18,6 +18,9 @@ namespace EditSharp.Components.Clips
     /// </remarks>
     public abstract class Clip : ITimelineEditable
     {
+        /// <summary>Identifies the clip within its project; kept when it's saved and loaded, new for a copy.</summary>
+        public Guid Id { get; internal set; } = Guid.NewGuid();
+
         string _name = "Clip";
         /// <summary>The clip's name, as editors show it.</summary>
         [Editable("Name", Order = 0)]
@@ -37,52 +40,153 @@ namespace EditSharp.Components.Clips
         public Time End => Start + Duration;
 
         Rational _speed = Rational.One;
-        /// <summary>How fast the content plays against the timeline: 2 plays it twice as fast, 1/2 at half speed.</summary>
-        /// <remarks>The graph and its keyframes stay at 1x; Speed scales the clip's time wherever it's evaluated, so setting it back to 1 undoes a retime. <see cref="StretchStart"/> and <see cref="StretchEnd"/> set it to the exact ratio of content to timeline ticks. Raising it trims the clip if a source now ends inside it.</remarks>
-        /// <exception cref="ArgumentOutOfRangeException">The value isn't positive.</exception>
-        [Editable("Speed", Order = 3, Min = 0.01, Max = 100, Step = 0.01, Editor = PropertyEditor.Percent, Default = 1.0)]
+        /// <summary>How fast the content plays against the timeline: 2 plays it twice as fast, 1/2 at half speed, -1 backwards, 0 holds one frame.</summary>
+        /// <remarks>
+        /// The graph and its keyframes stay at 1x; Speed only maps the clip's time, so setting it back to 1 undoes a retime.
+        /// Backwards, the clip plays the same stretch of content from its end, while keyframes on effects keep running
+        /// forwards at |Speed|; <see cref="Reverse"/> turns them around too. At 0 the clip holds the frame at
+        /// <see cref="FreezeAt"/> and its keyframes run at 1x. <see cref="StretchStart"/> and <see cref="StretchEnd"/> set the
+        /// exact ratio of content to timeline ticks. A linked clip's partners take the same speed. Raising it trims the clip
+        /// if a source now ends inside it.
+        /// </remarks>
+        [Editable("Speed", Order = 3, Group = "Speed", Step = 0.01, Editor = PropertyEditor.Percent, Default = 1.0)]
+        [ReadOnlyWhen(nameof(Frozen), true)]
         public Rational Speed
         {
             get => _speed;
             set
             {
-                if (!value.IsPositive) throw new ArgumentOutOfRangeException(nameof(value), value, "A clip's speed must be positive.");
-                Transaction.Set(this, ref _speed, value, static (o, v) => o._speed = v);
-                TrimToSources();
+                foreach (Clip clip in LinkedClips()) clip.SetSpeed(value);
             }
         }
+
+        //this clip's speed alone, remembering the last moving speed so a freeze can be undone
+        private void SetSpeed(Rational value)
+        {
+            if (value == _speed) return;
+            if (value.IsZero && !_speed.IsZero) SpeedBeforeFreeze = _speed;
+
+            Transaction.Set(this, ref _speed, value, static (o, v) => o._speed = v);
+            TrimToSources();
+        }
+
+        Rational _speedBeforeFreeze = Rational.One;
+        /// <summary>The speed the clip had before it was last frozen, which turning <see cref="Frozen"/> off restores.</summary>
+        public Rational SpeedBeforeFreeze
+        {
+            get => _speedBeforeFreeze;
+            private set => Transaction.Set(this, ref _speedBeforeFreeze, value, static (o, v) => o._speedBeforeFreeze = v);
+        }
+
+        /// <summary>Whether the clip holds one frame: <see cref="Speed"/> is 0.</summary>
+        /// <remarks>Turning it on sets the speed to 0 and keeps <see cref="FreezeAt"/>; turning it off restores <see cref="SpeedBeforeFreeze"/>. Use <see cref="Freeze"/> to hold the frame at a given moment.</remarks>
+        [Editable("Freeze frame", Order = 4, Group = "Speed")]
+        public bool Frozen
+        {
+            get => _speed.IsZero;
+            set
+            {
+                if (value == Frozen) return;
+                Speed = value ? Rational.Zero : SpeedBeforeFreeze;
+            }
+        }
+
+        Time _freezeAt;
+        /// <summary>The frame a frozen clip holds, as content time from the in-point.</summary>
+        [Editable("Freeze at", Order = 5, Group = "Speed")]
+        [VisibleWhen(nameof(Frozen), true)]
+        public Time FreezeAt { get => _freezeAt; set => Transaction.Set(this, ref _freezeAt, value, static (o, v) => o._freezeAt = v); }
+
+        /// <summary>Holds the frame showing at a moment on the timeline, for this clip and its linked partners.</summary>
+        /// <param name="timelineTime">The moment; one outside the clip holds its first frame.</param>
+        public void Freeze(Time timelineTime)
+        {
+            if (timelineTime < Start || timelineTime >= End) timelineTime = Start;
+
+            foreach (Clip clip in LinkedClips())
+            {
+                if (!clip.Frozen) clip.FreezeAt = clip.MediaTimeAt(timelineTime);
+            }
+
+            Frozen = true;
+        }
+
+        /// <summary>Plays the clip backwards, turning its effects' keyframes around with it so they stay on the same frames; partners too. A frozen clip is left as it is.</summary>
+        public void Reverse()
+        {
+            if (Frozen) return;
+
+            foreach (Clip clip in LinkedClips())
+            {
+                //an animation time a lands where the frame it was on now shows: at ContentDuration - Tick - a
+                Time around = clip.ContentDuration - Time.Tick;
+                foreach (IAnimatable animatable in clip.EffectAnimatables) animatable.MirrorKeyframes(around);
+
+                clip.SetSpeed(-clip._speed);
+            }
+        }
+
+        //this clip and the others in its link group
+        private System.Collections.Generic.IEnumerable<Clip> LinkedClips()
+        {
+            yield return this;
+
+            if (LinkGroupId is not { } id || Channel?.Timeline is not { } timeline) yield break;
+
+            foreach (Clip member in timeline.AllClips())
+                if (member != this && member.LinkGroupId == id) yield return member;
+        }
+
+        /// <summary>Whether the clip plays backwards: <see cref="Speed"/> is negative.</summary>
+        public bool IsReversed => _speed.IsNegative;
 
         string? _color;
         /// <summary>The colour an editor shows the clip in: a swatch name or a hex value, as the editor reads it; null for the editor's default.</summary>
         public string? Color { get => _color; set => Transaction.Set(this, ref _color, value, static (o, v) => o._color = v); }
 
-        /// <summary>How much content the clip covers: <see cref="Duration"/> × <see cref="Speed"/>.</summary>
+        /// <summary>How much content the clip covers: <see cref="Duration"/> × |<see cref="Speed"/>|; zero when frozen.</summary>
         public Time ContentDuration => ToContentTime(Duration);
 
-        /// <summary>A length of timeline time as content time: × <see cref="Speed"/>, rounded to the nearest tick.</summary>
+        /// <summary>A length of timeline time as content time: × |<see cref="Speed"/>|, rounded to the nearest tick.</summary>
         /// <param name="timeline">The timeline length.</param>
-        /// <returns>The content length.</returns>
-        public Time ToContentTime(Time timeline) => timeline * Speed;
+        /// <returns>The content length; zero when frozen.</returns>
+        public Time ToContentTime(Time timeline) => timeline * _speed.Abs();
 
-        /// <summary>A length of content time as timeline time: ÷ <see cref="Speed"/>, rounded to the nearest tick.</summary>
+        /// <summary>A length of content time as timeline time: ÷ |<see cref="Speed"/>|, rounded to the nearest tick.</summary>
         /// <param name="content">The content length.</param>
-        /// <returns>The timeline length; <see cref="Time.MaxValue"/> when it doesn't fit.</returns>
+        /// <returns>The timeline length; <see cref="Time.MaxValue"/> when it doesn't fit or the clip is frozen.</returns>
         public Time ToTimelineTime(Time content)
         {
-            if (content == Time.MaxValue) return Time.MaxValue;
-            try { return content / Speed; }
+            if (content == Time.MaxValue || _speed.IsZero) return Time.MaxValue;
+            try { return content / _speed.Abs(); }
             catch (OverflowException) { return Time.MaxValue; }
         }
 
-        /// <summary>The content time playing at a moment on the timeline; keyframes are placed and evaluated at this time.</summary>
+        /// <summary>The clip's animation time at a moment on the timeline: keyframes are placed and evaluated at this time.</summary>
         /// <param name="timelineTime">The timeline time.</param>
-        /// <returns>The content time: (<paramref name="timelineTime"/> - <see cref="Start"/>) × <see cref="Speed"/>.</returns>
-        public Time ContentTimeAt(Time timelineTime) => ToContentTime(timelineTime - Start);
+        /// <returns>(<paramref name="timelineTime"/> - <see cref="Start"/>) × |<see cref="Speed"/>|, or at 1x when frozen.</returns>
+        public Time ContentTimeAt(Time timelineTime) => Frozen ? timelineTime - Start : ToContentTime(timelineTime - Start);
 
-        /// <summary>Where on the timeline a content time plays.</summary>
-        /// <param name="contentTime">The content time.</param>
-        /// <returns>The timeline time: <see cref="Start"/> + <paramref name="contentTime"/> ÷ <see cref="Speed"/>.</returns>
-        public Time TimelineTimeOf(Time contentTime) => Start + ToTimelineTime(contentTime);
+        /// <summary>Where on the timeline an animation time falls.</summary>
+        /// <param name="contentTime">The animation time.</param>
+        /// <returns>The timeline time.</returns>
+        public Time TimelineTimeOf(Time contentTime) => Start + (Frozen ? contentTime : ToTimelineTime(contentTime));
+
+        /// <summary>Which content the clip shows or plays at a moment on the timeline, as content time from the in-point.</summary>
+        /// <param name="timelineTime">The timeline time.</param>
+        /// <returns>Forwards the animation time; backwards the same distance back from the end of the covered content; frozen, <see cref="FreezeAt"/>.</returns>
+        public Time MediaTimeAt(Time timelineTime)
+        {
+            if (Frozen) return FreezeAt;
+
+            Time forward = ToContentTime(timelineTime - Start);
+            return IsReversed ? Time.Max(Time.Zero, ContentDuration - Time.Tick - forward) : forward;
+        }
+
+        /// <summary>The animation time at which the clip shows a given content time; the inverse of <see cref="MediaTimeAt"/> in animation time.</summary>
+        /// <param name="mediaTime">Content time from the in-point.</param>
+        /// <returns>The animation time; zero when frozen.</returns>
+        public Time ContentTimeOfMedia(Time mediaTime) => Frozen ? Time.Zero : IsReversed ? ContentDuration - Time.Tick - mediaTime : mediaTime;
 
         Guid? _linkGroupId;
         /// <summary>The <see cref="LinkGroup"/> the clip belongs to; null when it isn't linked.</summary>
@@ -113,17 +217,46 @@ namespace EditSharp.Components.Clips
         /// <returns>The copy.</returns>
         public abstract Clip Duplicate();
 
-        /// <summary>Moves every trimmable input's in-point, and every keyframe in the graph, when the clip's start moves.</summary>
-        /// <remarks>Keyframes belong to the content, not to <see cref="Start"/>, so a head trim or extend moves them too.</remarks>
-        /// <param name="amount">How far the in-points move, in content time: positive for a trim, negative for an extend.</param>
-        protected internal virtual void OnHeadInPointShift(Time amount)
+        /// <summary>The keyframed values of the clip's effects: every node but its inputs, whose keyframes belong to the content.</summary>
+        public System.Collections.Generic.IEnumerable<IAnimatable> EffectAnimatables =>
+            Graph.AllNodes.Where(n => n is not InputNode).SelectMany(n => n.Animatables);
+
+        /// <summary>Moves every trimmable input's in-point, keeping the inputs' own keyframes on their content.</summary>
+        /// <param name="amount">How far the in-points move, in content time: positive later, negative earlier.</param>
+        protected internal virtual void ShiftInPoints(Time amount)
         {
             foreach (InputNode trimmable in Graph.AllNodes.OfType<InputNode>())
+            {
                 trimmable.InPoint += amount;
+                foreach (IAnimatable animatable in trimmable.Animatables) animatable.ShiftKeyframes(-amount);
+            }
+        }
 
-            //the head moving later puts every keyframe that much earlier relative to the new start;
-            //generator content included, since its tint keyframes still have to stay where they were
-            foreach (IAnimatable animatable in Graph.Animatables) animatable.ShiftKeyframes(-amount);
+        /// <summary>Moves the effects' keyframes against the clip's start, so they stay where they were on the timeline when the start moves.</summary>
+        /// <param name="amount">How far to move them, in animation time.</param>
+        protected internal virtual void ShiftEffectKeyframes(Time amount)
+        {
+            foreach (IAnimatable animatable in EffectAnimatables) animatable.ShiftKeyframes(amount);
+        }
+
+        //the head moving by `amount` of timeline time, later when positive: forwards the head is the start of the
+        //content, backwards its end, and a frozen clip's content doesn't move at all. The effects' keyframes run from
+        //the start, so they move the other way to stay put
+        private void OnHeadMoved(Time amount)
+        {
+            Time content = amount < Time.Zero ? -ToContentTime(-amount) : ToContentTime(amount);
+
+            if (!Frozen && !IsReversed) ShiftInPoints(content);
+            ShiftEffectKeyframes(Frozen ? -amount : -content);
+        }
+
+        //the tail moving by `amount`, later when positive: only backwards does it reach the start of the content
+        private void OnTailMoved(Time amount)
+        {
+            if (!IsReversed) return;
+
+            Time content = amount < Time.Zero ? -ToContentTime(-amount) : ToContentTime(amount);
+            ShiftInPoints(-content);
         }
 
         /// <summary>How far the start can move earlier, in content time: the least headroom of any trimmable input.</summary>
@@ -141,19 +274,22 @@ namespace EditSharp.Components.Clips
         }
 
         /// <summary>How much earlier <see cref="Start"/> can move before a source runs out, in timeline time; <see cref="Time.MaxValue"/> when nothing limits it.</summary>
-        /// <remarks><see cref="ExtendStart"/> stops here; an editor can clamp a drag preview to it.</remarks>
-        public Time HeadExtendLimit
-        {
-            get
-            {
-                Time ceiling = MaxHeadExtend();
-                return ceiling == Time.MaxValue ? ceiling : ToTimelineTime(ceiling);
-            }
-        }
+        /// <remarks><see cref="ExtendStart"/> stops here; an editor can clamp a drag preview to it. Backwards the head reaches for content after the covered stretch; a frozen clip has no limit.</remarks>
+        public Time HeadExtendLimit => Frozen ? Time.MaxValue : IsReversed ? RoomAfter() : RoomBefore();
 
         /// <summary>How much later <see cref="End"/> can move before a source runs out, in timeline time.</summary>
-        /// <remarks>Zero when a source already ends inside the clip; <see cref="Time.MaxValue"/> when no source has a known end (it has none, it loops, or it isn't probed yet).</remarks>
-        public Time TailExtendLimit => SourceRoom() is not { } r ? Time.MaxValue
+        /// <remarks>Zero when a source already ends inside the clip; <see cref="Time.MaxValue"/> when no source has a known end (it has none, it loops, or it isn't probed yet), or the clip is frozen.</remarks>
+        public Time TailExtendLimit => Frozen ? Time.MaxValue : IsReversed ? RoomBefore() : RoomAfter();
+
+        //timeline time of content before the in-point
+        private Time RoomBefore()
+        {
+            Time ceiling = MaxHeadExtend();
+            return ceiling == Time.MaxValue ? ceiling : ToTimelineTime(ceiling);
+        }
+
+        //timeline time of content after the covered stretch
+        private Time RoomAfter() => SourceRoom() is not { } r ? Time.MaxValue
             : r <= Time.Zero ? Time.Zero : ToTimelineTime(r);
 
         //content left past the clip's end in its tightest source with a known hard end; negative when the clip runs past one
@@ -178,8 +314,11 @@ namespace EditSharp.Components.Clips
         {
             if (Channel is null || Transaction.IsSuppressed || Transaction.IsReplaying) return;
 
-            if (SourceRoom() is { } room && room < Time.Zero)
-                TrimEnd(ToTimelineTime(-room));
+            if (Frozen || SourceRoom() is not { } room || room >= Time.Zero) return;
+
+            //the content's end is the clip's end forwards, its head backwards
+            if (IsReversed) TrimStart(ToTimelineTime(-room));
+            else TrimEnd(ToTimelineTime(-room));
         }
 
         /// <inheritdoc/>
@@ -191,7 +330,7 @@ namespace EditSharp.Components.Clips
             Time previousStart = Start;
             Start += clamped;
             Duration -= clamped;
-            OnHeadInPointShift(ToContentTime(clamped));
+            OnHeadMoved(clamped);
             Channel?.Rekey(this, previousStart);
             Channel?.ReconcileTransitionsFor(this);
         }
@@ -203,6 +342,7 @@ namespace EditSharp.Components.Clips
             if (clamped <= Time.Zero) return;
 
             Duration -= clamped;
+            OnTailMoved(-clamped);
             Channel?.ReconcileTransitionsFor(this);
         }
 
@@ -256,12 +396,13 @@ namespace EditSharp.Components.Clips
         {
             Start -= amount;
             Duration += amount;
-            OnHeadInPointShift(-ToContentTime(amount));
+            OnHeadMoved(-amount);
         }
 
         internal void ApplyTailExtend(Time amount)
         {
             Duration += amount;
+            OnTailMoved(amount);
         }
 
         /// <summary>Moves the start while the end and the content stay put, so the clip plays slower or faster.</summary>
@@ -299,15 +440,38 @@ namespace EditSharp.Components.Clips
             return amount < -maxShrink ? -maxShrink : amount;
         }
 
-        //the change itself, once the channel has cleared the way; the content range is held and Speed takes up the new Duration
+        //the change itself, once the channel has cleared the way; the content range is held and Speed takes up the new
+        //Duration, keeping its direction. A frozen clip just gets longer or shorter, its keyframes staying on the timeline
         internal void ApplyStretch(Time newStart, Time newDuration)
         {
             Time content = ContentDuration;
+            Time headMove = newStart - Start;
 
             Start = newStart;
             Duration = newDuration;
 
-            if (newDuration > Time.Zero && content > Time.Zero) Speed = new Rational(content.Ticks, newDuration.Ticks);
+            if (Frozen) ShiftEffectKeyframes(-headMove);
+            else if (newDuration > Time.Zero && content > Time.Zero) SetSpeed(new Rational(content.Ticks, newDuration.Ticks) * _speed.Sign);
+        }
+
+        //loading: the timing exactly as saved, without the checks and trims setting Speed does
+        internal void RestoreTiming(Rational speed, Rational speedBeforeFreeze, Time freezeAt)
+        {
+            _speed = speed;
+            _speedBeforeFreeze = speedBeforeFreeze;
+            _freezeAt = freezeAt;
+        }
+
+        /// <summary>Copies the speed, freeze and reverse settings onto a copy of this clip.</summary>
+        /// <typeparam name="T">The kind of clip.</typeparam>
+        /// <param name="copy">The copy.</param>
+        /// <returns>The copy.</returns>
+        protected T CopyTimingTo<T>(T copy) where T : Clip
+        {
+            copy._speed = _speed;
+            copy._speedBeforeFreeze = _speedBeforeFreeze;
+            copy._freezeAt = _freezeAt;
+            return copy;
         }
 
         /// <inheritdoc/>

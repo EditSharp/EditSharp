@@ -45,6 +45,9 @@ namespace EditSharp.Components
         internal static readonly IReadOnlyList<(string Id, Type Type)> NodeKinds =
             Discover(typeof(Node), static t => t.GetCustomAttribute<NodeKindAttribute>()?.Id, nameof(NodeKindAttribute));
 
+        internal static readonly IReadOnlyList<(string Id, Type Type)> TransitionKinds =
+            Discover(typeof(Transitions.Transition), static t => t.GetCustomAttribute<Transitions.TransitionKindAttribute>()?.Id, nameof(Transitions.TransitionKindAttribute));
+
         /// <summary>The options everything is saved and loaded with, read-only.</summary>
         /// <remarks>Use them directly, or chain their TypeInfoResolver into your own, to embed media or nodes in other JSON. A nested Timeline or a shared media can only be loaded through <see cref="Deserialize{T}"/>, which supplies them.</remarks>
         public static JsonSerializerOptions Options { get; } = CreateOptions();
@@ -129,7 +132,7 @@ namespace EditSharp.Components
         {
             var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
             {
-                TypeInfoResolver = new DefaultJsonTypeInfoResolver { Modifiers = { AddKinds, ShapeMedia, ShapeNode } },
+                TypeInfoResolver = new DefaultJsonTypeInfoResolver { Modifiers = { AddKinds, ShapeMedia, ShapeNode, ShapeTransition, ShapeEditable } },
                 Converters =
                 {
                     new JsonStringEnumConverter(),
@@ -178,6 +181,27 @@ namespace EditSharp.Components
             }
         }
 
+        //what an object held by a node saves (a transform, say): its [Editable] properties, when it has any
+        private static void ShapeEditable(JsonTypeInfo info)
+        {
+            if (info.Kind != JsonTypeInfoKind.Object || typeof(Node).IsAssignableFrom(info.Type) || typeof(IMedia).IsAssignableFrom(info.Type)) return;
+            if (!info.Properties.Any(p => p.AttributeProvider?.IsDefined(typeof(EditableAttribute), inherit: true) == true)) return;
+
+            for (int i = info.Properties.Count - 1; i >= 0; i--)
+                if (info.Properties[i].AttributeProvider?.IsDefined(typeof(EditableAttribute), inherit: true) != true)
+                    info.Properties.RemoveAt(i);
+        }
+
+        //what a transition saves: its [Editable] properties; the clips it joins are the document's business
+        private static void ShapeTransition(JsonTypeInfo info)
+        {
+            if (!typeof(Transitions.Transition).IsAssignableFrom(info.Type) || info.Kind != JsonTypeInfoKind.Object) return;
+
+            for (int i = info.Properties.Count - 1; i >= 0; i--)
+                if (info.Properties[i].AttributeProvider?.IsDefined(typeof(EditableAttribute), inherit: true) != true)
+                    info.Properties.RemoveAt(i);
+        }
+
         //"$kind" on every type a kind derives from, itself included when it's a kind too
         private static void AddKinds(JsonTypeInfo info)
         {
@@ -185,6 +209,7 @@ namespace EditSharp.Components
 
             if (typeof(IMedia).IsAssignableFrom(info.Type)) AddKinds(info, MediaKinds);
             else if (typeof(Node).IsAssignableFrom(info.Type)) AddKinds(info, NodeKinds);
+            else if (typeof(Transitions.Transition).IsAssignableFrom(info.Type)) AddKinds(info, TransitionKinds);
         }
 
         private static void AddKinds(JsonTypeInfo info, IReadOnlyList<(string Id, Type Type)> kinds)

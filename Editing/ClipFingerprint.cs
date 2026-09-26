@@ -34,6 +34,10 @@ namespace EditSharp.Editing
 
             var hash = new HashCode();
             hash.Add(clip.Speed);
+            if (clip.Frozen) hash.Add(clip.FreezeAt);
+
+            //backwards, which frame meets which keyframe depends on how much content the clip covers
+            if (clip.IsReversed) hash.Add(clip.ContentDuration);
 
             Time anchor = Anchor(clip);
             AddGraph(ref hash, clip.Graph, anchor, 0);

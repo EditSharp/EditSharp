@@ -1,5 +1,7 @@
 using EditSharp.Components.Media;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using SkiaSharp;
 using EditSharp.Components.Nodes;
 using EditSharp.Components.Nodes.Input;
@@ -113,7 +115,44 @@ namespace EditSharp.Components.Clips
             return Transaction.Suppressed(() => new VideoClip(graph) { Start = start, Duration = duration });
         }
 
+        /// <summary>Holds the frame showing at a moment for a while: splits the clip there and puts a frozen clip of that frame between the pieces.</summary>
+        /// <remarks>Everything from the moment on, on this clip's channel and its linked partners' channels, moves later by <paramref name="length"/>; the partners are split too, leaving a gap under the hold. The hold carries the clip's effects, which keep animating over it.</remarks>
+        /// <param name="at">The moment; at or after <see cref="Clip.Start"/> and before <see cref="Clip.End"/>.</param>
+        /// <param name="length">How long to hold it.</param>
+        /// <returns>The hold, placed.</returns>
+        /// <exception cref="InvalidOperationException">The clip isn't placed, or is already frozen.</exception>
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="at"/> is outside the clip, or <paramref name="length"/> isn't positive.</exception>
+        public VideoClip InsertFreezeFrame(Time at, Time length)
+        {
+            Channels.Channel channel = Channel ?? throw new InvalidOperationException("This clip is not currently placed on any Channel.");
+            if (Frozen) throw new InvalidOperationException("The clip is already frozen.");
+            if (at < Start || at >= End) throw new ArgumentOutOfRangeException(nameof(at), at, "The moment must be inside the clip.");
+            if (length <= Time.Zero) throw new ArgumentOutOfRangeException(nameof(length), length, "The hold must be longer than zero.");
+
+            //the hold is this clip from `at` on, frozen on its first frame; its in-points and keyframes carry on from there
+            VideoClip hold;
+            using (Transaction.Suppress())
+            {
+                hold = Duplicate();
+                hold.TrimStart(at - hold.Start);
+                hold.FreezeAt = hold.MediaTimeAt(at);
+                hold.Duration = length;
+                hold.Frozen = true;
+            }
+
+            List<Clip> members = channel.Timeline?.GetLinkGroup(LinkGroupId)?.Members.ToList() ?? [this];
+            List<Channels.Channel> channels = [.. members.Select(m => m.Channel).OfType<Channels.Channel>().Distinct()];
+
+            foreach (Clip member in members)
+                if (at > member.Start && at < member.End) member.Split(at);
+
+            foreach (Channels.Channel moving in channels) moving.RippleFrom(at, length);
+
+            channel.AddClip(hold);
+            return hold;
+        }
+
         /// <inheritdoc/>
-        public override VideoClip Duplicate() => Transaction.Suppressed(() => new VideoClip(Graph.Duplicate()) { Name = Name, Start = Start, Duration = Duration, Speed = Speed, Color = Color });
+        public override VideoClip Duplicate() => Transaction.Suppressed(() => CopyTimingTo(new VideoClip(Graph.Duplicate()) { Name = Name, Start = Start, Duration = Duration, Color = Color }));
     }
 }

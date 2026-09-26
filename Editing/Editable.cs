@@ -148,6 +148,27 @@ namespace EditSharp.Editing
         }
     }
 
+    /// <summary>Keeps a property from being edited while a sibling property holds one of the given values; it still shows.</summary>
+    /// <remarks>A clip's speed, for example, can't be changed while the clip is frozen. When a property has several of these, any one makes it read-only.</remarks>
+    [AttributeUsage(AttributeTargets.Property, Inherited = true, AllowMultiple = true)]
+    public sealed class ReadOnlyWhenAttribute : Attribute
+    {
+        /// <summary>The name of the sibling property to check.</summary>
+        public string Property { get; }
+
+        /// <summary>The values that make the property read-only.</summary>
+        public IReadOnlyList<object?> AnyOf { get; }
+
+        /// <summary>Makes the property read-only while <paramref name="property"/> holds one of <paramref name="anyOf"/>.</summary>
+        /// <param name="property">The name of the sibling property to check.</param>
+        /// <param name="anyOf">The values that make the property read-only.</param>
+        public ReadOnlyWhenAttribute(string property, params object?[] anyOf)
+        {
+            Property = property;
+            AnyOf = anyOf;
+        }
+    }
+
     /// <summary>An object that lists its own editable properties instead of leaving it to its type.</summary>
     /// <remarks>A composite node uses this to show the inner properties it chose to expose.</remarks>
     public interface IInspectable

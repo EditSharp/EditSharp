@@ -58,6 +58,15 @@ namespace EditSharp.Components
             to.SpatialOutTangentMode = from.SpatialOutTangentMode;
         }
 
+        /// <inheritdoc/>
+        protected override void MirrorKeyframeExtras(Keyframe<Vector2> keyframe)
+        {
+            if (keyframe is not SpatialKeyframe spatial) return;
+
+            (spatial.SpatialInHandle, spatial.SpatialOutHandle) = (spatial.SpatialOutHandle, spatial.SpatialInHandle);
+            (spatial.SpatialInTangentMode, spatial.SpatialOutTangentMode) = (spatial.SpatialOutTangentMode, spatial.SpatialInTangentMode);
+        }
+
         /// <summary>Sets one of a keyframe's path handles.</summary>
         /// <remarks>An Auto side becomes Free. A Smooth side mirrors the other handle through the keyframe.</remarks>
         /// <param name="keyframe">The keyframe.</param>

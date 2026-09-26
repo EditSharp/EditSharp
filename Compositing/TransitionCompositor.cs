@@ -25,6 +25,7 @@ namespace EditSharp.Compositing
                 {
                     case null:
                     case FadeTransition:
+                    case MissingTransition:
                         DrawFade(canvas, outgoing, incoming, p);
                         break;
 
