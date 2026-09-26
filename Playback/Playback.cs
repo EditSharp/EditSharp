@@ -556,6 +556,62 @@ namespace EditSharp.Playback
             }
         }
 
+        /// <summary>One audio clip's output on its own, as peaks for a waveform.</summary>
+        /// <remarks>The clip's graph runs at 1x over its content, so the peaks line up with the content whatever the clip's speed. Sources are read once; nothing stays open between calls.</remarks>
+        /// <param name="clip">The clip.</param>
+        /// <param name="contentStart">Where the stretch starts, in the clip's content time.</param>
+        /// <param name="contentDuration">How long the stretch is, in content time.</param>
+        /// <param name="buckets">How many equal buckets to split it into.</param>
+        /// <param name="ct">Cancels the render.</param>
+        /// <returns>The peaks, one bucket per column.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="clip"/> is null.</exception>
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="contentDuration"/> isn't positive, or <paramref name="buckets"/> isn't positive.</exception>
+        /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
+        public Task<AudioPeaks> RenderClipAudioPeaksAsync(AudioClip clip, TimeSpan contentStart, TimeSpan contentDuration, int buckets, CancellationToken ct = default)
+        {
+            ArgumentNullException.ThrowIfNull(clip);
+            if (contentDuration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(contentDuration), "contentDuration must be positive.");
+            if (buckets <= 0) throw new ArgumentOutOfRangeException(nameof(buckets), "buckets must be positive.");
+
+            return Task.Run(() =>
+            {
+                var format = new AudioFormat(PlaybackAudioEngine.SampleRate, PlaybackAudioEngine.ChannelCount);
+                var session = new AudioSession(format, waitForSources: true);
+                using var network = new ClipAudioNetwork(clip, session);
+
+                Graph graph;
+                using (ModelLock.Read()) graph = clip.Graph.Snapshot();
+
+                network.Prepare(graph, wait: true);
+
+                long total = (long)Math.Round(contentDuration.TotalSeconds * format.SampleRate);
+                double startFrame = contentStart.TotalSeconds * format.SampleRate;
+                var peaks = new PeakAccumulator(buckets, total);
+                float[] mix = new float[session.BlockFrames * format.Channels];
+
+                for (long frame = 0; frame < total; frame += session.BlockFrames)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    int frames = (int)Math.Min(session.BlockFrames, total - frame);
+                    Array.Clear(mix);
+
+                    var tick = new AudioTick(
+                        format, frame, frames,
+                        contentStart + TimeSpan.FromSeconds(frame / (double)format.SampleRate),
+                        startFrame + frame,
+                        1d / format.SampleRate,
+                        graph,
+                        PitchPreservation.Off);
+
+                    network.Process(tick, mix.AsSpan(0, frames * format.Channels));
+                    peaks.Add(mix.AsSpan(0, frames * format.Channels), frame, format.Channels);
+                }
+
+                return peaks.Result();
+            }, ct);
+        }
+
         private static byte[] ReadPixels(SKImage image, int width, int height)
         {
             byte[] pixels = new byte[width * height * 4];
@@ -613,6 +669,9 @@ namespace EditSharp.Playback
         ///                  same way; audio follows it and drops chunks that are already late.
         /// A skipped frame isn't emitted; the previous one stays on screen.
         /// </summary>
+        //how long a frame that missed its time is still waited for before it's skipped
+        private static readonly TimeSpan LateFrameGrace = TimeSpan.FromMilliseconds(400);
+
         private async Task VideoLoopAsync(
             CancellationToken token, TimeSpan startPosition,
             PlaybackStartGate startGate, PlaybackPauseGate pauseGate,
@@ -736,6 +795,13 @@ namespace EditSharp.Playback
                             FrameState state = FrameStateResolver.Resolve(Timeline, frameIndex, fps);
 
                             bool ready = await Task.Run(() => contentSource.WaitReady(state, readyWait), token);
+
+                            //a source slower than the frame rate never has the frame due now ready in
+                            //time. giving up on it and asking for the next due frame would give up on
+                            //that one too, so a frame that's late is waited for a little longer and
+                            //shown late; only a frame that stays away is skipped
+                            if (!ready && mode != PlaybackMode.EveryFrame)
+                                ready = await Task.Run(() => contentSource.WaitReady(state, LateFrameGrace), token);
 
                             if (mode == PlaybackMode.FrameDropping && !followsReferenceClock)
                                 referenceClock.Report(Now());

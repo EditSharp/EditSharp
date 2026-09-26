@@ -148,10 +148,17 @@ namespace EditSharp.Compositing.Sources
             Monitor.PulseAll(_lock);
         }
 
-        //called under _lock
+        //called under _lock. a demand ahead of what's queued and in flight
+        //moves production straight to it: the frames between would only be
+        //dropped on arrival, and a reader that can seek gets there at once
         private void Demand(int frame)
         {
             _demand = frame;
+
+            bool queuedAhead = _queue.Last is { } last && (last.Value.Frame - frame) * _direction >= 0;
+            bool inFlightIsIt = _inFlight == frame;
+            if (!queuedAhead && !inFlightIsIt && (frame - _next) * _direction > 0) _next = frame;
+
             Monitor.PulseAll(_lock);
         }
 

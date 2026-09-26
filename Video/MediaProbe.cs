@@ -11,15 +11,24 @@ using System.Threading.Tasks;
 
 namespace EditSharp.Video
 {
-    //what one ffprobe call says about a file; Duration is null for still images
-    internal readonly record struct MediaInfo(
+    /// <summary>What one probe of a media file found.</summary>
+    /// <param name="HasVideo">Whether the file has a picture stream, a still image included.</param>
+    /// <param name="Width">The picture's width in pixels; 0 without a picture.</param>
+    /// <param name="Height">The picture's height in pixels; 0 without a picture.</param>
+    /// <param name="HasAudio">Whether the file has an audio stream.</param>
+    /// <param name="Duration">How long the file plays; null for a still image or when the file doesn't say.</param>
+    /// <param name="IsStillImage">Whether the file is a single picture rather than a video.</param>
+    /// <param name="FrameRate">The picture's frames per second; null without a picture or when unknown.</param>
+    /// <param name="HasAlpha">Whether the picture's pixel format carries transparency.</param>
+    public readonly record struct MediaInfo(
         bool HasVideo,
         int Width,
         int Height,
         bool HasAudio,
         TimeSpan? Duration,
         bool IsStillImage,
-        double? FrameRate);
+        double? FrameRate,
+        bool HasAlpha = false);
 
     //runs ffprobe (EditSharpConfig.FfprobePath) once per file for streams and format together
     internal static class MediaProbe
@@ -80,6 +89,7 @@ namespace EditSharp.Video
 
             bool hasVideo = false;
             bool hasAudio = false;
+            bool hasAlpha = false;
             int width = 0;
             int height = 0;
             double? frameRate = null;
@@ -97,6 +107,7 @@ namespace EditSharp.Video
                             hasVideo = true;
                             if (stream.TryGetProperty("width", out JsonElement w)) width = w.GetInt32();
                             if (stream.TryGetProperty("height", out JsonElement h)) height = h.GetInt32();
+                            if (stream.TryGetProperty("pix_fmt", out JsonElement pixelFormat)) hasAlpha = CarriesAlpha(pixelFormat.GetString());
                             //average first: right for variable-rate phone footage
                             frameRate = ParseRate(stream, "avg_frame_rate") ?? ParseRate(stream, "r_frame_rate");
                             break;
@@ -129,7 +140,17 @@ namespace EditSharp.Video
                 duration = TimeSpan.FromSeconds(seconds);
             }
 
-            return new MediaInfo(hasVideo, width, height, hasAudio, isStillImage ? null : duration, isStillImage, frameRate);
+            return new MediaInfo(hasVideo, width, height, hasAudio, isStillImage ? null : duration, isStillImage, frameRate, hasAlpha);
+        }
+
+        //ffmpeg names formats with an alpha plane yuva*, gbrap*, ya*, or with an "a" among the rgb letters
+        private static bool CarriesAlpha(string? pixelFormat)
+        {
+            if (string.IsNullOrEmpty(pixelFormat)) return false;
+            if (pixelFormat.StartsWith("yuva", StringComparison.Ordinal) || pixelFormat.StartsWith("gbrap", StringComparison.Ordinal) || pixelFormat.StartsWith("ya", StringComparison.Ordinal)) return true;
+
+            string letters = new([.. pixelFormat.TakeWhile(char.IsLetter)]);
+            return letters is "rgba" or "bgra" or "argb" or "abgr" or "rgba64" or "bgra64" ? true : letters.Length == 4 && letters.Contains('a') && letters.Contains('r') && letters.Contains('g') && letters.Contains('b');
         }
 
         //ffprobe rates are fractions ("30000/1001"); "0/0" means unknown

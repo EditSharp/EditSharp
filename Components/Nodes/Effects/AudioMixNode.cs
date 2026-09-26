@@ -46,6 +46,21 @@ namespace EditSharp.Components.Nodes.Effects
         internal override IAudioProcessor CreateAudioProcessor(AudioSession session) => new AudioMixProcessor(this);
 
         /// <inheritdoc/>
+        /// <remarks>Energies add by the squared weights; the peak is the weighted sum of the peaks, the most the mix can reach.</remarks>
+        public override void DescribeSpectrum(in Audio.Analysis.SpectralContext context, ReadOnlySpan<Audio.Analysis.SpectralFrame> inputs, Audio.Analysis.SpectralFrame output, ref object? state)
+        {
+            float wa = MixA.Evaluate(context.ContentTime);
+            float wb = MixB.Evaluate(context.ContentTime);
+            Audio.Analysis.SpectralFrame? a = inputs.Length > 0 ? inputs[0] : null;
+            Audio.Analysis.SpectralFrame? b = inputs.Length > 1 ? inputs[1] : null;
+
+            for (int i = 0; i < output.Bands.Length; i++)
+                output.Bands[i] = (a?.Bands[i] ?? 0f) * wa * wa + (b?.Bands[i] ?? 0f) * wb * wb;
+
+            output.Peak = System.Math.Min(1f, (a?.Peak ?? 0f) * System.Math.Abs(wa) + (b?.Peak ?? 0f) * System.Math.Abs(wb));
+        }
+
+        /// <inheritdoc/>
         public override Node Duplicate() => Transaction.Suppressed(() => new AudioMixNode
         {
             Enabled = Enabled,

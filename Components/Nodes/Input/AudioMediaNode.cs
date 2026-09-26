@@ -54,6 +54,33 @@ namespace EditSharp.Components.Nodes.Input
         /// <param name="ct">Cancels finding it.</param>
         /// <returns>The length; null if the media has none, or when no media is selected.</returns>
         /// <exception cref="SourceUnavailableException">The media can't be read.</exception>
+        /// <inheritdoc/>
+        /// <remarks>Reads the media's <see cref="Audio.Analysis.AudioAnalysis"/> at the content time mapped through the in-point, duration and loop; silence when the analysis isn't in memory or the time is outside the media.</remarks>
+        public override void DescribeSpectrum(in Audio.Analysis.SpectralContext context, ReadOnlySpan<Audio.Analysis.SpectralFrame> inputs, Audio.Analysis.SpectralFrame output, ref object? state)
+        {
+            output.Clear();
+
+            if (Media is not { } media || string.IsNullOrEmpty(media.Path) || !Audio.Analysis.AudioAnalysisCache.TryGet(media.Path, out Audio.Analysis.AudioAnalysis analysis)) return;
+
+            TimeSpan material;
+            if (context.ContentTime < TimeSpan.Zero)
+            {
+                //before the in-point: the room a head extend would reach into
+                material = (Start ?? TimeSpan.Zero) + context.ContentTime;
+                if (material < TimeSpan.Zero) return;
+            }
+            else
+            {
+                try { material = ToMaterialTime(context.ContentTime, analysis.Duration); }
+                catch (SourceUnavailableException) { return; }
+            }
+
+            int frame = analysis.FrameAt(material);
+            analysis.BandsOf(frame).CopyTo(output.Bands);
+            output.Peak = analysis.PeakOf(frame);
+        }
+
+        /// <inheritdoc/>
         public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) =>
             Media?.GetNaturalLengthAsync(ct) ?? Task.FromResult<TimeSpan?>(null);
 

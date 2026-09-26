@@ -114,6 +114,6 @@ namespace EditSharp.Components.Clips
         }
 
         /// <inheritdoc/>
-        public override VideoClip Duplicate() => Transaction.Suppressed(() => new VideoClip(Graph.Duplicate()) { Name = Name, Start = Start, Duration = Duration, Speed = Speed });
+        public override VideoClip Duplicate() => Transaction.Suppressed(() => new VideoClip(Graph.Duplicate()) { Name = Name, Start = Start, Duration = Duration, Speed = Speed, Color = Color });
     }
 }

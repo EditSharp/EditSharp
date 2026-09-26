@@ -42,6 +42,10 @@ namespace EditSharp.Components.Clips
         [Editable("Speed", Order = 3, Min = 0.01, Max = 100, Step = 0.01, Editor = PropertyEditor.Percent, Default = 1.0)]
         public double Speed { get => _speed; set { Transaction.Set(this, ref _speed, value, static (o, v) => o._speed = v); TrimToSources(); } }
 
+        string? _color;
+        /// <summary>The colour an editor shows the clip in: a swatch name or a hex value, as the editor reads it; null for the editor's default.</summary>
+        public string? Color { get => _color; set => Transaction.Set(this, ref _color, value, static (o, v) => o._color = v); }
+
         /// <summary>How much content the clip covers: <see cref="Duration"/> × <see cref="Speed"/>.</summary>
         public TimeSpan ContentDuration => ToContentTime(Duration);
 

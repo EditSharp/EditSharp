@@ -39,5 +39,21 @@ namespace EditSharp.Components.Nodes
 
         //this node's audio processing for one session; null for nodes that don't process audio
         internal virtual IAudioProcessor? CreateAudioProcessor(AudioSession session) => null;
+
+        /// <summary>Describes what the node does to audio in the frequency domain, for one frame.</summary>
+        /// <remarks>
+        /// The default passes the first input through, or writes silence for a node with no audio input. A node that
+        /// changes audio overrides this so waveform displays show its effect without rendering samples. A node that
+        /// carries state between frames (a compressor's envelope) keeps it in <paramref name="state"/>.
+        /// </remarks>
+        /// <param name="context">The frame's content time and length.</param>
+        /// <param name="inputs">One frame per audio input port, in port order; an unwired input is silence.</param>
+        /// <param name="output">The frame to write the node's output into.</param>
+        /// <param name="state">Whatever the node kept from the previous frame; null on the first.</param>
+        public virtual void DescribeSpectrum(in Audio.Analysis.SpectralContext context, ReadOnlySpan<Audio.Analysis.SpectralFrame> inputs, Audio.Analysis.SpectralFrame output, ref object? state)
+        {
+            if (inputs.Length > 0) output.CopyFrom(inputs[0]);
+            else output.Clear();
+        }
     }
 }

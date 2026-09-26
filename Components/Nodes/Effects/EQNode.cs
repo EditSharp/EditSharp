@@ -1,3 +1,4 @@
+using System;
 using EditSharp.Audio.Processors;
 using EditSharp.Audio.Engine;
 using System.Collections.Generic;
@@ -57,6 +58,39 @@ namespace EditSharp.Components.Nodes.Effects
         /// <inheritdoc/>
         public override IEnumerable<IAnimatable> Animatables => Bands.SelectMany(b => new IAnimatable[] { b.FrequencyHz, b.GainDb, b.Q });
         internal override IAudioProcessor CreateAudioProcessor(AudioSession session) => new EqProcessor(this);
+
+        /// <inheritdoc/>
+        /// <remarks>Each band's energy is scaled by the bands' combined magnitude response at the band's centre frequency; the peak follows the total energy.</remarks>
+        public override void DescribeSpectrum(in Audio.Analysis.SpectralContext context, ReadOnlySpan<Audio.Analysis.SpectralFrame> inputs, Audio.Analysis.SpectralFrame output, ref object? state)
+        {
+            base.DescribeSpectrum(context, inputs, output, ref state);
+
+            float before = output.Energy;
+            if (before <= 0f || Bands.Count == 0) return;
+
+            const int sampleRate = Audio.Analysis.AudioAnalysis.SampleRate;
+
+            foreach (EQBand band in Bands)
+            {
+                double freq = System.Math.Clamp(band.FrequencyHz.Evaluate(context.ContentTime), 10.0, sampleRate / 2.0 - 10.0);
+                double gainDb = band.GainDb.Evaluate(context.ContentTime);
+                double q = System.Math.Max(0.05, band.Q.Evaluate(context.ContentTime));
+                (double b0, double b1, double b2, double a1, double a2) = Audio.Processors.EqProcessor.Peaking(freq, gainDb, q, sampleRate);
+
+                for (int i = 0; i < output.Bands.Length; i++)
+                {
+                    double w = 2 * System.Math.PI * Audio.Analysis.AudioAnalysis.BandCentresHz[i] / sampleRate;
+                    double cos1 = System.Math.Cos(w), sin1 = System.Math.Sin(w), cos2 = System.Math.Cos(2 * w), sin2 = System.Math.Sin(2 * w);
+                    double numRe = b0 + b1 * cos1 + b2 * cos2, numIm = -(b1 * sin1 + b2 * sin2);
+                    double denRe = 1 + a1 * cos1 + a2 * cos2, denIm = -(a1 * sin1 + a2 * sin2);
+                    double response = (numRe * numRe + numIm * numIm) / System.Math.Max(1e-12, denRe * denRe + denIm * denIm);
+                    output.Bands[i] = (float)(output.Bands[i] * response);
+                }
+            }
+
+            float after = output.Energy;
+            output.Peak *= MathF.Sqrt(System.Math.Max(0f, after) / before);
+        }
 
         /// <inheritdoc/>
         public override Node Duplicate() => Transaction.Suppressed(() => new EQNode

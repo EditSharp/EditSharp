@@ -191,6 +191,23 @@ namespace EditSharp.Components
             foreach (Clip clip in Members) clip.Delete();
         }
 
+        /// <summary>Dissolves the group: every member is left unlinked, where it is.</summary>
+        public void Unlink()
+        {
+            foreach (Clip clip in Members) clip.LinkGroupId = null;
+        }
+
+        /// <summary>Takes one clip out of the group; a group left with one member is dissolved.</summary>
+        /// <param name="clip">The clip to unlink.</param>
+        public void Remove(Clip clip)
+        {
+            ArgumentNullException.ThrowIfNull(clip);
+            if (clip.LinkGroupId != Id) return;
+
+            clip.LinkGroupId = null;
+            if (Members.Count == 1) Unlink();
+        }
+
         /// <summary>A linked video and audio clip that both play one timeline.</summary>
         /// <remarks>The clips aren't placed; add each to a channel of its kind. Each has its own source, so trimming one alone doesn't move the other's in-point. Nothing is recorded in history.</remarks>
         /// <param name="timeline">The timeline to play.</param>

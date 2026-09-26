@@ -52,6 +52,37 @@ namespace EditSharp.Components.Nodes.Input
         /// <returns>Null.</returns>
         public override Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) => Task.FromResult<TimeSpan?>(null);
 
+        /// <inheritdoc/>
+        /// <remarks>The fundamental and its harmonics land in their bands with the waveform's harmonic weights; the peak is the amplitude.</remarks>
+        public override void DescribeSpectrum(in Audio.Analysis.SpectralContext context, ReadOnlySpan<Audio.Analysis.SpectralFrame> inputs, Audio.Analysis.SpectralFrame output, ref object? state)
+        {
+            output.Clear();
+
+            float amplitude = Amplitude.Evaluate(context.ContentTime);
+            double fundamental = Frequency.Evaluate(context.ContentTime);
+            if (amplitude <= 0f || fundamental <= 0.0) return;
+
+            //energies of a unit-amplitude wave's harmonics: sine has one, the rest fall off with the harmonic number
+            for (int n = 1; n <= 16; n++)
+            {
+                double weight = Waveform switch
+                {
+                    Waveform.Sine => n == 1 ? 0.5 : 0.0,
+                    Waveform.Square => n % 2 == 1 ? 8.0 / (System.Math.PI * System.Math.PI * n * n) : 0.0,
+                    Waveform.Sawtooth => 2.0 / (System.Math.PI * System.Math.PI * n * n),
+                    Waveform.Triangle => n % 2 == 1 ? 32.0 / (System.Math.Pow(System.Math.PI, 4) * System.Math.Pow(n, 4)) : 0.0,
+                    _ => 0.0,
+                };
+
+                if (weight <= 0.0) continue;
+
+                int band = Audio.Analysis.AudioAnalysis.BandOf(fundamental * n);
+                if (band >= 0) output.Bands[band] += (float)(weight * amplitude * amplitude);
+            }
+
+            output.Peak = System.Math.Min(1f, amplitude);
+        }
+
         internal override Task<IPreparedAudioSource> PrepareAsync(CancellationToken ct = default) =>
             Task.FromResult<IPreparedAudioSource>(new Prepared(this));
 

@@ -35,5 +35,12 @@ namespace EditSharp.Components.Nodes.Effects
 
         /// <inheritdoc/>
         public override Node Duplicate() => Transaction.Suppressed(() => new GainNode { Enabled = Enabled, Gain = Gain.Duplicate() });
+
+        /// <inheritdoc/>
+        public override void DescribeSpectrum(in Audio.Analysis.SpectralContext context, ReadOnlySpan<Audio.Analysis.SpectralFrame> inputs, Audio.Analysis.SpectralFrame output, ref object? state)
+        {
+            base.DescribeSpectrum(context, inputs, output, ref state);
+            output.Scale(Gain.Evaluate(context.ContentTime));
+        }
     }
 }

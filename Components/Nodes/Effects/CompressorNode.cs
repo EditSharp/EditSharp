@@ -48,6 +48,27 @@ namespace EditSharp.Components.Nodes.Effects
         internal override IAudioProcessor CreateAudioProcessor(AudioSession session) => new CompressorProcessor(this);
 
         /// <inheritdoc/>
+        /// <remarks>The envelope follows the frames' peaks with the attack and release times, one step per frame; the gain it computes scales the frame.</remarks>
+        public override void DescribeSpectrum(in Audio.Analysis.SpectralContext context, ReadOnlySpan<Audio.Analysis.SpectralFrame> inputs, Audio.Analysis.SpectralFrame output, ref object? state)
+        {
+            base.DescribeSpectrum(context, inputs, output, ref state);
+
+            const double floorDb = -120.0;
+            double envelopeDb = state is double kept ? kept : floorDb;
+
+            double inputDb = output.Peak <= 1e-9f ? floorDb : 20.0 * System.Math.Log10(output.Peak);
+            double ms = System.Math.Max(0.01, inputDb > envelopeDb ? AttackMs.Evaluate(context.ContentTime) : ReleaseMs.Evaluate(context.ContentTime));
+            double coeff = System.Math.Exp(-context.FrameSeconds * 1000.0 / ms);
+            envelopeDb = coeff * envelopeDb + (1 - coeff) * inputDb;
+            state = envelopeDb;
+
+            double threshold = Threshold.Evaluate(context.ContentTime);
+            double ratio = System.Math.Max(1.0, Ratio.Evaluate(context.ContentTime));
+            double reductionDb = envelopeDb > threshold ? (threshold - envelopeDb) * (1.0 - 1.0 / ratio) : 0.0;
+            output.Scale((float)System.Math.Pow(10, (reductionDb + MakeupGainDb.Evaluate(context.ContentTime)) / 20.0));
+        }
+
+        /// <inheritdoc/>
         public override Node Duplicate() => Transaction.Suppressed(() => new CompressorNode
         {
             Enabled = Enabled,

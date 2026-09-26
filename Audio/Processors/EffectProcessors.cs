@@ -92,7 +92,7 @@ namespace EditSharp.Audio.Processors
             }
         }
 
-        private static (double b0, double b1, double b2, double a1, double a2) Peaking(double freq, double gainDb, double q, int sampleRate)
+        internal static (double b0, double b1, double b2, double a1, double a2) Peaking(double freq, double gainDb, double q, int sampleRate)
         {
             double a = Math.Pow(10, gainDb / 40.0);
             double w0 = 2 * Math.PI * freq / sampleRate;

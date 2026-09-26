@@ -44,6 +44,52 @@ namespace EditSharp.Components.Media
         public override async Task<TimeSpan?> GetNaturalLengthAsync(CancellationToken ct = default) =>
             (await ProbeAsync(Path, ct)).Duration;
 
+        /// <summary>The sample rate peaks are measured at.</summary>
+        public const int PeakSampleRate = 48000;
+
+        /// <summary>Peaks of a stretch of the file, for drawing a waveform; nothing stays open afterwards.</summary>
+        /// <param name="start">Where the stretch starts, in the file's own time.</param>
+        /// <param name="duration">How long the stretch is.</param>
+        /// <param name="buckets">How many equal buckets to split it into.</param>
+        /// <param name="ct">Cancels reading.</param>
+        /// <returns>The peaks, one bucket per column; buckets past the end of the file are 0.</returns>
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="duration"/> isn't positive, or <paramref name="buckets"/> isn't positive.</exception>
+        /// <exception cref="SourceUnavailableException">The file can't provide samples.</exception>
+        /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
+        public virtual async Task<AudioPeaks> GetPeaksAsync(TimeSpan start, TimeSpan duration, int buckets, CancellationToken ct = default)
+        {
+            if (duration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(duration), "duration must be positive.");
+            if (buckets <= 0) throw new ArgumentOutOfRangeException(nameof(buckets), "buckets must be positive.");
+
+            using IPreparedAudioSource prepared = await PrepareAsync(ct).ConfigureAwait(false);
+
+            return await Task.Run(() =>
+            {
+                using IAudioSampleReader reader = prepared.OpenReader(new AudioReaderOptions(PeakSampleRate, 1, start < TimeSpan.Zero ? TimeSpan.Zero : start));
+
+                long total = (long)Math.Round(duration.TotalSeconds * PeakSampleRate);
+                var peaks = new PeakAccumulator(buckets, total);
+                float[] block = new float[8192];
+                long read = 0;
+
+                while (read < total)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    int wanted = (int)Math.Min(block.Length, total - read);
+                    int got;
+                    try { got = reader.Read(block.AsSpan(0, wanted)); }
+                    catch (SourceUnavailableException e) when (e.Reason == SourceUnavailableReason.EndOfSource) { break; }
+
+                    if (got <= 0) break;
+                    peaks.Add(block.AsSpan(0, got), read, 1);
+                    read += got;
+                }
+
+                return peaks.Result();
+            }, ct).ConfigureAwait(false);
+        }
+
         /// <summary>Readies the file for one session: probes it.</summary>
         /// <param name="ct">Cancels preparing.</param>
         /// <returns>The prepared media, whose readers take time in the file; the caller disposes it.</returns>
