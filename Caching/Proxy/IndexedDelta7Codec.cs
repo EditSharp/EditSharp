@@ -66,7 +66,24 @@ namespace EditSharp.Caching.Proxy
             WritePalette(palette, paletteOut);
         }
 
-        //expands one frame to RGBA8888 against the file's palette; alpha is always 255
+        //the signed change each delta code makes to each channel, so decoding
+        //a delta is three table reads and three clamps
+        private static readonly int[] DeltaR = new int[256];
+        private static readonly int[] DeltaG = new int[256];
+        private static readonly int[] DeltaB = new int[256];
+
+        static IndexedDelta7Codec()
+        {
+            for (int code = ModeBit; code < 256; code++)
+            {
+                DeltaR[code] = (((code >> (GLevelBits + BLevelBits)) & (RLevelCount - 1)) - ZeroRLevel) * RStep;
+                DeltaG[code] = (((code >> BLevelBits) & (GLevelCount - 1)) - ZeroGLevel) * GStep;
+                DeltaB[code] = ((code & (BLevelCount - 1)) - ZeroBLevel) * BStep;
+            }
+        }
+
+        //expands one frame to RGBA8888 against the file's palette; alpha is always 255.
+        //rows are independent, so they decode on every core at once
         public static void Decode(
             ReadOnlySpan<byte> palette, ReadOnlySpan<byte> pixels, int width, int height, Span<byte> destination)
         {
@@ -81,39 +98,57 @@ namespace EditSharp.Caching.Proxy
                 throw new ArgumentException(
                     $"destination must be exactly {pixelCount * 4} bytes for {pixelCount} pixels.", nameof(destination));
 
-            for (int y = 0; y < height; y++)
+            //the palette as packed little-endian RGBA, one read per pixel
+            uint[] rgba = new uint[PaletteSize];
+            for (int i = 0; i < PaletteSize; i++)
+                rgba[i] = palette[i * 3] | ((uint)palette[i * 3 + 1] << 8) | ((uint)palette[i * 3 + 2] << 16) | 0xFF000000u;
+
+            //spans can't cross into the parallel body: the buffers are pinned for its lifetime
+            unsafe
             {
-                byte prevR = 0, prevG = 0, prevB = 0;
+                fixed (byte* codes = pixels)
+                fixed (byte* output = destination)
+                fixed (uint* paletteRgba = rgba)
+                {
+                    nint codesAt = (nint)codes, outputAt = (nint)output, paletteAt = (nint)paletteRgba;
+                    int workers = Math.Clamp(Environment.ProcessorCount, 1, Math.Max(1, height / 8));
+
+                    System.Threading.Tasks.Parallel.For(0, workers, worker =>
+                    {
+                        int from = (int)((long)height * worker / workers);
+                        int to = (int)((long)height * (worker + 1) / workers);
+                        DecodeRows((byte*)codesAt, (uint*)outputAt, (uint*)paletteAt, width, from, to);
+                    });
+                }
+            }
+        }
+
+        private static unsafe void DecodeRows(byte* codes, uint* output, uint* paletteRgba, int width, int fromRow, int toRow)
+        {
+            for (int y = fromRow; y < toRow; y++)
+            {
+                byte* row = codes + (long)y * width;
+                uint* dest = output + (long)y * width;
+                int r = 0, g = 0, b = 0;
 
                 for (int x = 0; x < width; x++)
                 {
-                    byte code = pixels[y * width + x];
-                    byte r, g, b;
+                    byte code = row[x];
 
                     if ((code & ModeBit) == 0)
                     {
-                        int idx = code & PaletteIndexMask;
-                        int paletteOffset = idx * 3;
-                        r = palette[paletteOffset];
-                        g = palette[paletteOffset + 1];
-                        b = palette[paletteOffset + 2];
-                    }
-                    else
-                    {
-                        int rLevel = ((code >> (GLevelBits + BLevelBits)) & (RLevelCount - 1)) - ZeroRLevel;
-                        int gLevel = ((code >> BLevelBits) & (GLevelCount - 1)) - ZeroGLevel;
-                        int bLevel = (code & (BLevelCount - 1)) - ZeroBLevel;
-
-                        ApplyDelta(prevR, prevG, prevB, rLevel, gLevel, bLevel, out r, out g, out b);
+                        uint packed = paletteRgba[code];
+                        r = (int)(packed & 0xFF);
+                        g = (int)((packed >> 8) & 0xFF);
+                        b = (int)((packed >> 16) & 0xFF);
+                        dest[x] = packed;
+                        continue;
                     }
 
-                    int destOffset = (y * width + x) * 4;
-                    destination[destOffset] = r;
-                    destination[destOffset + 1] = g;
-                    destination[destOffset + 2] = b;
-                    destination[destOffset + 3] = 255;
-
-                    prevR = r; prevG = g; prevB = b;
+                    r = Math.Clamp(r + DeltaR[code], 0, 255);
+                    g = Math.Clamp(g + DeltaG[code], 0, 255);
+                    b = Math.Clamp(b + DeltaB[code], 0, 255);
+                    dest[x] = (uint)r | ((uint)g << 8) | ((uint)b << 16) | 0xFF000000u;
                 }
             }
         }

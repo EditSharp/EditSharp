@@ -287,6 +287,8 @@ namespace EditSharp.Editing
         {
             if (ItemType is null) throw new InvalidOperationException($"{DisplayName} is not a list.");
 
+            if (ItemType == typeof(string)) return string.Empty;
+
             if (ItemIsAnimatable)
             {
                 Type inner = ItemValueType!;

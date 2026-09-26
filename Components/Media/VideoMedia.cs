@@ -42,7 +42,8 @@ namespace EditSharp.Components.Media
         /// </remarks>
         public AudioMedia? Audio
         {
-            get => _audio;
+            //a still image has no sound to offer, once the probe has said it's one
+            get => _audio is not null && MediaProbe.TryGetCached(Path, out MediaInfo info) && info.IsStillImage ? null : _audio;
             set
             {
                 Transaction.Set(this, ref _audio, value, static (o, v) => o._audio = v);

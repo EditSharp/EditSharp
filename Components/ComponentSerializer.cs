@@ -150,17 +150,12 @@ namespace EditSharp.Components
             if (!typeof(IMedia).IsAssignableFrom(info.Type) || info.Kind != JsonTypeInfoKind.Object) return;
 
             for (int i = info.Properties.Count - 1; i >= 0; i--)
-                if (info.Properties[i].Name is "name" or "usedBy" or "tags") info.Properties.RemoveAt(i);
+                if (info.Properties[i].Name is "name" or "usedBy") info.Properties.RemoveAt(i);
 
             JsonPropertyInfo name = info.CreateJsonPropertyInfo(typeof(string), "name");
             name.Get = static o => ((IMedia)o).CustomName;
             name.Set = static (o, v) => ((IMedia)o).CustomName = (string?)v;
             info.Properties.Add(name);
-
-            JsonPropertyInfo tags = info.CreateJsonPropertyInfo(typeof(List<string>), "tags");
-            tags.Get = static o => ((IMedia)o).TagList;
-            tags.Set = static (o, v) => ((IMedia)o).TagList = (List<string>?)v ?? [];
-            info.Properties.Add(tags);
         }
 
         //what a node saves: its [Editable] properties and nothing else; a media among them goes by its Id

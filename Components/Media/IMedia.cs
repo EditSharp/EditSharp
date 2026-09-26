@@ -62,9 +62,10 @@ namespace EditSharp.Components.Media
         protected virtual string DefaultName =>
             System.IO.Path.GetFileName(Path) is { Length: > 0 } file ? file : MediaKinds.Of(this)?.DisplayName ?? GetType().Name;
 
-        private readonly List<string> _tags = [];
+        private List<string> _tags = [];
         /// <summary>Labels the user has put on the media, for editors to sort and filter by.</summary>
-        public IReadOnlyList<string> Tags => _tags;
+        [Editable("Tags", Order = -90)]
+        public List<string> Tags { get => _tags; set => Transaction.Set(this, ref _tags, value ?? [], static (o, v) => o._tags = v); }
 
         /// <summary>Adds a tag.</summary>
         /// <remarks>Nothing happens for a blank tag or one the media already has.</remarks>
@@ -83,13 +84,6 @@ namespace EditSharp.Components.Media
             int index = _tags.IndexOf(tag);
             if (index < 0) return;
             Transaction.Apply(() => _tags.Remove(tag), () => _tags.Insert(Math.Min(index, _tags.Count), tag), "untag media");
-        }
-
-        //the tags as saved ("tags")
-        internal List<string> TagList
-        {
-            get => _tags;
-            set { _tags.Clear(); if (value is not null) _tags.AddRange(value); }
         }
 
         private int _probing;
