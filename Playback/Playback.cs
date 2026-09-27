@@ -1230,7 +1230,7 @@ namespace EditSharp.Playback
             _videoTask = null;
 
             //a scrub session still being made lands before it's torn down, or its context would outlive the Playback
-            try { _scrubSetupTask?.GetAwaiter().GetResult(); }
+            try { _scrubSetupTask?.Wait(TimeSpan.FromSeconds(10)); }
             catch (Exception) { /* failed or cancelled: nothing was made */ }
 
             EndScrubbing();
