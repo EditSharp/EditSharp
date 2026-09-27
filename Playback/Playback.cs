@@ -187,6 +187,9 @@ namespace EditSharp.Playback
         //Finishing doesn't mean every proxy is ready: a missing one shows its placeholder
         private Task? _scrubSetupTask;
 
+        //where this Playback was made, for GpuDiagnostics while it's tracking
+        private readonly string? _origin = GpuDiagnostics.TrackCreation ? Environment.StackTrace : null;
+
         //the latest scrub's token: a new scrub cancels it, so an older one stops instead of queueing
         private CancellationTokenSource? _scrubSupersedeCts;
 
@@ -494,6 +497,9 @@ namespace EditSharp.Playback
         //Nothing builds proxies: a source without one shows ProxyMissing or ProxyPending
         private async Task BuildScrubSessionAsync(int width, int height)
         {
+            //a disposed Playback makes no new GPU context: nothing would ever free it
+            if (_disposed) throw new ObjectDisposedException(nameof(Playback));
+
             if (_scrubGpuContext == null)
             {
                 _scrubGpuThread ??= new GpuThreadDispatcher("EditSharp-ScrubGPU");
@@ -508,6 +514,7 @@ namespace EditSharp.Playback
 
                 _scrubGpuContext = context;
                 _scrubSurfacePool = pool;
+                if (_origin != null) GpuDiagnostics.Created(context, _origin);
             }
 
             _scrubContentSource = new ClipContentSource(new ContentSourceOptions(
@@ -1221,6 +1228,10 @@ namespace EditSharp.Playback
             try { _videoTask?.GetAwaiter().GetResult(); }
             catch (Exception) { /* cancelled or failed: either way, finished */ }
             _videoTask = null;
+
+            //a scrub session still being made lands before it's torn down, or its context would outlive the Playback
+            try { _scrubSetupTask?.GetAwaiter().GetResult(); }
+            catch (Exception) { /* failed or cancelled: nothing was made */ }
 
             EndScrubbing();
 

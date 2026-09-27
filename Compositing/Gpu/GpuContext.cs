@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Runtime.InteropServices;
 using SkiaSharp;
 using EditSharp.Video;
@@ -27,10 +28,21 @@ namespace EditSharp.Compositing.Gpu
         private readonly ID3D12Device? _device;
         private readonly ID3D12CommandQueue? _queue;
 
+        private static int _live;
+        private bool _disposed;
+
+        /// <summary>How many GPU-backed contexts exist and haven't been disposed; a number that only grows means a leak.</summary>
+        public static int LiveCount => Volatile.Read(ref _live);
+
         private GpuContext(
             GRContext? grContext, IDXGIFactory4? factory, IDXGIAdapter1? adapter,
             ID3D12Device? device, ID3D12CommandQueue? queue)
         {
+            if (grContext != null)
+            {
+                Interlocked.Increment(ref _live);
+                if (GpuDiagnostics.TrackCreation) GpuDiagnostics.Created(this, Environment.StackTrace);
+            }
             GRContext = grContext;
             _factory = factory;
             _adapter = adapter;
@@ -193,6 +205,14 @@ namespace EditSharp.Compositing.Gpu
 
         public void Dispose()
         {
+            if (_disposed) return;
+            _disposed = true;
+            if (GRContext != null)
+            {
+                Interlocked.Decrement(ref _live);
+                GpuDiagnostics.Disposed(this);
+            }
+
             //let everything submitted finish before the device it runs on is destroyed
             if (GRContext != null)
             {
