@@ -413,6 +413,8 @@ namespace EditSharp.Playback
             {
                 //ConfigureAwait(false) while holding the gate: resuming on a UI thread's context could deadlock
                 //against that thread waiting on the gate
+                //off the caller's context, so a UI thread waiting on the gate is never needed to finish
+                await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
                 await _scrubGate.WaitAsync(linked).ConfigureAwait(false);
 
                 //restored when this render ends; only one scrub is inside the gate at a time
@@ -541,6 +543,7 @@ namespace EditSharp.Playback
             int width = (int)RenderSettings.Resolution.X;
             int height = (int)RenderSettings.Resolution.Y;
 
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             await _scrubGate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
@@ -589,6 +592,7 @@ namespace EditSharp.Playback
             contentTime = Time.Max(Time.Zero, contentTime);
             Time animationTime = clip.ContentTimeOfMedia(contentTime);
 
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             await _scrubGate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
