@@ -187,6 +187,9 @@ namespace EditSharp.Playback
         //Finishing doesn't mean every proxy is ready: a missing one shows its placeholder
         private Task? _scrubSetupTask;
 
+        //where this Playback was made, for GpuDiagnostics while it's tracking
+        private readonly string? _origin = GpuDiagnostics.TrackCreation ? Environment.StackTrace : null;
+
         //the latest scrub's token: a new scrub cancels it, so an older one stops instead of queueing
         private CancellationTokenSource? _scrubSupersedeCts;
 
@@ -410,6 +413,8 @@ namespace EditSharp.Playback
             {
                 //ConfigureAwait(false) while holding the gate: resuming on a UI thread's context could deadlock
                 //against that thread waiting on the gate
+                //off the caller's context, so a UI thread waiting on the gate is never needed to finish
+                await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
                 await _scrubGate.WaitAsync(linked).ConfigureAwait(false);
 
                 //restored when this render ends; only one scrub is inside the gate at a time
@@ -494,6 +499,9 @@ namespace EditSharp.Playback
         //Nothing builds proxies: a source without one shows ProxyMissing or ProxyPending
         private async Task BuildScrubSessionAsync(int width, int height)
         {
+            //a disposed Playback makes no new GPU context: nothing would ever free it
+            if (_disposed) throw new ObjectDisposedException(nameof(Playback));
+
             if (_scrubGpuContext == null)
             {
                 _scrubGpuThread ??= new GpuThreadDispatcher("EditSharp-ScrubGPU");
@@ -508,6 +516,7 @@ namespace EditSharp.Playback
 
                 _scrubGpuContext = context;
                 _scrubSurfacePool = pool;
+                if (_origin != null) GpuDiagnostics.Created(context, _origin);
             }
 
             _scrubContentSource = new ClipContentSource(new ContentSourceOptions(
@@ -534,6 +543,7 @@ namespace EditSharp.Playback
             int width = (int)RenderSettings.Resolution.X;
             int height = (int)RenderSettings.Resolution.Y;
 
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             await _scrubGate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
@@ -582,6 +592,7 @@ namespace EditSharp.Playback
             contentTime = Time.Max(Time.Zero, contentTime);
             Time animationTime = clip.ContentTimeOfMedia(contentTime);
 
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             await _scrubGate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
@@ -719,16 +730,17 @@ namespace EditSharp.Playback
         /// <remarks><see cref="Play"/> calls it. The scrub GPU context is kept.</remarks>
         public void EndScrubbing()
         {
+            //the scrub holding the gate is told to stop first, or a slow one keeps this waiting
+            CancellationTokenSource? pending = Interlocked.Exchange(ref _scrubSupersedeCts, null);
+            if (pending != null)
+            {
+                pending.Cancel();
+                pending.Dispose();
+            }
+
             _scrubGate.Wait();
             try
             {
-                CancellationTokenSource? pending = Interlocked.Exchange(ref _scrubSupersedeCts, null);
-                if (pending != null)
-                {
-                    pending.Cancel();
-                    pending.Dispose();
-                }
-
                 _scrubSetupTask = null;
 
                 _scrubContentSource?.Dispose();
@@ -1221,6 +1233,10 @@ namespace EditSharp.Playback
             try { _videoTask?.GetAwaiter().GetResult(); }
             catch (Exception) { /* cancelled or failed: either way, finished */ }
             _videoTask = null;
+
+            //a scrub session still being made lands before it's torn down, or its context would outlive the Playback
+            try { _scrubSetupTask?.Wait(TimeSpan.FromSeconds(10)); }
+            catch (Exception) { /* failed or cancelled: nothing was made */ }
 
             EndScrubbing();
 

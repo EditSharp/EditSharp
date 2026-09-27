@@ -122,7 +122,7 @@ namespace EditSharp.Compositing.Sources
                 }
             }
 
-            try { await Task.WhenAll(pending).WaitAsync(ct); }
+            try { await Task.WhenAll(pending).WaitAsync(ct).ConfigureAwait(false); }
             catch (Exception) when (!ct.IsCancellationRequested) { /* surfaced per input when read */ }
         }
 
