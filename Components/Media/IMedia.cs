@@ -87,6 +87,7 @@ namespace EditSharp.Components.Media
         }
 
         private int _probing;
+        private (long Length, long WriteTicks)? _failedProbe;
 
         /// <summary>What probing the file found, if it has been probed.</summary>
         /// <remarks>A file not probed yet starts its probe in the background, and <see cref="InfoAvailable"/> fires when that finishes.</remarks>
@@ -96,11 +97,18 @@ namespace EditSharp.Components.Media
         {
             if (MediaProbe.TryGetCached(Path, out info)) return true;
 
-            if (!string.IsNullOrEmpty(Path) && File.Exists(Path) && Interlocked.Exchange(ref _probing, 1) == 0)
+            //a file that failed its last probe isn't probed again until it changes
+            if (string.IsNullOrEmpty(Path) || !File.Exists(Path)) return false;
+            FileInfo file = new(Path);
+            (long, long) stamp = (file.Length, file.LastWriteTimeUtc.Ticks);
+            if (_failedProbe == stamp) return false;
+
+            if (Interlocked.Exchange(ref _probing, 1) == 0)
             {
                 _ = MediaProbe.ProbeCachedAsync(Path).ContinueWith(t =>
                 {
                     _ = t.Exception;
+                    _failedProbe = t.IsCompletedSuccessfully ? null : stamp;
                     _probing = 0;
                     InfoAvailable?.Invoke(this);
                 }, TaskScheduler.Default);
