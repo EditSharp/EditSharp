@@ -730,16 +730,17 @@ namespace EditSharp.Playback
         /// <remarks><see cref="Play"/> calls it. The scrub GPU context is kept.</remarks>
         public void EndScrubbing()
         {
+            //the scrub holding the gate is told to stop first, or a slow one keeps this waiting
+            CancellationTokenSource? pending = Interlocked.Exchange(ref _scrubSupersedeCts, null);
+            if (pending != null)
+            {
+                pending.Cancel();
+                pending.Dispose();
+            }
+
             _scrubGate.Wait();
             try
             {
-                CancellationTokenSource? pending = Interlocked.Exchange(ref _scrubSupersedeCts, null);
-                if (pending != null)
-                {
-                    pending.Cancel();
-                    pending.Dispose();
-                }
-
                 _scrubSetupTask = null;
 
                 _scrubContentSource?.Dispose();
